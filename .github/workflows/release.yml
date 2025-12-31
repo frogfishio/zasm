@@ -1,0 +1,86 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bison flex clang
+
+      - name: Install deps (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install bison flex
+          echo "BISON=$(brew --prefix bison)/bin/bison" >> "$GITHUB_ENV"
+          echo "FLEX=$(brew --prefix flex)/bin/flex" >> "$GITHUB_ENV"
+
+      - name: Fetch Wasmtime C API
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver="18.0.1"
+          arch="$(uname -m)"
+          os="$(uname -s)"
+          case "$arch" in
+            x86_64) arch="x86_64" ;;
+            arm64|aarch64) arch="aarch64" ;;
+            *) echo "unsupported arch $arch" >&2; exit 1 ;;
+          esac
+          case "$os" in
+            Linux) os="linux" ;;
+            Darwin) os="macos" ;;
+            *) echo "unsupported os $os" >&2; exit 1 ;;
+          esac
+          name="wasmtime-v${ver}-${arch}-${os}-c-api"
+          url="https://github.com/bytecodealliance/wasmtime/releases/download/v${ver}/${name}.tar.xz"
+          curl -L "$url" -o /tmp/wasmtime.tar.xz
+          mkdir -p external
+          tar -xf /tmp/wasmtime.tar.xz -C /tmp
+          rm -rf external/wasmtime-c-api
+          mv "/tmp/${name}" external/wasmtime-c-api
+
+      - name: Build + test
+        run: |
+          make test-asm-suite
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -czf "dist/zasm-${{ runner.os }}-${{ runner.arch }}.tar.gz" -C bin zas zld zrun
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: zasm-${{ runner.os }}-${{ runner.arch }}
+          path: dist/*.tar.gz
+
+  release:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/zasm-*.tar.gz
