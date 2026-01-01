@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ZASM Mnemonics Registry</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&display=swap');
+    :root {
+      --bg: #0f1828;
+      --card: rgba(255, 255, 255, 0.08);
+      --text: #f4f7ff;
+      --muted: #a8b3cf;
+      --accent: #f6c343;
+      --border: rgba(244, 247, 255, 0.2);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; font-family: 'Space Grotesk', 'IBM Plex Sans', sans-serif; background: radial-gradient(circle at top left, #1f3158, #0b1321 70%); color: var(--text); padding: 3rem 1.5rem; }
+    h1 { font-size: 2.25rem; margin-bottom: 0.5rem; }
+    p.lede { max-width: 760px; color: var(--muted); line-height: 1.6; margin-bottom: 2rem; }
+    table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 1rem; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.35); }
+    thead { background: rgba(15, 24, 40, 0.65); backdrop-filter: blur(6px); }
+    th, td { text-align: left; padding: 0.9rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { font-weight: 600; color: var(--accent); letter-spacing: 0.05em; font-size: 0.9rem; text-transform: uppercase; }
+    tbody tr:nth-child(odd) { background: rgba(255, 255, 255, 0.02); }
+    tbody tr:hover { background: rgba(246, 195, 67, 0.07); }
+    td:nth-child(1) { font-weight: 600; }
+    pre { margin: 0; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 0.78rem; line-height: 1.4; white-space: pre-wrap; word-break: break-all; color: #fefefe; }
+    @media (max-width: 960px) {
+      table, thead, tbody, th, td, tr { display: block; }
+      thead { display: none; }
+      tbody tr { padding: 1rem; border-bottom: 1px solid var(--border); }
+      td { border: none; padding: 0.65rem 0; }
+      td::before { content: attr(data-label); display: block; color: var(--muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; margin-bottom: 0.25rem; }
+    }
+  </style>
+</head>
+<body>
+  <h1>ZASM Mnemonics Registry</h1>
+  <p class="lede">Authoritative index of every ZASM mnemonic plus the JSONL record emitted by the assembler.</p>
+  <table>
+    <thead>
+      <tr>
+        <th>ZASM mnemonic</th>
+        <th>Operand shape (suggested)</th>
+        <th>WASM equivalent</th>
+        <th>What it does</th>
+        <th>JSONL</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td data-label="ZASM mnemonic">ADD</td>
+        <td data-label="Operand shape (suggested)">ADD HL, x</td>
+        <td data-label="WASM equivalent">i32.add</td>
+        <td data-label="What it does">Add immediates or DE into HL.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ADD&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;}],&quot;loc&quot;:{&quot;line&quot;:9}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">AND</td>
+        <td data-label="Operand shape (suggested)">AND r, x</td>
+        <td data-label="WASM equivalent">i32.and</td>
+        <td data-label="What it does">Bitwise AND register with scalar/symbol.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;AND&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:255}],&quot;loc&quot;:{&quot;line&quot;:11}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">CALL</td>
+        <td data-label="Operand shape (suggested)">CALL target</td>
+        <td data-label="WASM equivalent">call target / host stub</td>
+        <td data-label="What it does">Invoke a user function or Lembeh primitive.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;CALL&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;_out&quot;}],&quot;loc&quot;:{&quot;line&quot;:12}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">CLZ</td>
+        <td data-label="Operand shape (suggested)">CLZ r</td>
+        <td data-label="WASM equivalent">i32.clz</td>
+        <td data-label="What it does">Count leading zeros of a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;CLZ&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;}],&quot;loc&quot;:{&quot;line&quot;:33}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">CP</td>
+        <td data-label="Operand shape (suggested)">CP HL, x</td>
+        <td data-label="WASM equivalent">i32.sub -&gt; cmp</td>
+        <td data-label="What it does">Subtract RHS from HL into comparison scratch.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;CP&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;}],&quot;loc&quot;:{&quot;line&quot;:7}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">CTZ</td>
+        <td data-label="Operand shape (suggested)">CTZ r</td>
+        <td data-label="WASM equivalent">i32.ctz</td>
+        <td data-label="What it does">Count trailing zeros of a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;CTZ&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;}],&quot;loc&quot;:{&quot;line&quot;:34}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DB</td>
+        <td data-label="Operand shape (suggested)">DB value[, ...]</td>
+        <td data-label="WASM equivalent">data bytes</td>
+        <td data-label="What it does">Define literal bytes (optionally labeled).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;DB&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;str&quot;,&quot;v&quot;:&quot;Hello&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:10},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:0}],&quot;loc&quot;:{&quot;line&quot;:5},&quot;name&quot;:&quot;msg&quot;}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DEC</td>
+        <td data-label="Operand shape (suggested)">DEC r (DE|BC)</td>
+        <td data-label="WASM equivalent">i32.sub</td>
+        <td data-label="What it does">Decrement DE or BC by one.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;DEC&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;}],&quot;loc&quot;:{&quot;line&quot;:18}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DIVS</td>
+        <td data-label="Operand shape (suggested)">DIVS r, x</td>
+        <td data-label="WASM equivalent">i32.div_s</td>
+        <td data-label="What it does">Signed division (traps like WASM).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;DIVS&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:3}],&quot;loc&quot;:{&quot;line&quot;:19}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DIVU</td>
+        <td data-label="Operand shape (suggested)">DIVU r, x</td>
+        <td data-label="WASM equivalent">i32.div_u</td>
+        <td data-label="What it does">Unsigned division (traps on div0).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;DIVU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:20}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DROP</td>
+        <td data-label="Operand shape (suggested)">DROP r</td>
+        <td data-label="WASM equivalent">drop</td>
+        <td data-label="What it does">Explicitly discard a register value.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;DROP&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;IX&quot;}],&quot;loc&quot;:{&quot;line&quot;:47}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">DW</td>
+        <td data-label="Operand shape (suggested)">DW value[, ...]</td>
+        <td data-label="WASM equivalent">data words</td>
+        <td data-label="What it does">Define 32-bit little-endian words.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;DW&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1024}],&quot;loc&quot;:{&quot;line&quot;:6},&quot;name&quot;:&quot;msg_len&quot;}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">EQ</td>
+        <td data-label="Operand shape (suggested)">EQ r, x</td>
+        <td data-label="WASM equivalent">i32.eq</td>
+        <td data-label="What it does">Compare equals -&gt; 0/1 in destination register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;EQ&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:21}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">EQU</td>
+        <td data-label="Operand shape (suggested)">name: EQU value</td>
+        <td data-label="WASM equivalent">const alias</td>
+        <td data-label="What it does">Bind a label to a constant expression.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;EQU&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:16}],&quot;loc&quot;:{&quot;line&quot;:12},&quot;name&quot;:&quot;buf_size&quot;}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">EXTERN</td>
+        <td data-label="Operand shape (suggested)">EXTERN module, field, local</td>
+        <td data-label="WASM equivalent">import</td>
+        <td data-label="What it does">Declare an imported host symbol.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;EXTERN&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;str&quot;,&quot;v&quot;:&quot;env&quot;},{&quot;t&quot;:&quot;str&quot;,&quot;v&quot;:&quot;noop&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;noop&quot;}],&quot;loc&quot;:{&quot;line&quot;:4}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">FILL</td>
+        <td data-label="Operand shape (suggested)">FILL (HL dst, A byte, BC len)</td>
+        <td data-label="WASM equivalent">memory.fill</td>
+        <td data-label="What it does">Bulk fill memory via Lembeh ABI registers.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;FILL&quot;,&quot;ops&quot;:[],&quot;loc&quot;:{&quot;line&quot;:51}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">GES</td>
+        <td data-label="Operand shape (suggested)">GES r, x</td>
+        <td data-label="WASM equivalent">i32.ge_s</td>
+        <td data-label="What it does">Signed &gt;= compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;GES&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:31}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">GEU</td>
+        <td data-label="Operand shape (suggested)">GEU r, x</td>
+        <td data-label="WASM equivalent">i32.ge_u</td>
+        <td data-label="What it does">Unsigned &gt;= compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;GEU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:32}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">GTS</td>
+        <td data-label="Operand shape (suggested)">GTS r, x</td>
+        <td data-label="WASM equivalent">i32.gt_s</td>
+        <td data-label="What it does">Signed &gt; compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;GTS&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:29}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">GTU</td>
+        <td data-label="Operand shape (suggested)">GTU r, x</td>
+        <td data-label="WASM equivalent">i32.gt_u</td>
+        <td data-label="What it does">Unsigned &gt; compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;GTU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:30}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">INC</td>
+        <td data-label="Operand shape (suggested)">INC r (HL|DE|BC)</td>
+        <td data-label="WASM equivalent">i32.add</td>
+        <td data-label="What it does">Increment HL, DE, or BC by one.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;INC&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;}],&quot;loc&quot;:{&quot;line&quot;:17}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">JR</td>
+        <td data-label="Operand shape (suggested)">JR label | JR cond, label</td>
+        <td data-label="WASM equivalent">pc dispatch branch</td>
+        <td data-label="What it does">Jump unconditionally or branch on cmp register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;JR&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;GE&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;loop_end&quot;}],&quot;loc&quot;:{&quot;line&quot;:16}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD</td>
+        <td data-label="Operand shape (suggested)">LD r, x</td>
+        <td data-label="WASM equivalent">local.set</td>
+        <td data-label="What it does">Move immediate/label/memory into a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:10}],&quot;loc&quot;:{&quot;line&quot;:5}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD16S</td>
+        <td data-label="Operand shape (suggested)">LD16S r, (addr)</td>
+        <td data-label="WASM equivalent">i32.load16_s</td>
+        <td data-label="What it does">Load signed halfword and sign-extend.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD16S&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;IX&quot;},{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf16&quot;}],&quot;loc&quot;:{&quot;line&quot;:46}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD16U</td>
+        <td data-label="Operand shape (suggested)">LD16U r, (addr)</td>
+        <td data-label="WASM equivalent">i32.load16_u</td>
+        <td data-label="What it does">Load unsigned halfword and zero-extend.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD16U&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;},{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf16&quot;}],&quot;loc&quot;:{&quot;line&quot;:45}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD32</td>
+        <td data-label="Operand shape (suggested)">LD32 r, (addr)</td>
+        <td data-label="WASM equivalent">i32.load</td>
+        <td data-label="What it does">Load 32-bit word into a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD32&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;DE&quot;},{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf32&quot;}],&quot;loc&quot;:{&quot;line&quot;:38}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD8S</td>
+        <td data-label="Operand shape (suggested)">LD8S r, (addr)</td>
+        <td data-label="WASM equivalent">i32.load8_s</td>
+        <td data-label="What it does">Load signed byte and sign-extend to i32.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD8S&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;BC&quot;},{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf8&quot;}],&quot;loc&quot;:{&quot;line&quot;:42}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LD8U</td>
+        <td data-label="Operand shape (suggested)">LD8U r, (addr)</td>
+        <td data-label="WASM equivalent">i32.load8_u</td>
+        <td data-label="What it does">Load unsigned byte and zero-extend to i32.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LD8U&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;A&quot;},{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf8&quot;}],&quot;loc&quot;:{&quot;line&quot;:41}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LDIR</td>
+        <td data-label="Operand shape (suggested)">LDIR (DE dst, HL src, BC len)</td>
+        <td data-label="WASM equivalent">memory.copy</td>
+        <td data-label="What it does">Bulk copy memory via Lembeh ABI registers.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LDIR&quot;,&quot;ops&quot;:[],&quot;loc&quot;:{&quot;line&quot;:56}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LES</td>
+        <td data-label="Operand shape (suggested)">LES r, x</td>
+        <td data-label="WASM equivalent">i32.le_s</td>
+        <td data-label="What it does">Signed &lt;= compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LES&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:27}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LEU</td>
+        <td data-label="Operand shape (suggested)">LEU r, x</td>
+        <td data-label="WASM equivalent">i32.le_u</td>
+        <td data-label="What it does">Unsigned &lt;= compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LEU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:28}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LTS</td>
+        <td data-label="Operand shape (suggested)">LTS r, x</td>
+        <td data-label="WASM equivalent">i32.lt_s</td>
+        <td data-label="What it does">Signed &lt; compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LTS&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:3}],&quot;loc&quot;:{&quot;line&quot;:25}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">LTU</td>
+        <td data-label="Operand shape (suggested)">LTU r, x</td>
+        <td data-label="WASM equivalent">i32.lt_u</td>
+        <td data-label="What it does">Unsigned &lt; compare -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;LTU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:3}],&quot;loc&quot;:{&quot;line&quot;:26}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">MUL</td>
+        <td data-label="Operand shape (suggested)">MUL r, x</td>
+        <td data-label="WASM equivalent">i32.mul</td>
+        <td data-label="What it does">Multiply register by immediate/register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;MUL&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:4}],&quot;loc&quot;:{&quot;line&quot;:18}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">NE</td>
+        <td data-label="Operand shape (suggested)">NE r, x</td>
+        <td data-label="WASM equivalent">i32.ne</td>
+        <td data-label="What it does">Compare not-equals -&gt; 0/1.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;NE&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:22}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">OR</td>
+        <td data-label="Operand shape (suggested)">OR r, x</td>
+        <td data-label="WASM equivalent">i32.or</td>
+        <td data-label="What it does">Bitwise OR register with scalar/symbol.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;OR&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:7}],&quot;loc&quot;:{&quot;line&quot;:11}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">POPC</td>
+        <td data-label="Operand shape (suggested)">POPC r</td>
+        <td data-label="WASM equivalent">i32.popcnt</td>
+        <td data-label="What it does">Count set bits in a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;POPC&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;}],&quot;loc&quot;:{&quot;line&quot;:35}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">PUBLIC</td>
+        <td data-label="Operand shape (suggested)">PUBLIC symbol</td>
+        <td data-label="WASM equivalent">export</td>
+        <td data-label="What it does">Mark a symbol for export from the module.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;PUBLIC&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;main&quot;}],&quot;loc&quot;:{&quot;line&quot;:4}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">REMS</td>
+        <td data-label="Operand shape (suggested)">REMS r, x</td>
+        <td data-label="WASM equivalent">i32.rem_s</td>
+        <td data-label="What it does">Signed remainder (traps like WASM).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;REMS&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:21}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">REMU</td>
+        <td data-label="Operand shape (suggested)">REMU r, x</td>
+        <td data-label="WASM equivalent">i32.rem_u</td>
+        <td data-label="What it does">Unsigned remainder (traps on div0).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;REMU&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:22}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">RESB</td>
+        <td data-label="Operand shape (suggested)">name: RESB count</td>
+        <td data-label="WASM equivalent">memory reserve</td>
+        <td data-label="What it does">Reserve zeroed bytes in BSS-style data.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;RESB&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:64}],&quot;loc&quot;:{&quot;line&quot;:40},&quot;name&quot;:&quot;buf&quot;}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">RET</td>
+        <td data-label="Operand shape (suggested)">RET</td>
+        <td data-label="WASM equivalent">br $exit</td>
+        <td data-label="What it does">Return from the current function slice.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;RET&quot;,&quot;ops&quot;:[],&quot;loc&quot;:{&quot;line&quot;:62}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">ROL</td>
+        <td data-label="Operand shape (suggested)">ROL r, x</td>
+        <td data-label="WASM equivalent">i32.rotl</td>
+        <td data-label="What it does">Rotate left by variable count.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ROL&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:2}],&quot;loc&quot;:{&quot;line&quot;:16}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">ROR</td>
+        <td data-label="Operand shape (suggested)">ROR r, x</td>
+        <td data-label="WASM equivalent">i32.rotr</td>
+        <td data-label="What it does">Rotate right by variable count.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ROR&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:3}],&quot;loc&quot;:{&quot;line&quot;:17}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">SLA</td>
+        <td data-label="Operand shape (suggested)">SLA r, x</td>
+        <td data-label="WASM equivalent">i32.shl</td>
+        <td data-label="What it does">Shift left by variable count.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;SLA&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:13}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">SRA</td>
+        <td data-label="Operand shape (suggested)">SRA r, x</td>
+        <td data-label="WASM equivalent">i32.shr_s</td>
+        <td data-label="What it does">Arithmetic shift right.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;SRA&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:14}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">SRL</td>
+        <td data-label="Operand shape (suggested)">SRL r, x</td>
+        <td data-label="WASM equivalent">i32.shr_u</td>
+        <td data-label="What it does">Logical shift right.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;SRL&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:15}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">ST16</td>
+        <td data-label="Operand shape (suggested)">ST16 (addr), r</td>
+        <td data-label="WASM equivalent">i32.store16</td>
+        <td data-label="What it does">Store the low 16 bits of a register.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ST16&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf16&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;BC&quot;}],&quot;loc&quot;:{&quot;line&quot;:44}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">ST32</td>
+        <td data-label="Operand shape (suggested)">ST32 (addr), r</td>
+        <td data-label="WASM equivalent">i32.store</td>
+        <td data-label="What it does">Store a 32-bit register to memory.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ST32&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf32&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;}],&quot;loc&quot;:{&quot;line&quot;:37}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">ST8</td>
+        <td data-label="Operand shape (suggested)">ST8 (addr), r</td>
+        <td data-label="WASM equivalent">i32.store8</td>
+        <td data-label="What it does">Store the low 8 bits of a register to memory.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;ST8&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;mem&quot;,&quot;base&quot;:&quot;buf8&quot;},{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;A&quot;}],&quot;loc&quot;:{&quot;line&quot;:40}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">STR</td>
+        <td data-label="Operand shape (suggested)">name: STR arg[, ...]</td>
+        <td data-label="WASM equivalent">data bytes</td>
+        <td data-label="What it does">Emit string/byte literals (null-free).</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;dir&quot;,&quot;d&quot;:&quot;STR&quot;,&quot;args&quot;:[{&quot;t&quot;:&quot;str&quot;,&quot;v&quot;:&quot;Fizz&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:10}],&quot;loc&quot;:{&quot;line&quot;:10},&quot;name&quot;:&quot;msg&quot;}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">SUB</td>
+        <td data-label="Operand shape (suggested)">SUB HL, x</td>
+        <td data-label="WASM equivalent">i32.sub</td>
+        <td data-label="What it does">Subtract immediate values or DE from HL.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;SUB&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:8}}</pre></td>
+      </tr>
+      <tr>
+        <td data-label="ZASM mnemonic">XOR</td>
+        <td data-label="Operand shape (suggested)">XOR r, x</td>
+        <td data-label="WASM equivalent">i32.xor</td>
+        <td data-label="What it does">Bitwise XOR register with scalar/symbol.</td>
+        <td data-label="JSONL"><pre>{&quot;ir&quot;:&quot;zasm-v1.0&quot;,&quot;k&quot;:&quot;instr&quot;,&quot;m&quot;:&quot;XOR&quot;,&quot;ops&quot;:[{&quot;t&quot;:&quot;sym&quot;,&quot;v&quot;:&quot;HL&quot;},{&quot;t&quot;:&quot;num&quot;,&quot;v&quot;:1}],&quot;loc&quot;:{&quot;line&quot;:12}}</pre></td>
+      </tr>
+    </tbody>
+  </table>
+</body>
+</html>

@@ -459,6 +459,48 @@ static int emit_expr_for_operand(const operand_t* o, const gsymtab_t* g, int lin
   return 0;
 }
 
+static int emit_rhs_scalar(const char* opname, const operand_t* rhs, const gsymtab_t* g, int line) {
+  if (rhs->t == JOP_SYM && rhs->s) {
+    const char* src_local = reg_local(rhs->s);
+    if (src_local) {
+      printf("        local.get $%s\n", src_local);
+      return 0;
+    }
+    long v = 0;
+    if (!gsymtab_get(g, rhs->s, &v)) {
+      fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, line);
+      return 1;
+    }
+    printf("        global.get $%s\n", rhs->s);
+    return 0;
+  }
+  if (rhs->t == JOP_NUM) {
+    printf("        i32.const %ld\n", rhs->n);
+    return 0;
+  }
+  fprintf(stderr, "zld: %s rhs must be register, number, or symbol at line %d\n", opname, line);
+  return 1;
+}
+
+static int emit_addr_from_mem(const char* opname, const operand_t* mem, const gsymtab_t* g, int line) {
+  if (mem->t != JOP_MEM || !mem->s) {
+    fprintf(stderr, "zld: %s expects memory operand at line %d\n", opname, line);
+    return 1;
+  }
+  const char* ptr_local = reg_local(mem->s);
+  if (ptr_local) {
+    printf("        local.get $%s\n", ptr_local);
+    return 0;
+  }
+  long v = 0;
+  if (!gsymtab_get(g, mem->s, &v)) {
+    fprintf(stderr, "zld: unknown memory symbol %s at line %d\n", mem->s, line);
+    return 1;
+  }
+  printf("        global.get $%s\n", mem->s);
+  return 0;
+}
+
 // Lower a flat label stream into a PC-dispatched WASM loop to preserve linear control flow.
 static int emit_function_body(const char* fname, const recvec_t* recs, size_t start, size_t end, const gsymtab_t* g) {
   block_t* blocks = NULL;
@@ -585,6 +627,121 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
       if (strcmp(r->m, "RET") == 0) {
         printf("        br $exit\n");
         terminated = 1;
+        continue;
+      }
+
+      if (strcmp(r->m, "MUL") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: MUL expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar("MUL", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.mul\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "DIVS") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: DIVS expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar("DIVS", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.div_s\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "DIVU") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: DIVU expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar("DIVU", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.div_u\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "REMS") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: REMS expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar("REMS", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.rem_s\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "REMU") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: REMU expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar("REMU", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.rem_u\n");
+        printf("        local.set $%s\n", dst_local);
         continue;
       }
 
@@ -800,6 +957,642 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
         fprintf(stderr, "zld: SUB HL expects immediate or DE at line %d\n", r->line);
         rc = 1;
         goto cleanup;
+      }
+
+      if (strcmp(r->m, "AND") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: AND expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: AND dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: AND rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.and\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "OR") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: OR expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: OR dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: OR rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.or\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "XOR") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: XOR expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: XOR dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: XOR rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.xor\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      const char* cmpop = NULL;
+      if (strcmp(r->m, "EQ") == 0) cmpop = "i32.eq";
+      else if (strcmp(r->m, "NE") == 0) cmpop = "i32.ne";
+      else if (strcmp(r->m, "LTS") == 0) cmpop = "i32.lt_s";
+      else if (strcmp(r->m, "LTU") == 0) cmpop = "i32.lt_u";
+      else if (strcmp(r->m, "LES") == 0) cmpop = "i32.le_s";
+      else if (strcmp(r->m, "LEU") == 0) cmpop = "i32.le_u";
+      else if (strcmp(r->m, "GTS") == 0) cmpop = "i32.gt_s";
+      else if (strcmp(r->m, "GTU") == 0) cmpop = "i32.gt_u";
+      else if (strcmp(r->m, "GES") == 0) cmpop = "i32.ge_s";
+      else if (strcmp(r->m, "GEU") == 0) cmpop = "i32.ge_u";
+
+      if (cmpop) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: %s expects 2 operands at line %d\n", r->m, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: %s dst must be register at line %d\n", r->m, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (emit_rhs_scalar(r->m, rhs, g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        %s\n", cmpop);
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "CLZ") == 0 || strcmp(r->m, "CTZ") == 0 || strcmp(r->m, "POPC") == 0) {
+        if (r->nops != 1 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: %s expects a single register operand at line %d\n", r->m, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (strcmp(r->m, "CLZ") == 0) {
+          printf("        i32.clz\n");
+        } else if (strcmp(r->m, "CTZ") == 0) {
+          printf("        i32.ctz\n");
+        } else {
+          printf("        i32.popcnt\n");
+        }
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SLA") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: SLA expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: SLA dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: SLA rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.shl\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SRA") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: SRA expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: SRA dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: SRA rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.shr_s\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SRL") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: SRL expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: SRL dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: SRL rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.shr_u\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ROL") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ROL expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: ROL dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: ROL rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.rotl\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ROR") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ROR expects 2 operands at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const operand_t* dst = &r->ops[0];
+        const operand_t* rhs = &r->ops[1];
+        if (dst->t != JOP_SYM) {
+          fprintf(stderr, "zld: ROR dst must be register at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = dst->s;
+        const char* dst_local = reg_local(reg);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", dst_local);
+        if (rhs->t == JOP_SYM && rhs->s) {
+          const char* src_local = reg_local(rhs->s);
+          if (src_local) {
+            printf("        local.get $%s\n", src_local);
+          } else {
+            long v = 0;
+            if (!gsymtab_get(g, rhs->s, &v)) {
+              fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, r->line);
+              rc = 1;
+              goto cleanup;
+            }
+            printf("        global.get $%s\n", rhs->s);
+          }
+        } else if (rhs->t == JOP_NUM) {
+          printf("        i32.const %ld\n", rhs->n);
+        } else {
+          fprintf(stderr, "zld: ROR rhs must be register, number, or symbol at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.rotr\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD8U") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD8U expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD8U", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.load8_u offset=0 align=1\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD8S") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD8S expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD8S", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.load8_s offset=0 align=1\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ST8") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST8 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST8", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar("ST8", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.store8 offset=0 align=1\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "ST16") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST16 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST16", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar("ST16", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.store16 offset=0 align=2\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "LD16U") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD16U expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD16U", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.load16_u offset=0 align=2\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD16S") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD16S expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD16S", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.load16_s offset=0 align=2\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD32") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD32 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* dst_local = reg_local(r->ops[0].s);
+        if (!dst_local) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD32", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.load offset=0 align=4\n");
+        printf("        local.set $%s\n", dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ST32") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST32 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST32", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar("ST32", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i32.store offset=0 align=4\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "FILL") == 0) {
+        if (r->nops != 0) {
+          fprintf(stderr, "zld: FILL takes no operands (uses HL/A/BC) at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $HL\n");
+        printf("        local.get $A\n");
+        printf("        local.get $BC\n");
+        printf("        memory.fill\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "LDIR") == 0) {
+        if (r->nops != 0) {
+          fprintf(stderr, "zld: LDIR takes no operands (uses DE/HL/BC) at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $DE\n");
+        printf("        local.get $HL\n");
+        printf("        local.get $BC\n");
+        printf("        memory.copy\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "DROP") == 0) {
+        if (r->nops != 1 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: DROP expects a register operand at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* loc = reg_local(r->ops[0].s);
+        if (!loc) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", loc);
+        printf("        drop\n");
+        continue;
       }
 
       if (strcmp(r->m, "JR") == 0) {

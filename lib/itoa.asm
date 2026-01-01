@@ -23,7 +23,7 @@ itoa:
 
   ; special-case 0
   CP HL, #0
-  JR NE, itoa_digits
+  JR ne, itoa_digits
 
   LD A, #48
   LD HL, DE
@@ -38,7 +38,7 @@ itoa_digits:
   LD BC, #0
 itoa_div_10000:
   CP HL, #10000
-  JR LT, itoa_div_10000_done
+  JR lt, itoa_div_10000_done
   SUB HL, #10000
   INC BC
   JR itoa_div_10000
@@ -46,14 +46,14 @@ itoa_div_10000_done:
   LD IX, HL
   LD HL, BC
   CP HL, #0
-  JR EQ, itoa_emit_check_started_10000
+  JR eq, itoa_emit_check_started_10000
   JR itoa_emit_write_10000
 itoa_emit_check_started_10000:
   LD HL, started_flag
   LD A, (HL)
   LD HL, A
   CP HL, #0
-  JR EQ, itoa_emit_restore_10000
+  JR eq, itoa_emit_restore_10000
 itoa_emit_write_10000:
   LD HL, #1
   LD A, HL
@@ -82,7 +82,7 @@ itoa_emit_restore_10000:
   LD BC, #0
 itoa_div_1000:
   CP HL, #1000
-  JR LT, itoa_div_1000_done
+  JR lt, itoa_div_1000_done
   SUB HL, #1000
   INC BC
   JR itoa_div_1000
@@ -90,14 +90,14 @@ itoa_div_1000_done:
   LD IX, HL
   LD HL, BC
   CP HL, #0
-  JR EQ, itoa_emit_check_started_1000
+  JR eq, itoa_emit_check_started_1000
   JR itoa_emit_write_1000
 itoa_emit_check_started_1000:
   LD HL, started_flag
   LD A, (HL)
   LD HL, A
   CP HL, #0
-  JR EQ, itoa_emit_restore_1000
+  JR eq, itoa_emit_restore_1000
 itoa_emit_write_1000:
   LD HL, #1
   LD A, HL
@@ -126,7 +126,7 @@ itoa_emit_restore_1000:
   LD BC, #0
 itoa_div_100:
   CP HL, #100
-  JR LT, itoa_div_100_done
+  JR lt, itoa_div_100_done
   SUB HL, #100
   INC BC
   JR itoa_div_100
@@ -134,14 +134,14 @@ itoa_div_100_done:
   LD IX, HL
   LD HL, BC
   CP HL, #0
-  JR EQ, itoa_emit_check_started_100
+  JR eq, itoa_emit_check_started_100
   JR itoa_emit_write_100
 itoa_emit_check_started_100:
   LD HL, started_flag
   LD A, (HL)
   LD HL, A
   CP HL, #0
-  JR EQ, itoa_emit_restore_100
+  JR eq, itoa_emit_restore_100
 itoa_emit_write_100:
   LD HL, #1
   LD A, HL
@@ -170,7 +170,7 @@ itoa_emit_restore_100:
   LD BC, #0
 itoa_div_10:
   CP HL, #10
-  JR LT, itoa_div_10_done
+  JR lt, itoa_div_10_done
   SUB HL, #10
   INC BC
   JR itoa_div_10
@@ -178,14 +178,14 @@ itoa_div_10_done:
   LD IX, HL
   LD HL, BC
   CP HL, #0
-  JR EQ, itoa_emit_check_started_10
+  JR eq, itoa_emit_check_started_10
   JR itoa_emit_write_10
 itoa_emit_check_started_10:
   LD HL, started_flag
   LD A, (HL)
   LD HL, A
   CP HL, #0
-  JR EQ, itoa_emit_restore_10
+  JR eq, itoa_emit_restore_10
 itoa_emit_write_10:
   LD HL, #1
   LD A, HL

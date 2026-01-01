@@ -7,7 +7,7 @@ read_loop:
   LD DE, #4096
   CALL _in          ; HL := n
   CP HL, #0
-  JR LE, done       ; n <= 0 => EOF or error => stop
+  JR le, done       ; n <= 0 => EOF or error => stop
 
   ; write n bytes from buf
   LD DE, HL         ; DE := n

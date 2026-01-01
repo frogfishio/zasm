@@ -5,22 +5,22 @@ main:
   LD HL, #0
   LD DE, #0
   CP HL, DE
-  JR EQ, is_eq
-  JR NE, fail
+  JR eq, is_eq
+  JR ne, fail
 
 is_eq:
   CP HL, #1
-  JR LT, is_lt
-  JR GE, fail
+  JR lt, is_lt
+  JR ge, fail
 
 is_lt:
   CP HL, #0
-  JR LE, is_le
-  JR GT, fail
+  JR le, is_le
+  JR gt, fail
 
 is_le:
   CP HL, #0
-  JR GE, done
+  JR ge, done
   JR fail
 
 done:

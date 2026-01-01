@@ -7,7 +7,7 @@ main:
 
 loop_top:
   CP HL, DE
-  JR GE, loop_end
+  JR ge, loop_end
   INC HL
   JR loop_top
 

@@ -72,7 +72,7 @@ static void opnode_free_nodes(opnode_t* list) {
 }
 
 %token T_NL T_COLON T_COMMA T_LPAREN T_RPAREN
-%token T_CALL T_RET T_LD T_INC T_DEC T_CP T_JR T_ADD T_SUB T_DB T_DW T_RESB T_STRDIR T_EQU T_PUBLIC T_EXTERN
+%token T_CALL T_RET T_LD T_INC T_DEC T_CP T_JR T_ADD T_MUL T_DIVS T_DIVU T_REMS T_REMU T_AND T_OR T_XOR T_EQ T_NE T_LTS T_LTU T_LES T_LEU T_GTS T_GTU T_GES T_GEU T_CLZ T_CTZ T_POPC T_SLA T_SRA T_SRL T_ROL T_ROR T_LD8U T_LD8S T_ST8 T_ST16 T_LD16U T_LD16S T_LD32 T_ST32 T_FILL T_LDIR T_DROP T_SUB T_DB T_DW T_RESB T_STRDIR T_EQU T_PUBLIC T_EXTERN
 %token <str> T_ID T_STR
 %token <num> T_NUM
 
@@ -187,6 +187,191 @@ stmtinfo
     {
       $$.m = "ADD";
       $$.ops = opnode_append($2, $4);
+    }
+  | T_MUL operand T_COMMA operand
+    {
+      $$.m = "MUL";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_DIVS operand T_COMMA operand
+    {
+      $$.m = "DIVS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_DIVU operand T_COMMA operand
+    {
+      $$.m = "DIVU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_REMS operand T_COMMA operand
+    {
+      $$.m = "REMS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_REMU operand T_COMMA operand
+    {
+      $$.m = "REMU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_AND operand T_COMMA operand
+    {
+      $$.m = "AND";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_OR operand T_COMMA operand
+    {
+      $$.m = "OR";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_XOR operand T_COMMA operand
+    {
+      $$.m = "XOR";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_EQ operand T_COMMA operand
+    {
+      $$.m = "EQ";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_NE operand T_COMMA operand
+    {
+      $$.m = "NE";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LTS operand T_COMMA operand
+    {
+      $$.m = "LTS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LTU operand T_COMMA operand
+    {
+      $$.m = "LTU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LES operand T_COMMA operand
+    {
+      $$.m = "LES";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LEU operand T_COMMA operand
+    {
+      $$.m = "LEU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GTS operand T_COMMA operand
+    {
+      $$.m = "GTS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GTU operand T_COMMA operand
+    {
+      $$.m = "GTU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GES operand T_COMMA operand
+    {
+      $$.m = "GES";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GEU operand T_COMMA operand
+    {
+      $$.m = "GEU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_CLZ operand
+    {
+      $$.m = "CLZ";
+      $$.ops = $2;
+    }
+  | T_CTZ operand
+    {
+      $$.m = "CTZ";
+      $$.ops = $2;
+    }
+  | T_POPC operand
+    {
+      $$.m = "POPC";
+      $$.ops = $2;
+    }
+  | T_SLA operand T_COMMA operand
+    {
+      $$.m = "SLA";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_SRA operand T_COMMA operand
+    {
+      $$.m = "SRA";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_SRL operand T_COMMA operand
+    {
+      $$.m = "SRL";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ROL operand T_COMMA operand
+    {
+      $$.m = "ROL";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ROR operand T_COMMA operand
+    {
+      $$.m = "ROR";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD8U operand T_COMMA operand
+    {
+      $$.m = "LD8U";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD8S operand T_COMMA operand
+    {
+      $$.m = "LD8S";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST8 operand T_COMMA operand
+    {
+      $$.m = "ST8";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST16 operand T_COMMA operand
+    {
+      $$.m = "ST16";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD16U operand T_COMMA operand
+    {
+      $$.m = "LD16U";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD16S operand T_COMMA operand
+    {
+      $$.m = "LD16S";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD32 operand T_COMMA operand
+    {
+      $$.m = "LD32";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST32 operand T_COMMA operand
+    {
+      $$.m = "ST32";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_FILL
+    {
+      $$.m = "FILL";
+      $$.ops = NULL;
+    }
+  | T_LDIR
+    {
+      $$.m = "LDIR";
+      $$.ops = NULL;
+    }
+  | T_DROP operand
+    {
+      $$.m = "DROP";
+      $$.ops = $2;
     }
   | T_SUB operand T_COMMA operand
     {

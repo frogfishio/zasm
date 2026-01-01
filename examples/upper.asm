@@ -13,7 +13,7 @@ read_loop:
   LD BC, HL
   LD HL, DE
   CP HL, #0
-  JR LE, done
+  JR le, done
   LD HL, BC
 
 loop_top:
@@ -21,9 +21,9 @@ loop_top:
   LD BC, HL
   LD HL, A
   CP HL, #97
-  JR LT, no_up
+  JR lt, no_up
   CP HL, #123
-  JR GE, no_up
+  JR ge, no_up
   SUB HL, #32
   LD A, HL
 no_up:
@@ -35,7 +35,7 @@ no_up:
   LD BC, HL
   LD HL, DE
   CP HL, #0
-  JR GT, loop_cont
+  JR gt, loop_cont
 
   LD HL, buf
   LD DE, IX

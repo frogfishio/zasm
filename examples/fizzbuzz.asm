@@ -18,19 +18,19 @@ loop_top:
   ; if count3 == 3
   LD HL, BC
   CP HL, #3
-  JR EQ, maybe_fizz
+  JR eq, maybe_fizz
 
   ; if count5 == 5
   LD HL, DE
   CP HL, #5
-  JR EQ, do_buzz
+  JR eq, do_buzz
 
   JR do_number
 
 maybe_fizz:
   LD HL, DE
   CP HL, #5
-  JR EQ, do_fizzbuzz
+  JR eq, do_fizzbuzz
   JR do_fizz
 
 do_fizz:
@@ -80,13 +80,13 @@ do_number:
   LD A, (HL)
   LD HL, A
   CP HL, #100
-  JR EQ, print_100
+  JR eq, print_100
 
   LD BC, #0
 
 tens_loop:
   CP HL, #10
-  JR LT, tens_done
+  JR lt, tens_done
   SUB HL, #10
   INC BC
   JR tens_loop
@@ -95,7 +95,7 @@ tens_done:
   LD IX, HL
   LD HL, BC
   CP HL, #0
-  JR EQ, one_digit
+  JR eq, one_digit
 
   LD HL, BC
   ADD HL, #48
@@ -159,7 +159,7 @@ loop_continue:
   LD HL, A
   INC HL
   CP HL, #101
-  JR LT, loop_top
+  JR lt, loop_top
   RET
 
 num_buf: RESB 4

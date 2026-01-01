@@ -20,7 +20,7 @@ main:
   INC DE
   DEC DE
   CP HL, DE
-  JR EQ, cond_ok
+  JR eq, cond_ok
   JR fail
 
 cond_ok:
