@@ -1,0 +1,7 @@
+{"ir":"zasm-v1.0","k":"dir","d":"DB","name":"msg","args":[{"t":"str","v":"A"},{"t":"num","v":10},{"t":"num","v":42},{"t":"sym","v":"sym"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"dir","d":"DW","name":"word","args":[{"t":"num","v":123}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"dir","d":"RESB","args":[{"t":"num","v":4}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"dir","d":"STR","name":"text","args":[{"t":"str","v":"Hi"},{"t":"num","v":10}],"loc":{"line":5}}
+{"ir":"zasm-v1.0","k":"dir","d":"EQU","name":"buf_size","args":[{"t":"num","v":16}],"loc":{"line":6}}
+{"ir":"zasm-v1.0","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"entry"}],"loc":{"line":7}}
+{"ir":"zasm-v1.0","k":"dir","d":"EXTERN","args":[{"t":"str","v":"env"},{"t":"str","v":"noop"},{"t":"sym","v":"noop"}],"loc":{"line":8}}

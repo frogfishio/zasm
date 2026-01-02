@@ -1,0 +1,3 @@
+{"ir":"zasm-v1.0","k":"label","name":"target","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"target"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"EQ"},{"t":"sym","v":"target"}],"loc":{"line":4}}

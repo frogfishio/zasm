@@ -11,7 +11,7 @@ SHELL := /bin/bash
 
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
-CPPFLAGS?= -Isrc/zas -Isrc/common -Ibuild/zas -Iinclude
+CPPFLAGS?= -Isrc/zas -Isrc/common -Ibuild/zas -Iinclude -Izcc/include
 LDFLAGS ?=
 
 # You can override these:
@@ -28,8 +28,9 @@ WASMTIME_C_API_DIR ?= external/wasmtime-c-api
 
 ZAS_BUILD := $(BUILD)/zas
 ZRUN_BUILD := $(BUILD)/zrun
-CLOAK_BUILD := $(BUILD)/cloak
-ZCC_BUILD := $(BUILD)/zcc
+
+ZCC_DIR := zcc
+ZCC_BUILD_DIR := $(abspath $(BUILD))/zcc
 
 ZAS_SRC := \
   src/zas/main.c \
@@ -56,14 +57,17 @@ install: zas zld zcc zrun zlnt
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
-	@install -m 0755 $(BIN)/zcc $(DESTDIR)$(BINDIR)/zcc
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
 	@install -m 0755 $(BIN)/zlnt $(DESTDIR)$(BINDIR)/zlnt
-	@mkdir -p $(DESTDIR)$(PREFIX)/include
-	@install -m 0644 include/zprog_rt.h $(DESTDIR)$(PREFIX)/include/zprog_rt.h
+	$(MAKE) -C $(ZCC_DIR) install \
+	  DESTDIR="$(DESTDIR)" \
+	  PREFIX="$(PREFIX)" \
+	  BIN="$(abspath $(BIN))" \
+	  BUILD="$(ZCC_BUILD_DIR)" \
+	  ZASM_ROOT="$(CURDIR)"
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZLD_BUILD) $(ZCC_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD)
 
 # --- Generator rules ---
 
@@ -175,7 +179,7 @@ test-isa-smoke: zas zld zrun
 
 test-stream: test-cat test-upper
 
-test-asm-suite: test-data-directives test-regmoves test-arithmetic test-compare-conds test-bytes test-cat test-upper test-alloc test-isa-smoke test-linkage test-manifest test-str-equ test-zlnt test-fuzz-zld test-wat-validate test-wasm-opt test-names test-fizzbuzz test-twofile test-strict test-trap test-zcc-cat
+test-asm-suite: test-data-directives test-regmoves test-arithmetic test-compare-conds test-bytes test-cat test-upper test-alloc test-isa-smoke test-linkage test-manifest test-str-equ test-zlnt test-fuzz-zld test-wat-validate test-wasm-opt test-names test-fizzbuzz test-twofile test-strict test-trap
 
 test-fuzz-zas: zas
 	test/fuzz_zas.sh
@@ -239,14 +243,6 @@ test-zrun-log: zas zld zrun
 	$(BIN)/zrun build/log.wat 1>/tmp/log.out 2>/tmp/log.err
 	@rg -q "^\\[demo\\] hello" /tmp/log.err
 
-test-zcc-cat: zas zcc
-	cat examples/cat.asm | $(BIN)/zas | $(BIN)/zcc --heap-slack=4096 > $(BUILD)/cat_c.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -c $(BUILD)/cat_c.c -o $(BUILD)/cat_c.o
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude -c src/cloak/stdio_cloak.c -o $(CLOAK_BUILD)/stdio_cloak.o
-	$(CC) $(CFLAGS) $(BUILD)/cat_c.o $(CLOAK_BUILD)/stdio_cloak.o -o $(BUILD)/cat_c_bin $(LDFLAGS)
-	cat test/fixtures/cat.in | $(BUILD)/cat_c_bin > $(BUILD)/cat_c.out
-	cmp -s $(BUILD)/cat_c.out test/fixtures/cat.out
-
 clean:
 	rm -rf $(BUILD) $(BIN)
 
@@ -275,24 +271,15 @@ zld: $(ZLD_OBJ) | dirs
 
 # ---- zcc (IR -> C) ----
 
-ZCC_SRC := \
-	src/zcc/main.c \
-	src/zcc/emit_c.c \
-	src/zld/jsonl.c
-
-ZCC_OBJ := \
-	$(ZCC_BUILD)/main.o \
-	$(ZCC_BUILD)/emit_c.o \
-	$(ZCC_BUILD)/jsonl.o
-
-$(ZCC_BUILD)/%.o: src/zcc/%.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zcc -Isrc/zld -c $< -o $@
-
-$(ZCC_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
-
-zcc: $(ZCC_OBJ) | dirs
-	$(CC) $(CFLAGS) $(ZCC_OBJ) -o $(BIN)/zcc $(LDFLAGS)
+zcc:
+	$(MAKE) -C $(ZCC_DIR) \
+	  CC="$(CC)" \
+	  CFLAGS="$(CFLAGS)" \
+	  CPPFLAGS="$(CPPFLAGS)" \
+	  LDFLAGS="$(LDFLAGS)" \
+	  BIN="$(abspath $(BIN))" \
+	  BUILD="$(ZCC_BUILD_DIR)" \
+	  ZASM_ROOT="$(CURDIR)"
 
 .PHONY: zcc
 

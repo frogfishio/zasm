@@ -176,6 +176,7 @@ Source: `src/zas/emit_json.c`
 ### Location info
 
 - Only `loc.line` is emitted.
+- `loc.line` is the lexer `yylineno` at the time the trailing newline is tokenized, so it effectively reports the line number of the newline (typically statement line + 1).
 - `loc.col` and `loc.unit` are never emitted by `zas` (values are **UNSPECIFIED** in output).
 
 ### Normalization and escaping
@@ -191,7 +192,7 @@ All expected outputs below are exact JSONL lines as emitted by `zas`.
 
 ### PASS
 
-**tests/pass/empty_and_comment.asm**
+**test/pass/empty_and_comment.asm**
 ```asm
 ; only a comment
 
@@ -201,28 +202,28 @@ Expected JSONL output:
 
 ```
 
-**tests/pass/label_and_ret.asm**
+**test/pass/label_and_ret.asm**
 ```asm
 start:
 RET
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"label","name":"start","loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"label","name":"start","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":3}}
 ```
 
-**tests/pass/label_plus_instr.asm**
+**test/pass/label_plus_instr.asm**
 ```asm
 entry: RET
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"label","name":"entry","loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":1}}
+{"ir":"zasm-v1.0","k":"label","name":"entry","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":2}}
 ```
 
-**tests/pass/ld_operands.asm**
+**test/pass/ld_operands.asm**
 ```asm
 LD A, 1
 LD (HL), A
@@ -231,13 +232,13 @@ LD HL, 0x10
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"num","v":1}],"loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"mem","base":"HL"},{"t":"sym","v":"A"}],"loc":{"line":2}}
-{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"mem","base":"HL"}],"loc":{"line":3}}
-{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":16}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"num","v":1}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"mem","base":"HL"},{"t":"sym","v":"A"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"mem","base":"HL"}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":16}],"loc":{"line":5}}
 ```
 
-**tests/pass/jr_forms.asm**
+**test/pass/jr_forms.asm**
 ```asm
 target:
 JR target
@@ -245,12 +246,12 @@ JR EQ, target
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"label","name":"target","loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"target"}],"loc":{"line":2}}
-{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"EQ"},{"t":"sym","v":"target"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"label","name":"target","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"target"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"EQ"},{"t":"sym","v":"target"}],"loc":{"line":4}}
 ```
 
-**tests/pass/arithmetic.asm**
+**test/pass/arithmetic.asm**
 ```asm
 INC HL
 DEC DE
@@ -260,14 +261,14 @@ CP HL, 0x2A
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"instr","m":"INC","ops":[{"t":"sym","v":"HL"}],"loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"DEC","ops":[{"t":"sym","v":"DE"}],"loc":{"line":2}}
-{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"sym","v":"DE"}],"loc":{"line":3}}
-{"ir":"zasm-v1.0","k":"instr","m":"SUB","ops":[{"t":"sym","v":"HL"},{"t":"num","v":5}],"loc":{"line":4}}
-{"ir":"zasm-v1.0","k":"instr","m":"CP","ops":[{"t":"sym","v":"HL"},{"t":"num","v":42}],"loc":{"line":5}}
+{"ir":"zasm-v1.0","k":"instr","m":"INC","ops":[{"t":"sym","v":"HL"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"DEC","ops":[{"t":"sym","v":"DE"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"sym","v":"DE"}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"instr","m":"SUB","ops":[{"t":"sym","v":"HL"},{"t":"num","v":5}],"loc":{"line":5}}
+{"ir":"zasm-v1.0","k":"instr","m":"CP","ops":[{"t":"sym","v":"HL"},{"t":"num","v":42}],"loc":{"line":6}}
 ```
 
-**tests/pass/directives.asm**
+**test/pass/directives.asm**
 ```asm
 msg: DB "A", 10, 0x2A, sym
 word: DW 123
@@ -279,51 +280,51 @@ EXTERN "env", "noop", noop
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"dir","d":"DB","name":"msg","args":[{"t":"str","v":"A"},{"t":"num","v":10},{"t":"num","v":42},{"t":"sym","v":"sym"}],"loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"dir","d":"DW","name":"word","args":[{"t":"num","v":123}],"loc":{"line":2}}
-{"ir":"zasm-v1.0","k":"dir","d":"RESB","args":[{"t":"num","v":4}],"loc":{"line":3}}
-{"ir":"zasm-v1.0","k":"dir","d":"STR","name":"text","args":[{"t":"str","v":"Hi"},{"t":"num","v":10}],"loc":{"line":4}}
-{"ir":"zasm-v1.0","k":"dir","d":"EQU","name":"buf_size","args":[{"t":"num","v":16}],"loc":{"line":5}}
-{"ir":"zasm-v1.0","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"entry"}],"loc":{"line":6}}
-{"ir":"zasm-v1.0","k":"dir","d":"EXTERN","args":[{"t":"str","v":"env"},{"t":"str","v":"noop"},{"t":"sym","v":"noop"}],"loc":{"line":7}}
+{"ir":"zasm-v1.0","k":"dir","d":"DB","name":"msg","args":[{"t":"str","v":"A"},{"t":"num","v":10},{"t":"num","v":42},{"t":"sym","v":"sym"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"dir","d":"DW","name":"word","args":[{"t":"num","v":123}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"dir","d":"RESB","args":[{"t":"num","v":4}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"dir","d":"STR","name":"text","args":[{"t":"str","v":"Hi"},{"t":"num","v":10}],"loc":{"line":5}}
+{"ir":"zasm-v1.0","k":"dir","d":"EQU","name":"buf_size","args":[{"t":"num","v":16}],"loc":{"line":6}}
+{"ir":"zasm-v1.0","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"entry"}],"loc":{"line":7}}
+{"ir":"zasm-v1.0","k":"dir","d":"EXTERN","args":[{"t":"str","v":"env"},{"t":"str","v":"noop"},{"t":"sym","v":"noop"}],"loc":{"line":8}}
 ```
 
-**tests/pass/ident_chars.asm**
+**test/pass/ident_chars.asm**
 ```asm
 .L1: CALL $func
 $func: RET
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"label","name":".L1","loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"$func"}],"loc":{"line":1}}
-{"ir":"zasm-v1.0","k":"label","name":"$func","loc":{"line":2}}
-{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"label","name":".L1","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"$func"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"label","name":"$func","loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":3}}
 ```
 
-**tests/pass/strings_and_escapes.asm**
+**test/pass/strings_and_escapes.asm**
 ```asm
 DB "a\\n", "b\\t", "c\\q", 0
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"dir","d":"DB","args":[{"t":"str","v":"a\\n"},{"t":"str","v":"b\\t"},{"t":"str","v":"c\\q"},{"t":"num","v":0}],"loc":{"line":1}}
+{"ir":"zasm-v1.0","k":"dir","d":"DB","args":[{"t":"str","v":"a\\n"},{"t":"str","v":"b\\t"},{"t":"str","v":"c\\q"},{"t":"num","v":0}],"loc":{"line":2}}
 ```
 
-**tests/pass/ignored_char_hash.asm**
+**test/pass/ignored_char_hash.asm**
 ```asm
 ADD HL, #10
 ```
 Expected JSONL output:
 ```json
-{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":10}],"loc":{"line":1}}
+{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":10}],"loc":{"line":2}}
 ```
 
 ### FAIL
 
 All failures are parser errors. The lexer never reports errors; it silently skips unknown characters.
 
-**tests/fail/missing_comma_ld.asm**
+**test/fail/missing_comma_ld.asm**
 ```asm
 LD A B
 ```
@@ -332,7 +333,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1 (column depends on last accepted token)
 
-**tests/fail/jr_missing_comma.asm**
+**test/fail/jr_missing_comma.asm**
 ```asm
 JR EQ label
 ```
@@ -341,7 +342,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1
 
-**tests/fail/empty_args_db.asm**
+**test/fail/empty_args_db.asm**
 ```asm
 DB
 ```
@@ -350,7 +351,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1
 
-**tests/fail/bad_mem_operand.asm**
+**test/fail/bad_mem_operand.asm**
 ```asm
 LD (123), A
 ```
@@ -359,7 +360,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1
 
-**tests/fail/lowercase_mnemonic.asm**
+**test/fail/lowercase_mnemonic.asm**
 ```asm
 call foo
 ```
@@ -368,7 +369,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1
 
-**tests/fail/keyword_as_label.asm**
+**test/fail/keyword_as_label.asm**
 ```asm
 CALL:
 RET
@@ -378,7 +379,7 @@ Expected failure:
 - Message regex: `^zas: parse error at line 1:`
 - Location: line 1
 
-**tests/fail/trailing_comma_dir.asm**
+**test/fail/trailing_comma_dir.asm**
 ```asm
 DB 1,
 ```

@@ -1,0 +1,5 @@
+{"ir":"zasm-v1.0","k":"instr","m":"INC","ops":[{"t":"sym","v":"HL"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"DEC","ops":[{"t":"sym","v":"DE"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"sym","v":"DE"}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"instr","m":"SUB","ops":[{"t":"sym","v":"HL"},{"t":"num","v":5}],"loc":{"line":5}}
+{"ir":"zasm-v1.0","k":"instr","m":"CP","ops":[{"t":"sym","v":"HL"},{"t":"num","v":42}],"loc":{"line":6}}
