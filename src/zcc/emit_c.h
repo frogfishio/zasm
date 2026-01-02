@@ -1,0 +1,8 @@
+/* SPDX-FileCopyrightText: 2026 Frogfish */
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+#pragma once
+
+#include "jsonl.h"
+
+int emit_c_module(const recvec_t* recs, unsigned heap_slack);
