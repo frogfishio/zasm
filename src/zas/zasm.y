@@ -72,11 +72,13 @@ static void opnode_free_nodes(opnode_t* list) {
 }
 
 %token T_NL T_COLON T_COMMA T_LPAREN T_RPAREN
-%token T_CALL T_RET T_LD T_INC T_DEC T_CP T_JR T_ADD T_MUL T_DIVS T_DIVU T_REMS T_REMU T_AND T_OR T_XOR T_EQ T_NE T_LTS T_LTU T_LES T_LEU T_GTS T_GTU T_GES T_GEU T_CLZ T_CTZ T_POPC T_SLA T_SRA T_SRL T_ROL T_ROR T_LD8U T_LD8S T_ST8 T_ST16 T_LD16U T_LD16S T_LD32 T_ST32 T_FILL T_LDIR T_DROP T_SUB T_DB T_DW T_RESB T_STRDIR T_EQU T_PUBLIC T_EXTERN
+%token T_CALL T_RET T_LD T_INC T_DEC T_CP T_JR T_ADD T_MUL T_DIVS T_DIVU T_REMS T_REMU T_AND T_OR T_XOR T_EQ T_NE T_LTS T_LTU T_LES T_LEU T_GTS T_GTU T_GES T_GEU T_CLZ T_CTZ T_POPC T_SLA T_SRA T_SRL T_ROL T_ROR T_LD8U T_LD8S T_ST8 T_ST16 T_LD16U T_LD16S T_LD32 T_ST32 T_LD8U64 T_LD8S64 T_LD16U64 T_LD16S64 T_LD32U64 T_LD32S64 T_ST8_64 T_ST16_64 T_ST32_64 T_FILL T_LDIR T_DROP T_SUB T_DB T_DW T_RESB T_STRDIR T_EQU T_PUBLIC T_EXTERN
+%token T_ADD64 T_SUB64 T_MUL64 T_DIVS64 T_DIVU64 T_REMS64 T_REMU64 T_AND64 T_OR64 T_XOR64 T_EQ64 T_NE64 T_LTS64 T_LTU64 T_LES64 T_LEU64 T_GTS64 T_GTU64 T_GES64 T_GEU64 T_CLZ64 T_CTZ64 T_POPC64 T_SLA64 T_SRA64 T_SRL64 T_ROL64 T_ROR64 T_LD64 T_ST64
 %token <str> T_ID T_STR
 %token <num> T_NUM
 
 %type <str> label
+%type <str> jr_head
 %type <str> jr_tail
 %type <oplist> operand arg args
 %type <instr> stmtinfo
@@ -174,7 +176,7 @@ stmtinfo
       $$.m = "CP";
       $$.ops = opnode_append($2, $4);
     }
-  | T_JR T_ID jr_tail
+  | T_JR jr_head jr_tail
     {
       $$.m = "JR";
       if ($3) {
@@ -188,9 +190,19 @@ stmtinfo
       $$.m = "ADD";
       $$.ops = opnode_append($2, $4);
     }
+  | T_ADD64 operand T_COMMA operand
+    {
+      $$.m = "ADD64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_MUL operand T_COMMA operand
     {
       $$.m = "MUL";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_MUL64 operand T_COMMA operand
+    {
+      $$.m = "MUL64";
       $$.ops = opnode_append($2, $4);
     }
   | T_DIVS operand T_COMMA operand
@@ -198,9 +210,19 @@ stmtinfo
       $$.m = "DIVS";
       $$.ops = opnode_append($2, $4);
     }
+  | T_DIVS64 operand T_COMMA operand
+    {
+      $$.m = "DIVS64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_DIVU operand T_COMMA operand
     {
       $$.m = "DIVU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_DIVU64 operand T_COMMA operand
+    {
+      $$.m = "DIVU64";
       $$.ops = opnode_append($2, $4);
     }
   | T_REMS operand T_COMMA operand
@@ -208,9 +230,19 @@ stmtinfo
       $$.m = "REMS";
       $$.ops = opnode_append($2, $4);
     }
+  | T_REMS64 operand T_COMMA operand
+    {
+      $$.m = "REMS64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_REMU operand T_COMMA operand
     {
       $$.m = "REMU";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_REMU64 operand T_COMMA operand
+    {
+      $$.m = "REMU64";
       $$.ops = opnode_append($2, $4);
     }
   | T_AND operand T_COMMA operand
@@ -218,9 +250,19 @@ stmtinfo
       $$.m = "AND";
       $$.ops = opnode_append($2, $4);
     }
+  | T_AND64 operand T_COMMA operand
+    {
+      $$.m = "AND64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_OR operand T_COMMA operand
     {
       $$.m = "OR";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_OR64 operand T_COMMA operand
+    {
+      $$.m = "OR64";
       $$.ops = opnode_append($2, $4);
     }
   | T_XOR operand T_COMMA operand
@@ -228,9 +270,19 @@ stmtinfo
       $$.m = "XOR";
       $$.ops = opnode_append($2, $4);
     }
+  | T_XOR64 operand T_COMMA operand
+    {
+      $$.m = "XOR64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_EQ operand T_COMMA operand
     {
       $$.m = "EQ";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_EQ64 operand T_COMMA operand
+    {
+      $$.m = "EQ64";
       $$.ops = opnode_append($2, $4);
     }
   | T_NE operand T_COMMA operand
@@ -238,9 +290,19 @@ stmtinfo
       $$.m = "NE";
       $$.ops = opnode_append($2, $4);
     }
+  | T_NE64 operand T_COMMA operand
+    {
+      $$.m = "NE64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_LTS operand T_COMMA operand
     {
       $$.m = "LTS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LTS64 operand T_COMMA operand
+    {
+      $$.m = "LTS64";
       $$.ops = opnode_append($2, $4);
     }
   | T_LTU operand T_COMMA operand
@@ -248,9 +310,19 @@ stmtinfo
       $$.m = "LTU";
       $$.ops = opnode_append($2, $4);
     }
+  | T_LTU64 operand T_COMMA operand
+    {
+      $$.m = "LTU64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_LES operand T_COMMA operand
     {
       $$.m = "LES";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LES64 operand T_COMMA operand
+    {
+      $$.m = "LES64";
       $$.ops = opnode_append($2, $4);
     }
   | T_LEU operand T_COMMA operand
@@ -258,9 +330,19 @@ stmtinfo
       $$.m = "LEU";
       $$.ops = opnode_append($2, $4);
     }
+  | T_LEU64 operand T_COMMA operand
+    {
+      $$.m = "LEU64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_GTS operand T_COMMA operand
     {
       $$.m = "GTS";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GTS64 operand T_COMMA operand
+    {
+      $$.m = "GTS64";
       $$.ops = opnode_append($2, $4);
     }
   | T_GTU operand T_COMMA operand
@@ -268,9 +350,19 @@ stmtinfo
       $$.m = "GTU";
       $$.ops = opnode_append($2, $4);
     }
+  | T_GTU64 operand T_COMMA operand
+    {
+      $$.m = "GTU64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_GES operand T_COMMA operand
     {
       $$.m = "GES";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_GES64 operand T_COMMA operand
+    {
+      $$.m = "GES64";
       $$.ops = opnode_append($2, $4);
     }
   | T_GEU operand T_COMMA operand
@@ -278,9 +370,19 @@ stmtinfo
       $$.m = "GEU";
       $$.ops = opnode_append($2, $4);
     }
+  | T_GEU64 operand T_COMMA operand
+    {
+      $$.m = "GEU64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_CLZ operand
     {
       $$.m = "CLZ";
+      $$.ops = $2;
+    }
+  | T_CLZ64 operand
+    {
+      $$.m = "CLZ64";
       $$.ops = $2;
     }
   | T_CTZ operand
@@ -288,9 +390,19 @@ stmtinfo
       $$.m = "CTZ";
       $$.ops = $2;
     }
+  | T_CTZ64 operand
+    {
+      $$.m = "CTZ64";
+      $$.ops = $2;
+    }
   | T_POPC operand
     {
       $$.m = "POPC";
+      $$.ops = $2;
+    }
+  | T_POPC64 operand
+    {
+      $$.m = "POPC64";
       $$.ops = $2;
     }
   | T_SLA operand T_COMMA operand
@@ -298,9 +410,19 @@ stmtinfo
       $$.m = "SLA";
       $$.ops = opnode_append($2, $4);
     }
+  | T_SLA64 operand T_COMMA operand
+    {
+      $$.m = "SLA64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_SRA operand T_COMMA operand
     {
       $$.m = "SRA";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_SRA64 operand T_COMMA operand
+    {
+      $$.m = "SRA64";
       $$.ops = opnode_append($2, $4);
     }
   | T_SRL operand T_COMMA operand
@@ -308,14 +430,29 @@ stmtinfo
       $$.m = "SRL";
       $$.ops = opnode_append($2, $4);
     }
+  | T_SRL64 operand T_COMMA operand
+    {
+      $$.m = "SRL64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_ROL operand T_COMMA operand
     {
       $$.m = "ROL";
       $$.ops = opnode_append($2, $4);
     }
+  | T_ROL64 operand T_COMMA operand
+    {
+      $$.m = "ROL64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_ROR operand T_COMMA operand
     {
       $$.m = "ROR";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ROR64 operand T_COMMA operand
+    {
+      $$.m = "ROR64";
       $$.ops = opnode_append($2, $4);
     }
   | T_LD8U operand T_COMMA operand
@@ -326,6 +463,16 @@ stmtinfo
   | T_LD8S operand T_COMMA operand
     {
       $$.m = "LD8S";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD8U64 operand T_COMMA operand
+    {
+      $$.m = "LD8U64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD8S64 operand T_COMMA operand
+    {
+      $$.m = "LD8S64";
       $$.ops = opnode_append($2, $4);
     }
   | T_ST8 operand T_COMMA operand
@@ -348,14 +495,59 @@ stmtinfo
       $$.m = "LD16S";
       $$.ops = opnode_append($2, $4);
     }
+  | T_LD16U64 operand T_COMMA operand
+    {
+      $$.m = "LD16U64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD16S64 operand T_COMMA operand
+    {
+      $$.m = "LD16S64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_LD32 operand T_COMMA operand
     {
       $$.m = "LD32";
       $$.ops = opnode_append($2, $4);
     }
+  | T_LD32U64 operand T_COMMA operand
+    {
+      $$.m = "LD32U64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD32S64 operand T_COMMA operand
+    {
+      $$.m = "LD32S64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_LD64 operand T_COMMA operand
+    {
+      $$.m = "LD64";
+      $$.ops = opnode_append($2, $4);
+    }
   | T_ST32 operand T_COMMA operand
     {
       $$.m = "ST32";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST8_64 operand T_COMMA operand
+    {
+      $$.m = "ST8_64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST16_64 operand T_COMMA operand
+    {
+      $$.m = "ST16_64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST32_64 operand T_COMMA operand
+    {
+      $$.m = "ST32_64";
+      $$.ops = opnode_append($2, $4);
+    }
+  | T_ST64 operand T_COMMA operand
+    {
+      $$.m = "ST64";
       $$.ops = opnode_append($2, $4);
     }
   | T_FILL
@@ -378,11 +570,30 @@ stmtinfo
       $$.m = "SUB";
       $$.ops = opnode_append($2, $4);
     }
+  | T_SUB64 operand T_COMMA operand
+    {
+      $$.m = "SUB64";
+      $$.ops = opnode_append($2, $4);
+    }
   ;
 
 jr_tail
   : /* empty */ { $$ = NULL; }
   | T_COMMA T_ID { $$ = $2; }
+  ;
+
+jr_head
+  : T_ID { $$ = $1; }
+  | T_EQ { $$ = strdup("EQ"); }
+  | T_NE { $$ = strdup("NE"); }
+  | T_LTS { $$ = strdup("LTS"); }
+  | T_LTU { $$ = strdup("LTU"); }
+  | T_LES { $$ = strdup("LES"); }
+  | T_LEU { $$ = strdup("LEU"); }
+  | T_GTS { $$ = strdup("GTS"); }
+  | T_GTU { $$ = strdup("GTU"); }
+  | T_GES { $$ = strdup("GES"); }
+  | T_GEU { $$ = strdup("GEU"); }
   ;
 
 dirinfo

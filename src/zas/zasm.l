@@ -52,6 +52,20 @@ static char* dup_lexeme(void) {
   return s;
 }
 
+static void collapse_backslash_pairs(char* s) {
+  if (!s) return;
+  char* w = s;
+  for (char* r = s; *r; ++r) {
+    if (*r == '\\' && r[1] == '\\') {
+      *w++ = '\\';
+      r++;
+    } else {
+      *w++ = *r;
+    }
+  }
+  *w = 0;
+}
+
 static int emitted_eof_nl = 0;
 %}
 
@@ -74,6 +88,43 @@ HEX     0[xX][0-9A-Fa-f]+
 
 "CALL"              { tok_advance(); return T_CALL; }
 "RET"               { tok_advance(); return T_RET; }
+"ADD64"             { tok_advance(); return T_ADD64; }
+"SUB64"             { tok_advance(); return T_SUB64; }
+"MUL64"             { tok_advance(); return T_MUL64; }
+"DIVS64"            { tok_advance(); return T_DIVS64; }
+"DIVU64"            { tok_advance(); return T_DIVU64; }
+"REMS64"            { tok_advance(); return T_REMS64; }
+"REMU64"            { tok_advance(); return T_REMU64; }
+"AND64"             { tok_advance(); return T_AND64; }
+"OR64"              { tok_advance(); return T_OR64; }
+"XOR64"             { tok_advance(); return T_XOR64; }
+"EQ64"              { tok_advance(); return T_EQ64; }
+"NE64"              { tok_advance(); return T_NE64; }
+"LTS64"             { tok_advance(); return T_LTS64; }
+"LTU64"             { tok_advance(); return T_LTU64; }
+"LES64"             { tok_advance(); return T_LES64; }
+"LEU64"             { tok_advance(); return T_LEU64; }
+"GTS64"             { tok_advance(); return T_GTS64; }
+"GTU64"             { tok_advance(); return T_GTU64; }
+"GES64"             { tok_advance(); return T_GES64; }
+"GEU64"             { tok_advance(); return T_GEU64; }
+"CLZ64"             { tok_advance(); return T_CLZ64; }
+"CTZ64"             { tok_advance(); return T_CTZ64; }
+"POPC64"            { tok_advance(); return T_POPC64; }
+"SLA64"             { tok_advance(); return T_SLA64; }
+"SRA64"             { tok_advance(); return T_SRA64; }
+"SRL64"             { tok_advance(); return T_SRL64; }
+"ROL64"             { tok_advance(); return T_ROL64; }
+"ROR64"             { tok_advance(); return T_ROR64; }
+"LD8S64"            { tok_advance(); return T_LD8S64; }
+"LD8U64"            { tok_advance(); return T_LD8U64; }
+"LD16S64"           { tok_advance(); return T_LD16S64; }
+"LD16U64"           { tok_advance(); return T_LD16U64; }
+"LD32S64"           { tok_advance(); return T_LD32S64; }
+"LD32U64"           { tok_advance(); return T_LD32U64; }
+"ST8_64"            { tok_advance(); return T_ST8_64; }
+"ST16_64"           { tok_advance(); return T_ST16_64; }
+"ST32_64"           { tok_advance(); return T_ST32_64; }
 "LD"                { tok_advance(); return T_LD; }
 "INC"               { tok_advance(); return T_INC; }
 "DEC"               { tok_advance(); return T_DEC; }
@@ -106,6 +157,8 @@ HEX     0[xX][0-9A-Fa-f]+
 "SRL"               { tok_advance(); return T_SRL; }
 "ROL"               { tok_advance(); return T_ROL; }
 "ROR"               { tok_advance(); return T_ROR; }
+"LD64"              { tok_advance(); return T_LD64; }
+"ST64"              { tok_advance(); return T_ST64; }
 "LD8U"              { tok_advance(); return T_LD8U; }
 "LD8S"              { tok_advance(); return T_LD8S; }
 "ST8"               { tok_advance(); return T_ST8; }
@@ -137,6 +190,7 @@ HEX     0[xX][0-9A-Fa-f]+
                       raw[len-1] = 0;
                       char* inner = strdup(raw+1);
                       free(raw);
+                      collapse_backslash_pairs(inner);
                       yylval.str = inner;
                       return T_STR;
                     }

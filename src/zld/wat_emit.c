@@ -285,6 +285,38 @@ static const char* reg_local(const char* s) {
   return NULL;
 }
 
+static const char* reg_local64(const char* s) {
+  if (!s) return NULL;
+  if (strcmp(s, "HL") == 0) return "HL64";
+  if (strcmp(s, "DE") == 0) return "DE64";
+  if (strcmp(s, "A") == 0) return "A64";
+  if (strcmp(s, "BC") == 0) return "BC64";
+  if (strcmp(s, "IX") == 0) return "IX64";
+  return NULL;
+}
+
+static void emit_store_reg32(const char* reg_name, const char* reg_local_name) {
+  const char* wide = reg_local64(reg_name);
+  if (!wide) {
+    printf("        local.set $%s\n", reg_local_name);
+    return;
+  }
+  printf("        local.tee $%s\n", reg_local_name);
+  printf("        i64.extend_i32_s\n");
+  printf("        local.set $%s\n", wide);
+}
+
+static void emit_store_reg64(const char* reg_name, const char* reg_local64_name) {
+  const char* narrow = reg_local(reg_name);
+  if (!narrow) {
+    printf("        local.set $%s\n", reg_local64_name);
+    return;
+  }
+  printf("        local.tee $%s\n", reg_local64_name);
+  printf("        i32.wrap_i64\n");
+  printf("        local.set $%s\n", narrow);
+}
+
 static int resolve_block_index(const block_t* blocks, const size_t* block_target,
                                size_t nblocks, const char* label, long* out_idx) {
   for (size_t t = 0; t < nblocks; t++) {
@@ -482,6 +514,90 @@ static int emit_rhs_scalar(const char* opname, const operand_t* rhs, const gsymt
   return 1;
 }
 
+static int emit_rhs_scalar64(const char* opname, const operand_t* rhs, const gsymtab_t* g, int line) {
+  if (rhs->t == JOP_SYM && rhs->s) {
+    const char* src_local = reg_local64(rhs->s);
+    if (src_local) {
+      printf("        local.get $%s\n", src_local);
+      return 0;
+    }
+    long v = 0;
+    if (!gsymtab_get(g, rhs->s, &v)) {
+      fprintf(stderr, "zld: unknown symbol %s at line %d\n", rhs->s, line);
+      return 1;
+    }
+    printf("        global.get $%s\n", rhs->s);
+    printf("        i64.extend_i32_u\n");
+    return 0;
+  }
+  if (rhs->t == JOP_NUM) {
+    printf("        i64.const %ld\n", rhs->n);
+    return 0;
+  }
+  fprintf(stderr, "zld: %s rhs must be register, number, or symbol at line %d\n", opname, line);
+  return 1;
+}
+
+static int emit_binary_i64_local_op(const char* opname, const record_t* r,
+                                    const gsymtab_t* g, const char* wasm_op) {
+  if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+    fprintf(stderr, "zld: %s expects register destination at line %d\n", opname, r->line);
+    return 1;
+  }
+  const char* reg = r->ops[0].s;
+  const char* dst_local64 = reg_local64(reg);
+  if (!dst_local64) {
+    fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+    return 1;
+  }
+  printf("        local.get $%s\n", dst_local64);
+  if (emit_rhs_scalar64(opname, &r->ops[1], g, r->line) != 0) {
+    return 1;
+  }
+  printf("        %s\n", wasm_op);
+  emit_store_reg64(reg, dst_local64);
+  return 0;
+}
+
+static int emit_cmp_i64_local_op(const char* opname, const record_t* r,
+                                 const gsymtab_t* g, const char* wasm_cmp) {
+  if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+    fprintf(stderr, "zld: %s expects register destination at line %d\n", opname, r->line);
+    return 1;
+  }
+  const char* reg = r->ops[0].s;
+  const char* dst_local64 = reg_local64(reg);
+  if (!dst_local64) {
+    fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+    return 1;
+  }
+  printf("        local.get $%s\n", dst_local64);
+  if (emit_rhs_scalar64(opname, &r->ops[1], g, r->line) != 0) {
+    return 1;
+  }
+  printf("        %s\n", wasm_cmp);
+  printf("        i64.extend_i32_u\n");
+  emit_store_reg64(reg, dst_local64);
+  return 0;
+}
+
+static int emit_unary_i64_local_op(const char* opname, const record_t* r, const char* wasm_op) {
+  if (r->nops != 1 || r->ops[0].t != JOP_SYM) {
+    fprintf(stderr, "zld: %s expects a single register operand at line %d\n", opname, r->line);
+    return 1;
+  }
+  const char* reg = r->ops[0].s;
+  const char* dst_local64 = reg_local64(reg);
+  if (!dst_local64) {
+    fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+    return 1;
+  }
+  printf("        local.get $%s\n", dst_local64);
+  printf("        %s\n", wasm_op);
+  emit_store_reg64(reg, dst_local64);
+  return 0;
+}
+
 static int emit_addr_from_mem(const char* opname, const operand_t* mem, const gsymtab_t* g, int line) {
   if (mem->t != JOP_MEM || !mem->s) {
     fprintf(stderr, "zld: %s expects memory operand at line %d\n", opname, line);
@@ -498,6 +614,21 @@ static int emit_addr_from_mem(const char* opname, const operand_t* mem, const gs
     return 1;
   }
   printf("        global.get $%s\n", mem->s);
+  return 0;
+}
+
+static int emit_memop_from_operand64(const char* opname, const operand_t* rhs,
+                                     const gsymtab_t* g, int line, const char* wasm_op) {
+  if (rhs->t == JOP_MEM) {
+    if (emit_addr_from_mem(opname, rhs, g, line) != 0) {
+      return 1;
+    }
+    printf("        %s\n", wasm_op);
+    return 0;
+  }
+  if (emit_rhs_scalar64(opname, rhs, g, line) != 0) {
+    return 1;
+  }
   return 0;
 }
 
@@ -591,6 +722,11 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
   printf("    (local $A  i32)\n");
   printf("    (local $BC i32)\n");
   printf("    (local $IX i32)\n");
+  printf("    (local $HL64 i64)\n");
+  printf("    (local $DE64 i64)\n");
+  printf("    (local $A64  i64)\n");
+  printf("    (local $BC64 i64)\n");
+  printf("    (local $IX64 i64)\n");
   printf("    (local $pc i32)\n");
   printf("    (local $cmp i32)\n");
 
@@ -760,7 +896,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
         printf("        local.get $%s\n", reg);
         printf("        i32.const 1\n");
         printf("        i32.add\n");
-        printf("        local.set $%s\n", reg);
+        emit_store_reg32(reg, reg);
         continue;
       }
 
@@ -779,7 +915,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
         printf("        local.get $%s\n", reg);
         printf("        i32.const 1\n");
         printf("        i32.sub\n");
-        printf("        local.set $%s\n", reg);
+        emit_store_reg32(reg, reg);
         continue;
       }
 
@@ -806,7 +942,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           }
           printf("        local.get $HL\n");
           printf("        i32.load8_u offset=0 align=1\n");
-          printf("        local.set $A\n");
+          emit_store_reg32("A", "A");
           continue;
         }
 
@@ -851,26 +987,26 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
               goto cleanup;
             }
             printf("        local.get $%s\n", src_local);
-            printf("        local.set $%s\n", dst_local);
+            emit_store_reg32(reg, dst_local);
             continue;
           }
         }
 
         if (strcmp(reg, "HL") == 0) {
           if (emit_expr_for_operand(rhs, g, r->line) != 0) { rc = 1; goto cleanup; }
-          printf("        local.set $HL\n");
+          emit_store_reg32("HL", "HL");
         } else if (strcmp(reg, "DE") == 0) {
           if (emit_expr_for_operand(rhs, g, r->line) != 0) { rc = 1; goto cleanup; }
-          printf("        local.set $DE\n");
+          emit_store_reg32("DE", "DE");
         } else if (strcmp(reg, "A") == 0) {
           if (emit_expr_for_operand(rhs, g, r->line) != 0) { rc = 1; goto cleanup; }
-          printf("        local.set $A\n");
+          emit_store_reg32("A", "A");
         } else if (strcmp(reg, "BC") == 0) {
           if (emit_expr_for_operand(rhs, g, r->line) != 0) { rc = 1; goto cleanup; }
-          printf("        local.set $BC\n");
+          emit_store_reg32("BC", "BC");
         } else if (strcmp(reg, "IX") == 0) {
           if (emit_expr_for_operand(rhs, g, r->line) != 0) { rc = 1; goto cleanup; }
-          printf("        local.set $IX\n");
+          emit_store_reg32("IX", "IX");
         } else {
           printf("        ;; unsupported reg %s\n", reg);
         }
@@ -878,6 +1014,31 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
       }
 
       if (strcmp(r->m, "CP") == 0) {
+
+        if (strcmp(r->m, "MUL64") == 0) {
+          if (emit_binary_i64_local_op("MUL64", r, g, "i64.mul") != 0) { rc = 1; goto cleanup; }
+          continue;
+        }
+
+        if (strcmp(r->m, "DIVS64") == 0) {
+          if (emit_binary_i64_local_op("DIVS64", r, g, "i64.div_s") != 0) { rc = 1; goto cleanup; }
+          continue;
+        }
+
+        if (strcmp(r->m, "DIVU64") == 0) {
+          if (emit_binary_i64_local_op("DIVU64", r, g, "i64.div_u") != 0) { rc = 1; goto cleanup; }
+          continue;
+        }
+
+        if (strcmp(r->m, "REMS64") == 0) {
+          if (emit_binary_i64_local_op("REMS64", r, g, "i64.rem_s") != 0) { rc = 1; goto cleanup; }
+          continue;
+        }
+
+        if (strcmp(r->m, "REMU64") == 0) {
+          if (emit_binary_i64_local_op("REMU64", r, g, "i64.rem_u") != 0) { rc = 1; goto cleanup; }
+          continue;
+        }
         if (r->nops != 2 || r->ops[0].t != JOP_SYM || strcmp(r->ops[0].s, "HL") != 0) {
           fprintf(stderr, "zld: CP supports only HL as lhs at line %d\n", r->line);
           rc = 1;
@@ -918,14 +1079,14 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           printf("        local.get $HL\n");
           printf("        i32.const %ld\n", rhs->n);
           printf("        i32.add\n");
-          printf("        local.set $HL\n");
+          emit_store_reg32("HL", "HL");
           continue;
         }
         if (rhs->t == JOP_SYM && rhs->s && strcmp(rhs->s, "DE") == 0) {
           printf("        local.get $HL\n");
           printf("        local.get $DE\n");
           printf("        i32.add\n");
-          printf("        local.set $HL\n");
+          emit_store_reg32("HL", "HL");
           continue;
         }
         fprintf(stderr, "zld: ADD HL expects immediate at line %d\n", r->line);
@@ -944,14 +1105,14 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           printf("        local.get $HL\n");
           printf("        i32.const %ld\n", rhs->n);
           printf("        i32.sub\n");
-          printf("        local.set $HL\n");
+          emit_store_reg32("HL", "HL");
           continue;
         }
         if (rhs->t == JOP_SYM && rhs->s && strcmp(rhs->s, "DE") == 0) {
           printf("        local.get $HL\n");
           printf("        local.get $DE\n");
           printf("        i32.sub\n");
-          printf("        local.set $HL\n");
+          emit_store_reg32("HL", "HL");
           continue;
         }
         fprintf(stderr, "zld: SUB HL expects immediate or DE at line %d\n", r->line);
@@ -1001,7 +1162,17 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.and\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "AND64") == 0) {
+        if (emit_binary_i64_local_op("AND64", r, g, "i64.and") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "ADD64") == 0) {
+        if (emit_binary_i64_local_op("ADD64", r, g, "i64.add") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1047,7 +1218,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.or\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "OR64") == 0) {
+        if (emit_binary_i64_local_op("OR64", r, g, "i64.or") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1093,7 +1269,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.xor\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "XOR64") == 0) {
+        if (emit_binary_i64_local_op("XOR64", r, g, "i64.xor") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1135,7 +1316,27 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        %s\n", cmpop);
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      const char* cmpop64 = NULL;
+      if (strcmp(r->m, "EQ64") == 0) cmpop64 = "i64.eq";
+      else if (strcmp(r->m, "NE64") == 0) cmpop64 = "i64.ne";
+      else if (strcmp(r->m, "LTS64") == 0) cmpop64 = "i64.lt_s";
+      else if (strcmp(r->m, "LTU64") == 0) cmpop64 = "i64.lt_u";
+      else if (strcmp(r->m, "LES64") == 0) cmpop64 = "i64.le_s";
+      else if (strcmp(r->m, "LEU64") == 0) cmpop64 = "i64.le_u";
+      else if (strcmp(r->m, "GTS64") == 0) cmpop64 = "i64.gt_s";
+      else if (strcmp(r->m, "GTU64") == 0) cmpop64 = "i64.gt_u";
+      else if (strcmp(r->m, "GES64") == 0) cmpop64 = "i64.ge_s";
+      else if (strcmp(r->m, "GEU64") == 0) cmpop64 = "i64.ge_u";
+
+      if (cmpop64) {
+        if (emit_cmp_i64_local_op(r->m, r, g, cmpop64) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
         continue;
       }
 
@@ -1159,7 +1360,22 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
         } else {
           printf("        i32.popcnt\n");
         }
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(r->ops[0].s, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "CLZ64") == 0) {
+        if (emit_unary_i64_local_op("CLZ64", r, "i64.clz") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "CTZ64") == 0) {
+        if (emit_unary_i64_local_op("CTZ64", r, "i64.ctz") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "POPC64") == 0) {
+        if (emit_unary_i64_local_op("POPC64", r, "i64.popcnt") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1205,7 +1421,17 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.shl\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SLA64") == 0) {
+        if (emit_binary_i64_local_op("SLA64", r, g, "i64.shl") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "SUB64") == 0) {
+        if (emit_binary_i64_local_op("SUB64", r, g, "i64.sub") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1251,7 +1477,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.shr_s\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SRA64") == 0) {
+        if (emit_binary_i64_local_op("SRA64", r, g, "i64.shr_s") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1297,7 +1528,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.shr_u\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "SRL64") == 0) {
+        if (emit_binary_i64_local_op("SRL64", r, g, "i64.shr_u") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1343,7 +1579,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.rotl\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ROL64") == 0) {
+        if (emit_binary_i64_local_op("ROL64", r, g, "i64.rotl") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1389,7 +1630,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.rotr\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "ROR64") == 0) {
+        if (emit_binary_i64_local_op("ROR64", r, g, "i64.rotr") != 0) { rc = 1; goto cleanup; }
         continue;
       }
 
@@ -1399,9 +1645,10 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           rc = 1;
           goto cleanup;
         }
-        const char* dst_local = reg_local(r->ops[0].s);
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
         if (!dst_local) {
-          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -1410,7 +1657,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.load8_u offset=0 align=1\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
         continue;
       }
 
@@ -1420,9 +1667,10 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           rc = 1;
           goto cleanup;
         }
-        const char* dst_local = reg_local(r->ops[0].s);
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
         if (!dst_local) {
-          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -1431,7 +1679,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.load8_s offset=0 align=1\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
         continue;
       }
 
@@ -1477,9 +1725,10 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           rc = 1;
           goto cleanup;
         }
-        const char* dst_local = reg_local(r->ops[0].s);
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
         if (!dst_local) {
-          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -1488,7 +1737,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.load16_u offset=0 align=2\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
         continue;
       }
 
@@ -1498,9 +1747,10 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           rc = 1;
           goto cleanup;
         }
-        const char* dst_local = reg_local(r->ops[0].s);
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
         if (!dst_local) {
-          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -1509,7 +1759,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.load16_s offset=0 align=2\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
         continue;
       }
 
@@ -1519,9 +1769,10 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           rc = 1;
           goto cleanup;
         }
-        const char* dst_local = reg_local(r->ops[0].s);
+        const char* reg = r->ops[0].s;
+        const char* dst_local = reg_local(reg);
         if (!dst_local) {
-          fprintf(stderr, "zld: unknown register %s at line %d\n", r->ops[0].s, r->line);
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -1530,7 +1781,232 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           goto cleanup;
         }
         printf("        i32.load offset=0 align=4\n");
-        printf("        local.set $%s\n", dst_local);
+        emit_store_reg32(reg, dst_local);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_memop_from_operand64("LD64", &r->ops[1], g, r->line, "i64.load offset=0 align=8") != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD8U64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD8U64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD8U64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load8_u offset=0 align=1\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD8S64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD8S64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD8S64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load8_s offset=0 align=1\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD16U64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD16U64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD16U64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load16_u offset=0 align=2\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD16S64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD16S64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD16S64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load16_s offset=0 align=2\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD32U64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD32U64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD32U64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load32_u offset=0 align=4\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "LD32S64") == 0) {
+        if (r->nops != 2 || r->ops[0].t != JOP_SYM) {
+          fprintf(stderr, "zld: LD32S64 expects register destination at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* dst_local64 = reg_local64(reg);
+        if (!dst_local64) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("LD32S64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.load32_s offset=0 align=4\n");
+        emit_store_reg64(reg, dst_local64);
+        continue;
+      }
+
+      if (strcmp(r->m, "ST64") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST64 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST64", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar64("ST64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.store offset=0 align=8\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "ST8_64") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST8_64 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST8_64", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar64("ST8_64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.store8 offset=0 align=1\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "ST16_64") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST16_64 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST16_64", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar64("ST16_64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.store16 offset=0 align=2\n");
+        continue;
+      }
+
+      if (strcmp(r->m, "ST32_64") == 0) {
+        if (r->nops != 2) {
+          fprintf(stderr, "zld: ST32_64 expects memory destination and value at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_addr_from_mem("ST32_64", &r->ops[0], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        if (emit_rhs_scalar64("ST32_64", &r->ops[1], g, r->line) != 0) {
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        i64.store32 offset=0 align=4\n");
         continue;
       }
 
