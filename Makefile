@@ -29,9 +29,6 @@ WASMTIME_C_API_DIR ?= external/wasmtime-c-api
 ZAS_BUILD := $(BUILD)/zas
 ZRUN_BUILD := $(BUILD)/zrun
 
-ZCC_DIR := zcc
-ZCC_BUILD_DIR := $(abspath $(BUILD))/zcc
-
 ZAS_SRC := \
   src/zas/main.c \
   src/zas/emit_json.c
@@ -49,22 +46,16 @@ ZAS_OBJ := \
 
 ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded-internal-declaration
 
-.PHONY: all clean zas zld zcc zrun zlnt dirs install test-hello test-wat test-loop-wat test-loop test-zrun-log test-ld-regreg test-add-hl-imm test-data-directives test-unknownsym test-compare-conds test-badcond test-badlabel test-bytes test-badmem test-arithmetic test-cat test-upper test-stream test-regmoves test-asm-suite test-alloc test-isa-smoke test-fuzz-zas test-fuzz-zld test-wat-validate test-wasm-opt test-linkage test-manifest test-str-equ test-zlnt test-fizzbuzz test-twofile test-strict test-trap
+.PHONY: all clean zas zld zrun zlnt dirs install test-hello test-wat test-loop-wat test-loop test-zrun-log test-ld-regreg test-add-hl-imm test-data-directives test-unknownsym test-compare-conds test-badcond test-badlabel test-bytes test-badmem test-arithmetic test-cat test-upper test-stream test-regmoves test-asm-suite test-alloc test-isa-smoke test-fuzz-zas test-fuzz-zld test-wat-validate test-wasm-opt test-linkage test-manifest test-str-equ test-zlnt test-fizzbuzz test-twofile test-strict test-trap
 
-all: zas zld zcc
+all: zas zld
 
-install: zas zld zcc zrun zlnt
+install: zas zld zrun zlnt
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
 	@install -m 0755 $(BIN)/zlnt $(DESTDIR)$(BINDIR)/zlnt
-	$(MAKE) -C $(ZCC_DIR) install \
-	  DESTDIR="$(DESTDIR)" \
-	  PREFIX="$(PREFIX)" \
-	  BIN="$(abspath $(BIN))" \
-	  BUILD="$(ZCC_BUILD_DIR)" \
-	  ZASM_ROOT="$(CURDIR)"
 
 dirs:
 	mkdir -p $(BIN) $(ZAS_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD)
@@ -319,7 +310,7 @@ ZRUN_OBJ := \
   $(ZRUN_BUILD)/wasmtime_embed.o
 
 ZRUN_CPPFLAGS := -I$(WASMTIME_C_API_DIR)/include
-ZRUN_LDFLAGS := -L$(WASMTIME_C_API_DIR)/lib -lwasmtime
+ZRUN_LDFLAGS := $(WASMTIME_C_API_DIR)/lib/libwasmtime.a
 ZRUN_CFLAGS := $(CFLAGS) -Wno-strict-prototypes
 
 UNAME_S := $(shell uname -s)
@@ -327,7 +318,7 @@ ifeq ($(UNAME_S),Linux)
   ZRUN_LDFLAGS += -ldl -pthread
 endif
 ifeq ($(UNAME_S),Darwin)
-  ZRUN_LDFLAGS += -pthread -Wl,-rpath,$(WASMTIME_C_API_DIR)/lib
+  ZRUN_LDFLAGS += -pthread
 endif
 
 $(ZRUN_BUILD)/%.o: src/zrun/%.c | dirs
