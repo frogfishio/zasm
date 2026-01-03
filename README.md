@@ -19,6 +19,13 @@ From there, any standard WAT-to-WASM tool (`wat2wasm`, etc.) produces the final 
 Start here: `docs/developers.md` for setup + hello world.
 
 ---
+### New flags (memory limits)
+
+- `zld --mem-max <size>` sets a maximum linear memory size in the emitted module (bytes/kb/mb/gb).
+- `zrun --mem <size>` caps runtime memory (default `256MB`, floor `2MB`, ceiling `2GB`).
+- `ZRUN_MEM` can override the default cap (same syntax as `--mem`).
+
+---
 
 ### Why use zasm? (The "Yeah, I need this" scenarios)
 
