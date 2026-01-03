@@ -30,5 +30,9 @@ for wat in "$@"; do
   wasm="$tmpdir/$(basename "${wat%.wat}").wasm"
   out="$tmpdir/$(basename "${wat%.wat}").opt.wasm"
   wasm-tools parse "$wat" -o "$wasm"
-  wasm-opt --validate -O2 "$wasm" -o "$out"
+  if wasm-opt --help | rg -q -- '--validate'; then
+    wasm-opt --validate -O2 "$wasm" -o "$out"
+  else
+    wasm-opt -O2 "$wasm" -o "$out"
+  fi
 done

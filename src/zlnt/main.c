@@ -1,10 +1,13 @@
 /* SPDX-FileCopyrightText: 2025 Frogfish */
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "jsonl.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
 
 static int is_primitive(const char* s) {
   return s && s[0] == '_';

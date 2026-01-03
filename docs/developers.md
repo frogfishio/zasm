@@ -26,6 +26,15 @@ To build the core toolchain, you need a standard C development environment:
 * **Parser Generators:** `flex` (lexical analyzer) and `bison` (parser).
 * **WASM Tooling:** `wat2wasm` (from [wabt](https://github.com/WebAssembly/wabt)) if you want `.wasm` output. `zrun` can run `.wat` directly.
 
+For reproducible tooling across macOS and Linux, install the pinned versions used by this repo:
+
+```bash
+scripts/install-tools.sh
+source tools/env.sh
+```
+
+Edit `tools/versions.env` if you need to update the pinned tool versions.
+
 ### Building the Toolchain
 
 ```bash

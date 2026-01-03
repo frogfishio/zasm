@@ -1,6 +1,8 @@
 /* SPDX-FileCopyrightText: 2025 Frogfish */
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#define _POSIX_C_SOURCE 200809L
+
 #include "wat_emit.h"
 #include <stdio.h>
 #include <stdlib.h>

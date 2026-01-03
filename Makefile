@@ -3,7 +3,7 @@
 
 # zasm (zas) Makefile
 # Builds:
-#   bin/zas  (ZASM -> JSONL IR)
+#   bin/<platform>/zas  (ZASM -> JSONL IR)
 
 SHELL := /bin/bash
 .ONESHELL:
@@ -12,6 +12,7 @@ SHELL := /bin/bash
 CC      ?= clang
 CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
 CPPFLAGS?= -Isrc/zas -Isrc/common -Ibuild/zas -Iinclude -Izcc/include
+CPPFLAGS += -D_POSIX_C_SOURCE=200809L
 LDFLAGS ?=
 
 # You can override these:
@@ -20,14 +21,43 @@ BISON ?= bison
 FLEX  ?= flex
 
 BUILD := build
-BIN   := bin
+BIN_ROOT := bin
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
-WASMTIME_C_API_DIR ?= external/wasmtime-c-api
+WASMTIME_C_API_DIR_BASE := external/wasmtime-c-api
 
 ZAS_BUILD := $(BUILD)/zas
 ZRUN_BUILD := $(BUILD)/zrun
+
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+
+ifeq ($(UNAME_S),Darwin)
+  PLATFORM_OS := macos
+else ifeq ($(UNAME_S),Linux)
+  PLATFORM_OS := linux
+else
+  PLATFORM_OS := $(UNAME_S)
+endif
+
+ifeq ($(UNAME_M),x86_64)
+  PLATFORM_ARCH := x86_64
+else ifeq ($(UNAME_M),amd64)
+  PLATFORM_ARCH := x86_64
+else ifeq ($(UNAME_M),aarch64)
+  PLATFORM_ARCH := arm64
+else ifeq ($(UNAME_M),arm64)
+  PLATFORM_ARCH := arm64
+else
+  PLATFORM_ARCH := $(UNAME_M)
+endif
+
+PLATFORM ?= $(PLATFORM_OS)-$(PLATFORM_ARCH)
+
+BIN := $(BIN_ROOT)/$(PLATFORM)
+
+WASMTIME_C_API_DIR ?= $(if $(wildcard $(WASMTIME_C_API_DIR_BASE)/$(PLATFORM)),$(WASMTIME_C_API_DIR_BASE)/$(PLATFORM),$(WASMTIME_C_API_DIR_BASE))
 
 ZAS_SRC := \
   src/zas/main.c \
@@ -85,6 +115,7 @@ $(ZAS_BUILD)/lex.yy.o: $(ZAS_BUILD)/lex.yy.c $(ZAS_BUILD)/zasm.tab.h | dirs
 
 zas: $(ZAS_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZAS_OBJ) -o $(BIN)/zas $(LDFLAGS)
+	ln -sf $(PLATFORM)/zas $(BIN_ROOT)/zas
 
 # --- Quick sanity test ---
 
@@ -235,7 +266,7 @@ test-zrun-log: zas zld zrun
 	@rg -q "^\\[demo\\] hello" /tmp/log.err
 
 clean:
-	rm -rf $(BUILD) $(BIN)
+	rm -rf $(BUILD) $(BIN_ROOT)
 
 
 # ---- zld (IR -> WAT) ----
@@ -257,6 +288,7 @@ $(ZLD_BUILD)/%.o: src/zld/%.c | dirs
 
 zld: $(ZLD_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZLD_OBJ) -o $(BIN)/zld $(LDFLAGS)
+	ln -sf $(PLATFORM)/zld $(BIN_ROOT)/zld
 
 .PHONY: zld
 
@@ -294,6 +326,7 @@ $(ZLNT_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
 
 zlnt: $(ZLNT_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZLNT_OBJ) -o $(BIN)/zlnt $(LDFLAGS)
+	ln -sf $(PLATFORM)/zlnt $(BIN_ROOT)/zlnt
 
 .PHONY: zlnt
 
@@ -313,9 +346,8 @@ ZRUN_CPPFLAGS := -I$(WASMTIME_C_API_DIR)/include
 ZRUN_LDFLAGS := $(WASMTIME_C_API_DIR)/lib/libwasmtime.a
 ZRUN_CFLAGS := $(CFLAGS) -Wno-strict-prototypes
 
-UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Linux)
-  ZRUN_LDFLAGS += -ldl -pthread
+  ZRUN_LDFLAGS += -ldl -pthread -lm
 endif
 ifeq ($(UNAME_S),Darwin)
   ZRUN_LDFLAGS += -pthread
@@ -326,3 +358,4 @@ $(ZRUN_BUILD)/%.o: src/zrun/%.c | dirs
 
 zrun: $(ZRUN_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZRUN_OBJ) -o $(BIN)/zrun $(LDFLAGS) $(ZRUN_LDFLAGS)
+	ln -sf $(PLATFORM)/zrun $(BIN_ROOT)/zrun

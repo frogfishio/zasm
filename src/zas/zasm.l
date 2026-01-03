@@ -4,6 +4,8 @@
 %option noyywrap nodefault yylineno
 
 %{
+#define _POSIX_C_SOURCE 200809L
+
 #include "zasm_types.h"
 #include "zasm.tab.h"
 #include <stdlib.h>
