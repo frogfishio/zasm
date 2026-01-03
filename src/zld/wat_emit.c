@@ -2450,7 +2450,7 @@ static int build_data_and_globals(const recvec_t* recs, datavec_t* data, gsymtab
   return 0;
 }
 
-int emit_wat_module(const recvec_t* recs) {
+int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   datavec_t data;
   datavec_init(&data, 8);
 
@@ -2554,7 +2554,11 @@ int emit_wat_module(const recvec_t* recs) {
   }
   if (imports.n) printf("\n");
 
-  printf("  (memory (export \"memory\") 1)\n\n");
+  if (mem_max_pages > 0) {
+    printf("  (memory (export \"memory\") 1 %zu)\n\n", mem_max_pages);
+  } else {
+    printf("  (memory (export \"memory\") 1)\n\n");
+  }
 
 
   // globals (for any data labels and DW constants)

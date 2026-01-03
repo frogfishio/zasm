@@ -28,6 +28,27 @@ static wasm_trap_t* trap_msg(const char* msg) {
   return wasmtime_trap_new(msg, strlen(msg));
 }
 
+static wasm_trap_t* trapf(const char* fmt, ...) {
+  char buf[256];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, ap);
+  va_end(ap);
+  return wasmtime_trap_new(buf, strlen(buf));
+}
+
+static void format_bytes(char* out, size_t out_len, uint64_t bytes) {
+  if (bytes % (1024ull * 1024ull * 1024ull) == 0) {
+    snprintf(out, out_len, "%lluGB", (unsigned long long)(bytes / (1024ull * 1024ull * 1024ull)));
+  } else if (bytes % (1024ull * 1024ull) == 0) {
+    snprintf(out, out_len, "%lluMB", (unsigned long long)(bytes / (1024ull * 1024ull)));
+  } else if (bytes % 1024ull == 0) {
+    snprintf(out, out_len, "%lluKB", (unsigned long long)(bytes / 1024ull));
+  } else {
+    snprintf(out, out_len, "%lluB", (unsigned long long)bytes);
+  }
+}
+
 static void allocs_add(zrun_abi_env_t* e, size_t ptr) {
   if (e->allocs_n == e->allocs_cap) {
     size_t cap = e->allocs_cap ? e->allocs_cap * 2 : 8;
@@ -255,8 +276,36 @@ wasm_trap_t* zrun_alloc(void* env, wasmtime_caller_t* caller,
   size_t n = (size_t)size;
   size_t aligned = (n + 3u) & ~3u;
   if (e->heap_ptr + aligned > mem_size) {
-    if (e->strict) return trap_msg("zrun: alloc OOB");
-    results[0].of.i32 = -1; return NULL;
+    wasmtime_context_t* ctx = wasmtime_caller_context(caller);
+    uint64_t page_size = wasmtime_memory_page_size(ctx, &mem);
+    uint64_t needed = (uint64_t)e->heap_ptr + (uint64_t)aligned;
+    uint64_t current_pages = page_size ? (mem_size / page_size) : 0;
+    uint64_t needed_pages = page_size ? ((needed + page_size - 1) / page_size) : 0;
+    uint64_t cap_bytes = e->mem_cap_bytes;
+    uint64_t cap_pages = 0;
+    if (cap_bytes > 0 && page_size > 0) {
+      cap_pages = cap_bytes / page_size;
+      if (needed_pages > cap_pages) {
+        char cap_buf[32];
+        format_bytes(cap_buf, sizeof(cap_buf), cap_bytes);
+        return trapf("OOM: exceeded runner cap (cap=%s, requested grow beyond %llu pages)",
+                     cap_buf, (unsigned long long)cap_pages);
+      }
+    }
+    if (needed_pages > current_pages) {
+      uint64_t prev = 0;
+      wasmtime_error_t* err = wasmtime_memory_grow(ctx, &mem, needed_pages - current_pages, &prev);
+      if (err) {
+        wasmtime_error_delete(err);
+        if (e->strict) return trap_msg("zrun: alloc memory grow failed");
+        results[0].of.i32 = -1; return NULL;
+      }
+      mem_size = wasmtime_memory_data_size(ctx, &mem);
+    }
+    if (e->heap_ptr + aligned > mem_size) {
+      if (e->strict) return trap_msg("zrun: alloc OOB");
+      results[0].of.i32 = -1; return NULL;
+    }
   }
 
   size_t out = e->heap_ptr;

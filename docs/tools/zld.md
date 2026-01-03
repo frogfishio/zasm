@@ -78,7 +78,8 @@ Other primitives (e.g. `_log`, `_time`, `_crypto`) are rejected for now.
 
 ## Memory layout (v1)
 
-- Memory is declared as one page (`(memory (export "memory") 1)`).
+- Memory is declared with a minimum of one page.
+- Use `--mem-max` to emit a maximum page cap in the module.
 - Data cursor starts at offset **8** and stays 4-byte aligned.
 - `__heap_base` is emitted as the first free byte after static data.
 - `__heap_base` is exported for host allocators (e.g., `zrun`).
@@ -96,6 +97,7 @@ wat2wasm out.wat -o out.wasm
 - `zld --version` prints the tool version.
 - `zld --manifest` emits a JSON manifest (exports/imports/primitives).
 - `zld --names` emits a custom name section for functions/globals.
+- `zld --mem-max <size>` sets a maximum memory size (bytes/kb/mb/gb), rounded up to pages.
 
 ## IR versioning
 

@@ -12,6 +12,7 @@ typedef struct {
   int heap_init;
   int trace;
   int strict;
+  uint64_t mem_cap_bytes;
   size_t* allocs;
   size_t allocs_n;
   size_t allocs_cap;

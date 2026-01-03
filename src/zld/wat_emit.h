@@ -25,8 +25,9 @@ void datavec_add(datavec_t* d, const char* name, const uint8_t* bytes, size_t le
 void datavec_free(datavec_t* d);
 
 // Builds data segments + globals map for DB/DW and emits WAT to stdout.
+// mem_max_pages == 0 means no declared maximum.
 // Return 0 on success, nonzero on error.
-int emit_wat_module(const recvec_t* recs);
+int emit_wat_module(const recvec_t* recs, size_t mem_max_pages);
 
 // Emits a JSON manifest of exports/imports/primitives to stdout.
 // Return 0 on success, nonzero on error.

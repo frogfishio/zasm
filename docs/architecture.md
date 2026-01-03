@@ -175,6 +175,13 @@ This is a *policy*, not an accident. Deterministic layout is important for repro
 
 Dynamic allocation is supported via an explicit primitive surface (e.g. `_alloc/_free`) rather than via an OS API.
 
+Memory limits are enforced at two layers:
+
+- `zld` emits a minimum of one page; it only emits a maximum when `--mem-max` is provided.
+- `zrun` caps memory by default at 256MB (4096 pages). Override with `--mem` or `ZRUN_MEM`.
+- Runner caps have a floor of 2MB and a ceiling of 2GB.
+- If a program attempts to grow past the runner cap, `zrun` traps with `OOM: exceeded runner cap (cap=..., requested grow beyond ... pages)`.
+
 ---
 
 ## Error handling
