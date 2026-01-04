@@ -53,6 +53,10 @@ All imports live under module name `"lembeh"`.
 - Host primitives are explicit and MUST be allowlisted by the build/runtime.
 - If a primitive is disallowed, module instantiation MUST fail (fail closed).
 
+## ABI decisions
+
+- `res_write` to a closed/invalid response stream MUST return `-1` (error). Hosts MAY surface this as a trap in strict mode.
+
 ## Versioning and compatibility
 
 - ABI version is **v1.0.0**.

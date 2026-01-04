@@ -122,6 +122,24 @@ sudo make install
 
 ```
 
+**Make targets:**
+
+```sh
+make build        # Build all binaries (zas/zld/zrun/zlnt)
+make dist         # Build and copy binaries to dist/<platform> with VERSION
+make bump         # Bump patch version in VERSION
+make test         # Run full test suite (grouped targets)
+```
+
+**Tool mode and diagnostics:**
+
+```sh
+bin/zas --tool -o build/app.jsonl src/app.asm src/lib.asm
+bin/zld --tool -o build/app.wat build/app.jsonl
+bin/zlnt --tool --json build/app.jsonl
+bin/zrun --verbose build/app.wat
+```
+
 ---
 
 ### Contributing

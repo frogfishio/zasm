@@ -25,6 +25,11 @@ BIN_ROOT := bin
 PREFIX ?= /usr/local
 BINDIR ?= $(PREFIX)/bin
 
+VERSION_FILE ?= VERSION
+VERSION_HEADER := include/version.h
+DIST_DIR := dist
+DIST_PLATFORM_DIR = $(DIST_DIR)/$(PLATFORM)
+
 WASMTIME_C_API_DIR_BASE := external/wasmtime-c-api
 
 ZAS_BUILD := $(BUILD)/zas
@@ -76,9 +81,23 @@ ZAS_OBJ := \
 
 ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded-internal-declaration
 
-.PHONY: all clean zas zld zrun zlnt dirs install test-hello test-wat test-loop-wat test-loop test-zrun-log test-ld-regreg test-add-hl-imm test-data-directives test-unknownsym test-compare-conds test-badcond test-badlabel test-bytes test-badmem test-arithmetic test-cat test-upper test-stream test-regmoves test-asm-suite test-alloc test-isa-smoke test-fuzz-zas test-fuzz-zld test-wat-validate test-wasm-opt test-linkage test-manifest test-str-equ test-zlnt test-fizzbuzz test-twofile test-strict test-trap
+.PHONY: \
+  all clean zas zld zrun zlnt dirs install \
+  build bump bump-version dist dist-$(PLATFORM) \
+  test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi \
+  test-asm-suite \
+  test-hello test-wat test-loop-wat test-loop \
+  test-ld-regreg test-add-hl-imm test-data-directives test-compare-conds \
+  test-arithmetic test-regmoves test-names test-linkage test-manifest test-bytes test-str-equ \
+  test-cat test-upper test-stream test-alloc test-isa-smoke test-fizzbuzz test-twofile \
+  test-strict test-trap test-zrun-log \
+  test-unknownsym test-badcond test-badlabel test-badmem \
+  test-wat-validate test-wasm-opt test-zlnt test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports \
+  test-fuzz-zas test-fuzz-zld
 
 all: zas zld
+
+build: zas zld zrun zlnt
 
 install: zas zld zrun zlnt
 	@mkdir -p $(DESTDIR)$(BINDIR)
@@ -89,6 +108,31 @@ install: zas zld zrun zlnt
 
 dirs:
 	mkdir -p $(BIN) $(ZAS_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD)
+
+$(VERSION_HEADER): $(VERSION_FILE)
+	@ver=$$(cat $(VERSION_FILE)); \
+	printf "/* Auto-generated. */\n#ifndef ZASM_VERSION_H\n#define ZASM_VERSION_H\n#define ZASM_VERSION \"%s\"\n#endif\n" "$$ver" > $(VERSION_HEADER)
+
+zas zld zrun zlnt: $(VERSION_HEADER)
+
+dist: build
+	$(MAKE) clean
+	$(MAKE) dist-$(PLATFORM)
+
+dist-$(PLATFORM): zas zld zrun zlnt $(VERSION_HEADER)
+	@mkdir -p $(DIST_PLATFORM_DIR)
+	@cp $(BIN)/zas $(BIN)/zld $(BIN)/zrun $(BIN)/zlnt $(DIST_PLATFORM_DIR)/
+	@cp $(VERSION_FILE) $(DIST_PLATFORM_DIR)/
+
+bump: bump-version
+
+bump-version: $(VERSION_FILE)
+	@old=$$(cat $(VERSION_FILE)); \
+	IFS=. read -r major minor patch <<< "$$old"; \
+	patch=$$((patch + 1)); \
+	new="$$major.$$minor.$$patch"; \
+	printf "%s\n" "$$new" > $(VERSION_FILE); \
+	echo "Bumped $$old -> $$new"
 
 # --- Generator rules ---
 
@@ -102,7 +146,7 @@ $(ZAS_BUILD)/lex.yy.c: src/zas/zasm.l $(ZAS_BUILD)/zasm.tab.h | dirs
 
 # --- Compile rules ---
 
-$(ZAS_BUILD)/%.o: src/zas/%.c | dirs
+$(ZAS_BUILD)/%.o: src/zas/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(ZAS_BUILD)/zasm.tab.o: $(ZAS_BUILD)/zasm.tab.c $(ZAS_BUILD)/zasm.tab.h | dirs
@@ -117,7 +161,32 @@ zas: $(ZAS_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZAS_OBJ) -o $(BIN)/zas $(LDFLAGS)
 	ln -sf $(PLATFORM)/zas $(BIN_ROOT)/zas
 
-# --- Quick sanity test ---
+# --- Test groups ---
+
+test: test-all
+
+test-all: test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi
+
+test-smoke: test-hello test-wat test-loop
+
+test-asm: test-ld-regreg test-add-hl-imm test-data-directives test-compare-conds \
+  test-arithmetic test-regmoves test-names test-linkage test-manifest test-bytes \
+  test-str-equ
+
+test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fizzbuzz \
+  test-twofile test-strict test-trap test-zrun-log
+
+test-negative: test-unknownsym test-badcond test-badlabel test-badmem
+
+test-validation: test-wat-validate test-wasm-opt test-zlnt
+
+test-fuzz: test-fuzz-zas test-fuzz-zld
+
+test-asm-suite: test-asm test-runtime test-validation test-fuzz-zld
+
+test-abi: test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports
+
+# --- Smoke tests ---
 
 test-hello: zas
 	@if [[ -f examples/hello.asm ]]; then \
@@ -137,6 +206,8 @@ test-loop-wat: zas zld
 
 test-loop: test-loop-wat
 
+# --- Assembler/IR tests ---
+
 test-ld-regreg: zas zld
 	cat examples/cat.asm | $(BIN)/zas | $(BIN)/zld > build/cat.wat
 	@rg -q -F 'local.get $$HL' build/cat.wat
@@ -144,8 +215,8 @@ test-ld-regreg: zas zld
 
 test-add-hl-imm: zas zld
 	cat examples/ptrstep.asm | $(BIN)/zas | $(BIN)/zld > build/ptrstep.wat
-	@awk '/local.get .*HL/{getline a; getline b; getline c; if (a ~ /i32.const 4/ && b ~ /i32.add/ && c ~ /local.set .*HL/) f=1} END{exit !f}' build/ptrstep.wat
-	@awk '/local.get .*HL/{getline a; getline b; getline c; if (a ~ /i32.const 8/ && b ~ /i32.add/ && c ~ /local.set .*HL/) f=1} END{exit !f}' build/ptrstep.wat
+	@awk '/local.get .*HL/{getline a; getline b; getline c; if (a ~ /i32.const 4/ && b ~ /i32.add/ && c ~ /local.(set|tee) .*HL/) f=1} END{exit !f}' build/ptrstep.wat
+	@awk '/local.get .*HL/{getline a; getline b; getline c; if (a ~ /i32.const 8/ && b ~ /i32.add/ && c ~ /local.(set|tee) .*HL/) f=1} END{exit !f}' build/ptrstep.wat
 
 test-data-directives: zas zld zrun
 	cat examples/data.asm | $(BIN)/zas | $(BIN)/zld > build/data.wat
@@ -156,9 +227,6 @@ test-data-directives: zas zld zrun
 	$(BIN)/zrun build/data.wat > build/data.out 2>build/data.err
 	@od -An -tx1 build/data.out | tr -d ' \\n' | rg -q '^410a00$$'
 
-test-unknownsym: zas zld
-	@bash -ec 'if cat examples/unknownsym.asm | $(BIN)/zas | $(BIN)/zld > /tmp/unknownsym.wat 2>/tmp/unknownsym.err; then echo "expected failure"; exit 1; fi; rg -q "unknown symbol does_not_exist" /tmp/unknownsym.err'
-
 test-compare-conds: zas zld
 	cat examples/compare_conds.asm | $(BIN)/zas | $(BIN)/zld > build/compare_conds.wat
 
@@ -167,6 +235,50 @@ test-arithmetic: zas zld
 
 test-regmoves: zas zld
 	cat examples/regmoves.asm | $(BIN)/zas | $(BIN)/zld > build/regmoves.wat
+
+test-names: zas zld
+	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --names > build/hello.names.wat
+	@rg -q -F '(custom "name"' build/hello.names.wat
+
+test-linkage: zas zld
+	cat examples/export.asm | $(BIN)/zas | $(BIN)/zld > build/export.wat
+	@rg -q -F '(export "main" (func $$main))' build/export.wat
+	cat examples/extern.asm | $(BIN)/zas | $(BIN)/zld > build/extern.wat
+	@rg -q -F '(import "env" "noop" (func $$noop (param i32 i32)))' build/extern.wat
+
+test-manifest: zas zld
+	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --manifest > build/hello.manifest.json
+	@rg -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
+	@rg -q -F '"lembeh_handle"' build/hello.manifest.json
+	@rg -q -F '"_out"' build/hello.manifest.json
+
+test-bytes: zas zld zrun
+	cat examples/bytes.asm | $(BIN)/zas | $(BIN)/zld > build/bytes.wat
+	$(BIN)/zrun build/bytes.wat > build/bytes.out 2>build/bytes.err
+	@od -An -tx1 build/bytes.out | tr -d ' \\n' | rg -q '^41$$'
+
+test-str-equ: zas zld zrun
+	cat examples/str_equ.asm | $(BIN)/zas | $(BIN)/zld > build/str_equ.wat
+	@rg -q -F '(global $$msg_len i32 (i32.const 3))' build/str_equ.wat
+	@rg -q -F '(global $$buf_size i32 (i32.const 16))' build/str_equ.wat
+	$(BIN)/zrun build/str_equ.wat > build/str_equ.out 2>build/str_equ.err
+	@od -An -tx1 build/str_equ.out | tr -d ' \\n' | rg -q '^48690a$$'
+
+# --- Runtime/integration tests ---
+
+test-cat: zas zld zrun
+	test/run.sh examples/cat.asm test/fixtures/cat.in test/fixtures/cat.out
+
+test-upper: zas zld zrun
+	test/run.sh examples/upper.asm test/fixtures/upper.in test/fixtures/upper.out
+
+test-stream: test-cat test-upper
+
+test-alloc: zas zld zrun
+	test/run.sh examples/alloc.asm test/fixtures/alloc.in test/fixtures/alloc.out
+
+test-isa-smoke: zas zld zrun
+	test/run.sh examples/isa_smoke.asm test/fixtures/isa_smoke.in test/fixtures/isa_smoke.out
 
 test-fizzbuzz: zas zld zrun
 	cat examples/fizzbuzz.asm | $(BIN)/zas | $(BIN)/zld > build/fizzbuzz.wat
@@ -187,31 +299,26 @@ test-trap: zas zld zrun
 	cat examples/bad_trap.asm | $(BIN)/zas | $(BIN)/zld > build/bad_trap.wat
 	@bash -ec "if $(BIN)/zrun build/bad_trap.wat > build/bad_trap.out 2>build/bad_trap.err; then echo \"expected trap\"; exit 1; fi; rg -q -F 'trap' build/bad_trap.err"
 
-test-cat: zas zld zrun
-	test/run.sh examples/cat.asm test/fixtures/cat.in test/fixtures/cat.out
+test-zrun-log: zas zld zrun
+	cat examples/log.asm | $(BIN)/zas | $(BIN)/zld > build/log.wat
+	$(BIN)/zrun build/log.wat 1>/tmp/log.out 2>/tmp/log.err
+	@rg -q "^\\[demo\\] hello" /tmp/log.err
 
-test-upper: zas zld zrun
-	test/run.sh examples/upper.asm test/fixtures/upper.in test/fixtures/upper.out
+# --- Negative/error tests ---
 
-test-alloc: zas zld zrun
-	test/run.sh examples/alloc.asm test/fixtures/alloc.in test/fixtures/alloc.out
+test-unknownsym: zas zld
+	@bash -ec 'if cat examples/unknownsym.asm | $(BIN)/zas | $(BIN)/zld > /tmp/unknownsym.wat 2>/tmp/unknownsym.err; then echo "expected failure"; exit 1; fi; rg -q "unknown symbol does_not_exist" /tmp/unknownsym.err'
 
-test-isa-smoke: zas zld zrun
-	test/run.sh examples/isa_smoke.asm test/fixtures/isa_smoke.in test/fixtures/isa_smoke.out
+test-badcond: zas zld
+	@bash -ec 'if cat examples/badcond.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badcond.wat 2>/tmp/badcond.err; then echo "expected failure"; exit 1; fi; rg -q "unknown JR condition WTF" /tmp/badcond.err'
 
-test-stream: test-cat test-upper
+test-badlabel: zas zld
+	@bash -ec 'if cat examples/badlabel.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badlabel.wat 2>/tmp/badlabel.err; then echo "expected failure"; exit 1; fi; rg -q "unknown label missing_label" /tmp/badlabel.err'
 
-test-asm-suite: test-data-directives test-regmoves test-arithmetic test-compare-conds test-bytes test-cat test-upper test-alloc test-isa-smoke test-linkage test-manifest test-str-equ test-zlnt test-fuzz-zld test-wat-validate test-wasm-opt test-names test-fizzbuzz test-twofile test-strict test-trap
+test-badmem: zas zld
+	@bash -ec 'if cat examples/badmem.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badmem.wat 2>/tmp/badmem.err; then echo "expected failure"; exit 1; fi; rg -q "only \\(HL\\) supported" /tmp/badmem.err'
 
-test-fuzz-zas: zas
-	test/fuzz_zas.sh
-
-test-fuzz-zld: zld
-	test/fuzz_zld_jsonl.sh
-
-test-names: zas zld
-	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --names > build/hello.names.wat
-	@rg -q -F '(custom "name"' build/hello.names.wat
+# --- Validation/tools ---
 
 test-wat-validate: zas zld
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld > build/hello.wat
@@ -223,47 +330,35 @@ test-wasm-opt: zas zld
 	cat examples/loop.asm | $(BIN)/zas | $(BIN)/zld > build/loop.wat
 	test/wasm_opt.sh build/hello.wat build/loop.wat
 
-test-linkage: zas zld
-	cat examples/export.asm | $(BIN)/zas | $(BIN)/zld > build/export.wat
-	@rg -q -F '(export "main" (func $$main))' build/export.wat
-	cat examples/extern.asm | $(BIN)/zas | $(BIN)/zld > build/extern.wat
-	@rg -q -F '(import "env" "noop" (func $$noop (param i32 i32)))' build/extern.wat
-
-test-manifest: zas zld
-	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --manifest > build/hello.manifest.json
-	@rg -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
-	@rg -q -F '"lembeh_handle"' build/hello.manifest.json
-	@rg -q -F '"_out"' build/hello.manifest.json
-
-test-str-equ: zas zld zrun
-	cat examples/str_equ.asm | $(BIN)/zas | $(BIN)/zld > build/str_equ.wat
-	@rg -q -F '(global $$msg_len i32 (i32.const 3))' build/str_equ.wat
-	@rg -q -F '(global $$buf_size i32 (i32.const 16))' build/str_equ.wat
-	$(BIN)/zrun build/str_equ.wat > build/str_equ.out 2>build/str_equ.err
-	@od -An -tx1 build/str_equ.out | tr -d ' \\n' | rg -q '^48690a$$'
-
 test-zlnt: zas zlnt
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zlnt
 	cat examples/upper.asm | $(BIN)/zas | $(BIN)/zlnt
 
-test-badcond: zas zld
-	@bash -ec 'if cat examples/badcond.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badcond.wat 2>/tmp/badcond.err; then echo "expected failure"; exit 1; fi; rg -q "unknown JR condition WTF" /tmp/badcond.err'
+# --- Fuzz tests ---
 
-test-badlabel: zas zld
-	@bash -ec 'if cat examples/badlabel.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badlabel.wat 2>/tmp/badlabel.err; then echo "expected failure"; exit 1; fi; rg -q "unknown label missing_label" /tmp/badlabel.err'
+test-fuzz-zas: zas
+	test/fuzz_zas.sh
 
-test-bytes: zas zld zrun
-	cat examples/bytes.asm | $(BIN)/zas | $(BIN)/zld > build/bytes.wat
-	$(BIN)/zrun build/bytes.wat > build/bytes.out 2>build/bytes.err
-	@od -An -tx1 build/bytes.out | tr -d ' \\n' | rg -q '^41$$'
+test-fuzz-zld: zld
+	test/fuzz_zld_jsonl.sh
 
-test-badmem: zas zld
-	@bash -ec 'if cat examples/badmem.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badmem.wat 2>/tmp/badmem.err; then echo "expected failure"; exit 1; fi; rg -q "only \\(HL\\) supported" /tmp/badmem.err'
+test-abi-linker: zas zld
+	test/abi_linker.sh
 
-test-zrun-log: zas zld zrun
-	cat examples/log.asm | $(BIN)/zas | $(BIN)/zld > build/log.wat
-	$(BIN)/zrun build/log.wat 1>/tmp/log.out 2>/tmp/log.err
-	@rg -q "^\\[demo\\] hello" /tmp/log.err
+test-abi-alloc: zas zld zrun
+	test/abi_alloc.sh
+
+test-abi-stream: zas zld zrun
+	test/abi_stream.sh
+
+test-abi-log: zas zld zlnt zrun
+	test/abi_log.sh
+
+test-abi-entry: zas zld
+	test/abi_entry.sh
+
+test-abi-imports: zas zld
+	test/abi_imports.sh
 
 clean:
 	rm -rf $(BUILD) $(BIN_ROOT)
@@ -283,7 +378,7 @@ ZLD_OBJ := \
   $(ZLD_BUILD)/jsonl.o \
   $(ZLD_BUILD)/wat_emit.o
 
-$(ZLD_BUILD)/%.o: src/zld/%.c | dirs
+$(ZLD_BUILD)/%.o: src/zld/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
 
 zld: $(ZLD_OBJ) | dirs
@@ -318,7 +413,7 @@ ZLNT_OBJ := \
   $(ZLNT_BUILD)/main.o \
   $(ZLNT_BUILD)/jsonl.o
 
-$(ZLNT_BUILD)/%.o: src/zlnt/%.c | dirs
+$(ZLNT_BUILD)/%.o: src/zlnt/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -Isrc/zlnt -c $< -o $@
 
 $(ZLNT_BUILD)/jsonl.o: src/zld/jsonl.c | dirs

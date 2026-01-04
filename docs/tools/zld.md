@@ -98,6 +98,16 @@ wat2wasm out.wat -o out.wasm
 - `zld --manifest` emits a JSON manifest (exports/imports/primitives).
 - `zld --names` emits a custom name section for functions/globals.
 - `zld --mem-max <size>` sets a maximum memory size (bytes/kb/mb/gb), rounded up to pages.
+- `zld --tool` enables filelist + `-o` output mode (non-stream).
+- `zld -o <path>` writes WAT/manifest output to a file (tool mode only).
+- `zld --verbose` emits debug-friendly diagnostics to stderr.
+- `zld --json` emits diagnostics as JSON lines (stderr).
+
+## Tool mode
+
+```bash
+bin/zld --tool -o build/app.wat build/app.jsonl
+```
 
 ## IR versioning
 

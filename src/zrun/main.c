@@ -4,6 +4,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include <signal.h>
+#include "version.h"
 #include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
@@ -73,7 +76,84 @@ static int parse_size_bytes(const char* s, uint64_t* out) {
   return 0;
 }
 
+static int g_verbose = 0;
+static int g_json = 0;
+
+static void json_print_str(FILE* out, const char* s) {
+  fputc('"', out);
+  for (const unsigned char* p = (const unsigned char*)s; p && *p; p++) {
+    switch (*p) {
+      case '\\': fputs("\\\\", out); break;
+      case '"': fputs("\\\"", out); break;
+      case '\n': fputs("\\n", out); break;
+      case '\r': fputs("\\r", out); break;
+      case '\t': fputs("\\t", out); break;
+      default:
+        if (*p < 0x20) {
+          fprintf(out, "\\u%04x", *p);
+        } else {
+          fputc(*p, out);
+        }
+        break;
+    }
+  }
+  fputc('"', out);
+}
+
+static void diag_emit(const char* level, const char* file, int line, const char* fmt, ...) {
+  if (!g_verbose && strcmp(level, "error") != 0 && strcmp(level, "warn") != 0) {
+    return;
+  }
+  va_list args;
+  va_start(args, fmt);
+  if (g_json) {
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    fprintf(stderr, "{\"tool\":\"zrun\",\"level\":\"%s\",\"message\":", level);
+    json_print_str(stderr, msg);
+    if (file) {
+      fprintf(stderr, ",\"file\":");
+      json_print_str(stderr, file);
+    }
+    if (line > 0) {
+      fprintf(stderr, ",\"line\":%d", line);
+    }
+    fprintf(stderr, "}\n");
+  } else {
+    fprintf(stderr, "zrun: %s: ", level);
+    vfprintf(stderr, fmt, args);
+    if (file) {
+      fprintf(stderr, " (%s", file);
+      if (line > 0) fprintf(stderr, ":%d", line);
+      fprintf(stderr, ")");
+    }
+    fprintf(stderr, "\n");
+  }
+  va_end(args);
+}
+
+static void print_help(void) {
+  fprintf(stdout,
+          "zrun — local runner for lembeh_handle modules\n"
+          "\n"
+          "Usage:\n"
+          "  zrun [--trace] [--strict] [--mem <size>] [--verbose] [--json] <module.wat|module.wasm>\n"
+          "\n"
+          "Options:\n"
+          "  --help        Show this help message\n"
+          "  --version     Show version information\n"
+          "  --trace       Log host calls to stderr\n"
+          "  --strict      Trap on invalid host-call arguments\n"
+          "  --mem <size>  Cap max linear memory (bytes/kb/mb/gb)\n"
+          "  --verbose     Emit debug-friendly diagnostics to stderr\n"
+          "  --json        Emit diagnostics as JSON lines (stderr)\n"
+          "\n"
+          "License: GPLv3+\n"
+          "© 2026 Frogfish — Author: Alexander Croft\n");
+}
+
 int main(int argc, char** argv) {
+  signal(SIGPIPE, SIG_IGN);
   int rc = 0;
   int trace = 0;
   int strict = 0;
@@ -83,8 +163,24 @@ int main(int argc, char** argv) {
   const uint64_t mem_cap_ceiling = 2ull * 1024ull * 1024ull * 1024ull;
   int mem_cap_set = 0;
   for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      print_help();
+      return 0;
+    }
     if (strcmp(argv[i], "--trace") == 0) {
       trace = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--version") == 0) {
+      printf("zrun %s\n", ZASM_VERSION);
+      return 0;
+    }
+    if (strcmp(argv[i], "--verbose") == 0) {
+      g_verbose = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--json") == 0) {
+      g_json = 1;
       continue;
     }
     if (strcmp(argv[i], "--strict") == 0) {
@@ -93,11 +189,11 @@ int main(int argc, char** argv) {
     }
     if (strcmp(argv[i], "--mem") == 0) {
       if (i + 1 >= argc) {
-        fprintf(stderr, "zrun: --mem requires a size\n");
+        diag_emit("error", NULL, 0, "--mem requires a size");
         return 1;
       }
       if (parse_size_bytes(argv[i + 1], &mem_cap_bytes) != 0 || mem_cap_bytes == 0) {
-        fprintf(stderr, "zrun: invalid --mem size: %s\n", argv[i + 1]);
+        diag_emit("error", NULL, 0, "invalid --mem size: %s", argv[i + 1]);
         return 1;
       }
       mem_cap_set = 1;
@@ -108,35 +204,37 @@ int main(int argc, char** argv) {
       path = argv[i];
       continue;
     }
-    fprintf(stderr, "usage: zrun [--trace] [--strict] [--mem <size>] <module.wat|module.wasm>\n");
+    diag_emit("error", NULL, 0, "usage: zrun [--trace] [--strict] [--mem <size>] [--verbose] [--json] <module.wat|module.wasm>");
     return 1;
   }
   if (!path) {
-    fprintf(stderr, "usage: zrun [--trace] [--strict] [--mem <size>] <module.wat|module.wasm>\n");
+    diag_emit("error", NULL, 0, "usage: zrun [--trace] [--strict] [--mem <size>] [--verbose] [--json] <module.wat|module.wasm>");
     return 1;
   }
   if (!mem_cap_set) {
     const char* mem_env = getenv("ZRUN_MEM");
     if (mem_env && *mem_env) {
       if (parse_size_bytes(mem_env, &mem_cap_bytes) != 0 || mem_cap_bytes == 0) {
-        fprintf(stderr, "zrun: invalid ZRUN_MEM size: %s\n", mem_env);
+        diag_emit("error", NULL, 0, "invalid ZRUN_MEM size: %s", mem_env);
         return 1;
       }
     }
   }
   if (mem_cap_bytes < mem_cap_floor) {
-    fprintf(stderr, "zrun: mem cap too small (min 2MB)\n");
+    diag_emit("error", NULL, 0, "mem cap too small (min 2MB)");
     return 1;
   }
   if (mem_cap_bytes > mem_cap_ceiling) {
-    fprintf(stderr, "zrun: mem cap too large (max 2GB)\n");
+    diag_emit("error", NULL, 0, "mem cap too large (max 2GB)");
     return 1;
   }
+
+  diag_emit("info", path, 0, "trace=%d strict=%d mem=%llu", trace, strict, (unsigned long long)mem_cap_bytes);
 
   uint8_t* file_buf = NULL;
   size_t file_len = 0;
   if (read_file(path, &file_buf, &file_len) != 0) {
-    fprintf(stderr, "zrun: failed to read %s\n", path);
+    diag_emit("error", path, 0, "failed to read input");
     return 1;
   }
 

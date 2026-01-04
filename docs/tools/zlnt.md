@@ -11,6 +11,18 @@ JSONL IR analyzer. Reads JSONL from stdin and emits diagnostics to stderr.
 cat examples/hello.asm | bin/zas | bin/zlnt
 ```
 
+## Flags
+
+- `--version` prints the tool version.
+- `--json` emits diagnostics as JSON lines (stderr).
+- `--tool` enables filelist mode (non-stream).
+
+## Tool mode
+
+```sh
+bin/zlnt --tool build/app.jsonl
+```
+
 ## Exit codes
 
 - `0` no issues found

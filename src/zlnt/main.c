@@ -7,7 +7,62 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
+#include "version.h"
 #include <sys/types.h>
+
+static int g_json = 0;
+static const char* g_source = NULL;
+
+static void json_print_str(FILE* out, const char* s) {
+  fputc('"', out);
+  for (const unsigned char* p = (const unsigned char*)s; p && *p; p++) {
+    switch (*p) {
+      case '\\': fputs("\\\\", out); break;
+      case '"': fputs("\\\"", out); break;
+      case '\n': fputs("\\n", out); break;
+      case '\r': fputs("\\r", out); break;
+      case '\t': fputs("\\t", out); break;
+      default:
+        if (*p < 0x20) {
+          fprintf(out, "\\u%04x", *p);
+        } else {
+          fputc(*p, out);
+        }
+        break;
+    }
+  }
+  fputc('"', out);
+}
+
+static void diag_emit(const char* level, const char* file, int line, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  if (g_json) {
+    char msg[1024];
+    vsnprintf(msg, sizeof(msg), fmt, args);
+    fprintf(stderr, "{\"tool\":\"zlnt\",\"level\":\"%s\",\"message\":", level);
+    json_print_str(stderr, msg);
+    if (file) {
+      fprintf(stderr, ",\"file\":");
+      json_print_str(stderr, file);
+    }
+    if (line > 0) {
+      fprintf(stderr, ",\"line\":%d", line);
+    }
+    fprintf(stderr, "}\n");
+  } else {
+    fprintf(stderr, "zlnt: %s: ", level);
+    vfprintf(stderr, fmt, args);
+    if (file) {
+      fprintf(stderr, " (%s", file);
+      if (line > 0) fprintf(stderr, ":%d", line);
+      fprintf(stderr, ")");
+    }
+    fprintf(stderr, "\n");
+  }
+  va_end(args);
+}
 
 static int is_primitive(const char* s) {
   return s && s[0] == '_';
@@ -27,7 +82,7 @@ typedef struct {
 
 static void* xrealloc(void* p, size_t n) {
   void* r = realloc(p, n);
-  if (!r) { fprintf(stderr, "zlnt: OOM\n"); exit(2); }
+  if (!r) { diag_emit("error", g_source, 0, "OOM"); exit(2); }
   return r;
 }
 
@@ -148,7 +203,7 @@ static int resolve_block_index(const block_t* blocks, size_t nblocks, const char
 
 static int check_use(unsigned state, unsigned need, const char* reg, int line, const char* func) {
   if ((state & need) == 0) {
-    fprintf(stderr, "zlnt: %s used before definition in %s (line %d)\n", reg, func, line);
+    diag_emit("error", g_source, line, "%s used before definition in %s", reg, func);
     return 1;
   }
   return 0;
@@ -156,8 +211,11 @@ static int check_use(unsigned state, unsigned need, const char* reg, int line, c
 
 static void warn_use(unsigned state, unsigned need, const char* reg, int line, const char* func, const char* context) {
   if ((state & need) == 0) {
-    fprintf(stderr, "zlnt: warning: %s used before definition in %s (line %d)%s%s\n",
-            reg, func, line, context ? ": " : "", context ? context : "");
+    if (context && *context) {
+      diag_emit("warn", g_source, line, "%s used before definition in %s: %s", reg, func, context);
+    } else {
+      diag_emit("warn", g_source, line, "%s used before definition in %s", reg, func);
+    }
   }
 }
 
@@ -391,13 +449,62 @@ static int analyze_function(const char* fname, const recvec_t* recs, size_t star
   return errors;
 }
 
+static void print_help(void) {
+  fprintf(stdout,
+          "zlnt — JSONL IR analyzer\n"
+          "\n"
+          "Usage:\n"
+          "  zlnt [--json]\n"
+          "  zlnt --tool <input.jsonl>...\n"
+          "\n"
+          "Options:\n"
+          "  --help        Show this help message\n"
+          "  --version     Show version information\n"
+          "  --json        Emit diagnostics as JSON lines (stderr)\n"
+          "  --tool        Enable filelist mode (non-stream)\n"
+          "\n"
+          "License: GPLv3+\n"
+          "© 2026 Frogfish — Author: Alexander Croft\n");
+}
+
 int main(int argc, char** argv) {
-  if (argc > 1 && strcmp(argv[1], "--version") == 0) {
-    printf("zlnt 1.0.0\n");
-    return 0;
+  int tool_mode = 0;
+  const char* inputs[256];
+  int ninputs = 0;
+  for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+      print_help();
+      return 0;
+    }
+    if (strcmp(argv[i], "--version") == 0) {
+      printf("zlnt %s\n", ZASM_VERSION);
+      return 0;
+    }
+    if (strcmp(argv[i], "--json") == 0) {
+      g_json = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--tool") == 0) {
+      tool_mode = 1;
+      continue;
+    }
+    if (argv[i][0] == '-') {
+      diag_emit("error", NULL, 0, "unknown option: %s", argv[i]);
+      return 2;
+    }
+    if (ninputs < (int)(sizeof(inputs) / sizeof(inputs[0]))) {
+      inputs[ninputs++] = argv[i];
+    } else {
+      diag_emit("error", NULL, 0, "too many input files");
+      return 2;
+    }
   }
-  if (argc > 1) {
-    fprintf(stderr, "usage: zlnt [--version]\n");
+  if (tool_mode && ninputs == 0) {
+    diag_emit("error", NULL, 0, "--tool requires at least one input file");
+    return 2;
+  }
+  if (!tool_mode && ninputs > 0) {
+    diag_emit("error", NULL, 0, "file inputs require --tool");
     return 2;
   }
 
@@ -407,20 +514,53 @@ int main(int argc, char** argv) {
   char* line = NULL;
   size_t cap = 0;
   ssize_t nread;
-  while ((nread = getline(&line, &cap, stdin)) != -1) {
-    char* p = line;
-    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
-    if (*p == 0) continue;
+  if (tool_mode) {
+    for (int i = 0; i < ninputs; i++) {
+      const char* path = inputs[i];
+      FILE* f = fopen(path, "r");
+      if (!f) {
+        diag_emit("error", path, 0, "failed to open input");
+        recvec_free(&recs);
+        return 2;
+      }
+      g_source = path;
+      size_t line_no = 0;
+      while ((nread = getline(&line, &cap, f)) != -1) {
+        line_no++;
+        char* p = line;
+        while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+        if (*p == 0) continue;
 
-    record_t r;
-    int rc = parse_jsonl_record(p, &r);
-    if (rc != 0) {
-      fprintf(stderr, "zlnt: JSONL parse error (%d): %s\n", rc, p);
-      free(line);
-      recvec_free(&recs);
-      return 2;
+        record_t r;
+        int rc = parse_jsonl_record(p, &r);
+        if (rc != 0) {
+          diag_emit("error", path, (int)line_no, "JSONL parse error (%d)", rc);
+          free(line);
+          fclose(f);
+          recvec_free(&recs);
+          return 2;
+        }
+        recvec_push(&recs, r);
+      }
+      fclose(f);
     }
-    recvec_push(&recs, r);
+  } else {
+    g_source = NULL;
+    while ((nread = getline(&line, &cap, stdin)) != -1) {
+      char* p = line;
+      while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+      if (*p == 0) continue;
+
+      record_t r;
+      int rc = parse_jsonl_record(p, &r);
+      if (rc != 0) {
+        diag_emit("error", NULL, 0, "JSONL parse error (%d)", rc);
+        free(line);
+        recvec_free(&recs);
+        return 2;
+      }
+      recvec_push(&recs, r);
+    }
   }
   free(line);
 

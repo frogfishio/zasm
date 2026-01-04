@@ -15,6 +15,16 @@ cat examples/hello.asm | bin/zas > build/hello.jsonl
 
 - `--version` print tool version.
 - `--lint` parse and validate input without emitting JSONL.
+- `--tool` enable filelist + `-o` output mode (non-stream).
+- `-o <path>` write JSONL IR to a file (tool mode only).
+- `--verbose` emit debug-friendly diagnostics to stderr (disabled with `--lint`).
+- `--json` emit diagnostics as JSON lines (stderr).
+
+## Tool mode
+
+```sh
+bin/zas --tool -o build/app.jsonl src/app.asm src/lib.asm
+```
 
 ## Exit codes
 
