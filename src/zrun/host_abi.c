@@ -61,6 +61,14 @@ static void write_u32_le(uint8_t* p, uint32_t v) {
   p[3] = (uint8_t)((v >> 24) & 0xff);
 }
 
+static uint16_t read_u16_le(const uint8_t* p) {
+  return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
+}
+
+static uint32_t read_u32_le(const uint8_t* p) {
+  return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+}
+
 static void allocs_add(zrun_abi_env_t* e, size_t ptr) {
   if (e->allocs_n == e->allocs_cap) {
     size_t cap = e->allocs_cap ? e->allocs_cap * 2 : 8;
@@ -234,11 +242,11 @@ wasm_trap_t* zrun_log(void* env, wasmtime_caller_t* caller,
   tracef(e, "log(topic_ptr=%d, topic_len=%d, msg_ptr=%d, msg_len=%d)",
          topic_ptr, topic_len, msg_ptr, msg_len);
   if (topic_ptr < 0 || topic_len < 0 || msg_ptr < 0 || msg_len < 0) {
-    return e->strict ? trap_msg("zrun: log invalid args") : NULL;
+    return NULL;
   }
 
   wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) return trap_msg("zrun: log missing memory export");
+  if (!get_memory_from_caller(caller, &mem)) return NULL;
 
   size_t mem_size = 0;
   uint8_t* data = mem_data(caller, &mem, &mem_size);
@@ -246,8 +254,8 @@ wasm_trap_t* zrun_log(void* env, wasmtime_caller_t* caller,
   size_t u_topic_len = (size_t)topic_len;
   size_t u_msg_ptr = (size_t)msg_ptr;
   size_t u_msg_len = (size_t)msg_len;
-  if (!bounds_ok(u_topic_ptr, u_topic_len, mem_size)) return trap_msg("zrun: log topic OOB");
-  if (!bounds_ok(u_msg_ptr, u_msg_len, mem_size)) return trap_msg("zrun: log msg OOB");
+  if (!bounds_ok(u_topic_ptr, u_topic_len, mem_size)) return NULL;
+  if (!bounds_ok(u_msg_ptr, u_msg_len, mem_size)) return NULL;
 
   fwrite("[", 1, 1, stderr);
   fwrite(data + u_topic_ptr, 1, u_topic_len, stderr);
@@ -412,14 +420,22 @@ wasm_trap_t* zrun_ctl(void* env, wasmtime_caller_t* caller,
 
   if (req_len < 24) { results[0].of.i32 = -1; return NULL; }
   const uint8_t* req = data + req_ptr;
-  if (memcmp(req, "ZCL1", 4) != 0) { results[0].of.i32 = -1; return NULL; }
-  uint16_t v = (uint16_t)(req[4] | (req[5] << 8));
-  uint16_t op = (uint16_t)(req[6] | (req[7] << 8));
-  uint32_t rid = (uint32_t)(req[8] | (req[9] << 8) | (req[10] << 16) | (req[11] << 24));
-  uint32_t payload_len = (uint32_t)(req[20] | (req[21] << 8) | (req[22] << 16) | (req[23] << 24));
-  if (24u + payload_len > (uint32_t)req_len) { results[0].of.i32 = -1; return NULL; }
+  uint16_t v = read_u16_le(req + 4);
+  uint16_t op = read_u16_le(req + 6);
+  uint32_t rid = read_u32_le(req + 8);
+  uint32_t payload_len = read_u32_le(req + 20);
 
   uint8_t* out = data + resp_ptr;
+  if (memcmp(req, "ZCL1", 4) != 0) {
+    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_frame", "bad frame");
+    results[0].of.i32 = n;
+    return NULL;
+  }
+  if (24u + payload_len > (uint32_t)req_len) {
+    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_frame", "bad frame");
+    results[0].of.i32 = n;
+    return NULL;
+  }
   if (v != 1) {
     int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_version", "bad version");
     results[0].of.i32 = n;

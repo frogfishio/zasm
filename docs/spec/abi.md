@@ -49,6 +49,10 @@ All imports live under module name `"lembeh"`.
 - Static data alignment: **4 bytes**.
 - Offsets `0..7` are reserved for future ABI use.
 - No dynamic memory growth is performed by the toolchain in v1.
+- All ABI calls that read/write guest memory MUST bounds-check pointers and lengths
+  against the guest memory cap.
+- On out-of-bounds pointer/length, calls with return values MUST return `-1`.
+- `log` and `_free` MUST be no-ops on invalid pointers or OOB access (no crash).
 
 ## Capability gating
 
@@ -65,15 +69,22 @@ All imports live under module name `"lembeh"`.
 
 - `req_read` MAY return fewer bytes than `cap` (short read).
 - `req_read` MUST return `0` on EOF and `-1` on error.
+- If `cap == 0`, `req_read` MUST return `0` and MUST NOT write any bytes.
+- If `req_read` returns `-1`, it MUST NOT write any bytes into `ptr`.
 - `res_write` MAY return fewer bytes than `len` (short write).
 - `res_write` MUST return `-1` on error.
+- If `len == 0`, `res_write` MUST return `0` and MUST NOT write any bytes.
 - If a handle is invalid, `req_read/res_write/res_end` MUST return `-1` and MUST NOT crash.
+- `res_end` MUST be idempotent: calling it on a closed handle MUST be a no-op.
+- `log` is best-effort; hosts MAY drop messages but MUST NOT crash on bad pointers.
 
 ## Control Plane (`_ctl`)
 
 - `_ctl` MUST parse ZCL1 frames and Hopper payloads.
 - If the frame is too short to read `op` and `rid`, `_ctl` MUST return `-1`.
-- If `payload_len` exceeds available bytes, `_ctl` MUST return `-1`.
+- If the header is readable but `magic` is invalid, `_ctl` MUST return `t_ctl_bad_frame` in a ZCL1 error envelope.
+- If the header is readable but `v` is unsupported, `_ctl` MUST return `t_ctl_bad_version` in a ZCL1 error envelope.
+- If `payload_len` exceeds available bytes, `_ctl` MUST return `t_ctl_bad_frame` in a ZCL1 error envelope.
 - If the response does not fit `resp_cap`, `_ctl` MUST return `-1` and MUST NOT write a partial response.
 - On success or error envelopes, `_ctl` MUST return the number of bytes written to `resp_ptr`.
 - `timeout_ms = 0` MUST be nonblocking; `timeout_ms > 0` MUST NOT be exceeded.

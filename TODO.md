@@ -19,6 +19,20 @@
   - Add ABI tests for handle rules: opaque handles, reserved 0–2, nonblocking timeout_ms=0.
   - Add manifest tests for `_ctl` primitive discovery.
 
+- Build a first-party cloak (outside the integrator pack) and run tests through it:
+  - Create `src/cloak/` runtime built from the integrator pack C cloak code (vendored, not copied by hand).
+  - Define a stable public API for the cloak host (init, load module, invoke entrypoint, teardown).
+  - Implement the host memory model in the cloak runtime (flat byte space, bounds checks).
+  - Wire `_alloc/_free/_ctl` and stream I/O to the host API with deterministic behavior.
+  - Add a minimal host harness CLI (e.g., `zcloak`) to run a WAT/WASM module with stdin/stdout.
+  - Provide a no-capabilities `_ctl` implementation returning CAPS_LIST n=0.
+  - Add a capability stub interface and deterministic handle allocator for future caps.
+  - Add a cloak build target and install path in `Makefile` (local tool, not dist).
+  - Add test harness to run ABI tests through the cloak instead of zrun (parallel target).
+  - Add "from the other side" test suite: run existing `test/abi_*` and runtime fixtures via `zcloak`.
+  - Add CI/Make targets: `test-abi-cloak`, `test-runtime-cloak`, and `test-all-cloak`.
+  - Document how to run cloak tests and how the cloak uses the integrator pack code.
+
 - Add `zas --format` and define canonical style rules in `POETICS.md` (formatter output must match the style guide).
 - Build a VS Code extension with syntax highlighting, linting, and formatting using tool mode + JSON diagnostics.
 - Document the JSON diagnostics schema and include examples for editor tooling integration.
@@ -54,3 +68,10 @@
 - Finalize the normative C integration cloak (memory model + alloc/free hooks + invoke contract) and update docs/spec accordingly.
 - Add a reference host harness in the cloak pack (pure C embedding).
 - Add cross-compilation guidance and build scripts for the C cloak.
+
+
+# FUTURE TASKS
+
+- consider deeply what opcodes (hex) should Zasm have. We have effectively built a "processor" and it's not a toy but 64bit RISC CPU. It needs correct opcodes.
+
+- create another tool "zxc" (ZASM Cross Compiler): we get raw binary opcodes and crosscompile them on load to the current CPU architecture (not JIT but on load) and we go opcode for opcode compile supporting mac silicon and x86 linux at first then others. We already have non-wasm cloak so what we really need is zxc tool but more than that an embeddable zxc code that could transpile on load and plug the code onto a custom cloak

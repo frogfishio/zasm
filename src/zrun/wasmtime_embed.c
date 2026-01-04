@@ -67,6 +67,19 @@ static wasm_functype_t* functype_i32_i32_i32_i32_to_void(void) {
   return wasm_functype_new(&params, &results);
 }
 
+static wasm_functype_t* functype_i32_i32_i32_i32_to_i32(void) {
+  wasm_valtype_vec_t params;
+  wasm_valtype_vec_new_uninitialized(&params, 4);
+  params.data[0] = wasm_valtype_new_i32();
+  params.data[1] = wasm_valtype_new_i32();
+  params.data[2] = wasm_valtype_new_i32();
+  params.data[3] = wasm_valtype_new_i32();
+  wasm_valtype_vec_t results;
+  wasm_valtype_vec_new_uninitialized(&results, 1);
+  results.data[0] = wasm_valtype_new_i32();
+  return wasm_functype_new(&params, &results);
+}
+
 int zrun_load_module(wasm_engine_t* engine, const uint8_t* bytes, size_t len,
                      wasmtime_module_t** out_module) {
   wasmtime_error_t* err = wasmtime_module_new(engine, bytes, len, out_module);
