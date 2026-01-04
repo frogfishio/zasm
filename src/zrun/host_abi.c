@@ -49,6 +49,18 @@ static void format_bytes(char* out, size_t out_len, uint64_t bytes) {
   }
 }
 
+static void write_u16_le(uint8_t* p, uint16_t v) {
+  p[0] = (uint8_t)(v & 0xff);
+  p[1] = (uint8_t)((v >> 8) & 0xff);
+}
+
+static void write_u32_le(uint8_t* p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xff);
+  p[1] = (uint8_t)((v >> 8) & 0xff);
+  p[2] = (uint8_t)((v >> 16) & 0xff);
+  p[3] = (uint8_t)((v >> 24) & 0xff);
+}
+
 static void allocs_add(zrun_abi_env_t* e, size_t ptr) {
   if (e->allocs_n == e->allocs_cap) {
     size_t cap = e->allocs_cap ? e->allocs_cap * 2 : 8;
@@ -339,5 +351,99 @@ wasm_trap_t* zrun_free(void* env, wasmtime_caller_t* caller,
   } else {
     tracef(e, "free");
   }
+  return NULL;
+}
+
+static int ctl_write_error(uint8_t* out, size_t cap, uint16_t op, uint32_t rid,
+                           const char* trace, const char* msg) {
+  const uint32_t trace_len = (uint32_t)strlen(trace);
+  const uint32_t msg_len = (uint32_t)strlen(msg);
+  const uint32_t cause_len = 0;
+  const uint32_t payload_len = 4 + 4 + trace_len + 4 + msg_len + 4 + cause_len;
+  const uint32_t frame_len = 20 + payload_len;
+  if (cap < frame_len) return -1;
+  memcpy(out + 0, "ZCL1", 4);
+  write_u16_le(out + 4, 1);
+  write_u16_le(out + 6, op);
+  write_u32_le(out + 8, rid);
+  write_u32_le(out + 12, 0);
+  write_u32_le(out + 16, payload_len);
+  out[20] = 0;
+  out[21] = 0;
+  out[22] = 0;
+  out[23] = 0;
+  write_u32_le(out + 24, trace_len);
+  memcpy(out + 28, trace, trace_len);
+  write_u32_le(out + 28 + trace_len, msg_len);
+  memcpy(out + 32 + trace_len, msg, msg_len);
+  write_u32_le(out + 32 + trace_len + msg_len, cause_len);
+  return (int)frame_len;
+}
+
+wasm_trap_t* zrun_ctl(void* env, wasmtime_caller_t* caller,
+                      const wasmtime_val_t* args, size_t nargs,
+                      wasmtime_val_t* results, size_t nresults) {
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  if (nargs < 4 || nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+
+  int32_t req_ptr = args[0].of.i32;
+  int32_t req_len = args[1].of.i32;
+  int32_t resp_ptr = args[2].of.i32;
+  int32_t resp_cap = args[3].of.i32;
+
+  if (req_ptr < 0 || req_len < 0 || resp_ptr < 0 || resp_cap < 0) {
+    if (e->strict) return trap_msg("zrun: ctl invalid args");
+    results[0].of.i32 = -1; return NULL;
+  }
+
+  wasmtime_memory_t mem;
+  if (!get_memory_from_caller(caller, &mem)) {
+    if (e->strict) return trap_msg("zrun: ctl missing memory export");
+    results[0].of.i32 = -1; return NULL;
+  }
+  size_t mem_size = 0;
+  uint8_t* data = mem_data(caller, &mem, &mem_size);
+  if (!bounds_ok((size_t)req_ptr, (size_t)req_len, mem_size) ||
+      !bounds_ok((size_t)resp_ptr, (size_t)resp_cap, mem_size)) {
+    if (e->strict) return trap_msg("zrun: ctl OOB");
+    results[0].of.i32 = -1; return NULL;
+  }
+
+  if (req_len < 24) { results[0].of.i32 = -1; return NULL; }
+  const uint8_t* req = data + req_ptr;
+  if (memcmp(req, "ZCL1", 4) != 0) { results[0].of.i32 = -1; return NULL; }
+  uint16_t v = (uint16_t)(req[4] | (req[5] << 8));
+  uint16_t op = (uint16_t)(req[6] | (req[7] << 8));
+  uint32_t rid = (uint32_t)(req[8] | (req[9] << 8) | (req[10] << 16) | (req[11] << 24));
+  uint32_t payload_len = (uint32_t)(req[20] | (req[21] << 8) | (req[22] << 16) | (req[23] << 24));
+  if (24u + payload_len > (uint32_t)req_len) { results[0].of.i32 = -1; return NULL; }
+
+  uint8_t* out = data + resp_ptr;
+  if (v != 1) {
+    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_version", "bad version");
+    results[0].of.i32 = n;
+    return NULL;
+  }
+  if (op != 1) {
+    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_unknown_op", "unknown op");
+    results[0].of.i32 = n;
+    return NULL;
+  }
+  if (payload_len != 0) { results[0].of.i32 = -1; return NULL; }
+
+  if (resp_cap < 28) { results[0].of.i32 = -1; return NULL; }
+  memcpy(out + 0, "ZCL1", 4);
+  write_u16_le(out + 4, 1);
+  write_u16_le(out + 6, op);
+  write_u32_le(out + 8, rid);
+  write_u32_le(out + 12, 0);
+  write_u32_le(out + 16, 8);
+  out[20] = 1;
+  out[21] = 0;
+  out[22] = 0;
+  out[23] = 0;
+  write_u32_le(out + 24, 0);
+  results[0].of.i32 = 28;
   return NULL;
 }

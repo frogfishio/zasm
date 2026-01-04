@@ -1,5 +1,24 @@
 # TO DO
 
+- New spec impact (lembeh/CLOAK_INTEGRATOR_GUIDE.md):
+  - Align ABI imports to exact surface: `req_read`, `res_write`, `res_end`, `log`, `_alloc`, `_free`, `_ctl` (no extras).
+  - Rename/adjust linker WAT emission to use `_alloc/_free/_ctl` names and update allowlist/manifest.
+  - Implement `_ctl` handling in zrun host ABI with ZCL1 framing + Hopper payloads (CAPS_LIST required).
+  - Add ZCL1 parsing/response validation helpers (magic, version, payload_len, error envelopes).
+  - Enforce guest memory model in zrun for non-WASM hosts: flat byte space + bounds checks.
+  - Make `_alloc` deterministic and return offsets within guest space; `_free` must not crash on invalid ptr.
+  - Reserve handles 0–2 semantics in runtime/tests (stdin/stdout/log) and ensure new handles never collide.
+  - Update `docs/spec/abi.md` to match the new canonical guide (or add a v1.0.0 Cloak section pointing to it).
+  - Update `docs/tools/zrun.md` to document `_ctl`, handle semantics, and determinism guarantees.
+  - Update `docs/integrator_pack.md` + C cloak to reflect `_ctl`, `_alloc/_free`, and guest memory model.
+  - Add conformance tests for `_ctl`:
+    - CAPS_LIST with n=0 success response
+    - unknown op returns `t_ctl_unknown_op` envelope
+    - malformed frame returns `-1` and writes nothing
+    - response too large for resp_cap returns `-1`
+  - Add ABI tests for handle rules: opaque handles, reserved 0–2, nonblocking timeout_ms=0.
+  - Add manifest tests for `_ctl` primitive discovery.
+
 - Add `zas --format` and define canonical style rules in `POETICS.md` (formatter output must match the style guide).
 - Build a VS Code extension with syntax highlighting, linting, and formatting using tool mode + JSON diagnostics.
 - Document the JSON diagnostics schema and include examples for editor tooling integration.
@@ -32,12 +51,6 @@
 
 ## IMPORTANT
 
-- Add a linker input conformance mode (flag or default) that validates incoming JSONL against the IR schema without assuming it was produced by `zas`.
-- Define and document a "Integrator Pack" for third-party compiler authors:
-  - Clear instructions for emitting compliant JSONL IR.
-  - A conformance test suite they can run against their compiler output.
-  - Expected outputs / golden files for representative programs.
-- Provide a normative C integration "cloak" in the integrator pack:
-  - C header/implementation for host ABI bindings.
-  - Reference host harness that works without WebAssembly (pure C embedding).
-  - Cross-compilation guidance and build scripts.
+- Finalize the normative C integration cloak (memory model + alloc/free hooks + invoke contract) and update docs/spec accordingly.
+- Add a reference host harness in the cloak pack (pure C embedding).
+- Add cross-compilation guidance and build scripts for the C cloak.

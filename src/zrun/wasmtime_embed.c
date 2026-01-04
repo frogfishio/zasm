@@ -120,6 +120,24 @@ int zrun_link_lembeh_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
   wasm_functype_delete(ty);
   if (err) { zrun_print_error(err); return 1; }
 
+  ty = functype_i32_to_i32();
+  err = wasmtime_linker_define_func(linker, "lembeh", 6, "_alloc", 6, ty,
+                                    zrun_alloc, env, NULL);
+  wasm_functype_delete(ty);
+  if (err) { zrun_print_error(err); return 1; }
+
+  ty = functype_i32_to_void();
+  err = wasmtime_linker_define_func(linker, "lembeh", 6, "_free", 5, ty,
+                                    zrun_free, env, NULL);
+  wasm_functype_delete(ty);
+  if (err) { zrun_print_error(err); return 1; }
+
+  ty = functype_i32_i32_i32_i32_to_i32();
+  err = wasmtime_linker_define_func(linker, "lembeh", 6, "_ctl", 4, ty,
+                                    zrun_ctl, env, NULL);
+  wasm_functype_delete(ty);
+  if (err) { zrun_print_error(err); return 1; }
+
   return 0;
 }
 

@@ -28,10 +28,12 @@ All imports live under module name `"lembeh"`.
   - Ends the response stream.
 - `log(topic_ptr: i32, topic_len: i32, msg_ptr: i32, msg_len: i32) -> ()`
   - Optional debug log. Hosts MAY deny this capability.
-- `alloc(size: i32) -> i32`
+- `_alloc(size: i32) -> i32`
   - Returns pointer to `size` bytes or `-1` on OOM.
-- `free(ptr: i32) -> ()`
+- `_free(ptr: i32) -> ()`
   - Frees a pointer (may be a no-op in bump allocators).
+- `_ctl(req_ptr: i32, req_len: i32, resp_ptr: i32, resp_cap: i32) -> i32`
+  - Control plane (ZCL1 + Hopper). Returns bytes written or `-1`.
 
 ## Globals
 
@@ -58,6 +60,36 @@ All imports live under module name `"lembeh"`.
 - `res_write` to a closed/invalid response stream MUST return `-1` (error). Hosts MAY surface this as a trap in strict mode.
 - When the stream is closed, hosts SHOULD NOT perform partial writes; returning `-1` indicates no bytes were accepted.
 - Hosts MAY additionally emit a diagnostic message in strict/debug mode, but MUST NOT write partial data to the closed stream.
+
+## I/O Semantics
+
+- `req_read` MAY return fewer bytes than `cap` (short read).
+- `req_read` MUST return `0` on EOF and `-1` on error.
+- `res_write` MAY return fewer bytes than `len` (short write).
+- `res_write` MUST return `-1` on error.
+- If a handle is invalid, `req_read/res_write/res_end` MUST return `-1` and MUST NOT crash.
+
+## Control Plane (`_ctl`)
+
+- `_ctl` MUST parse ZCL1 frames and Hopper payloads.
+- If the frame is too short to read `op` and `rid`, `_ctl` MUST return `-1`.
+- If `payload_len` exceeds available bytes, `_ctl` MUST return `-1`.
+- If the response does not fit `resp_cap`, `_ctl` MUST return `-1` and MUST NOT write a partial response.
+- On success or error envelopes, `_ctl` MUST return the number of bytes written to `resp_ptr`.
+- `timeout_ms = 0` MUST be nonblocking; `timeout_ms > 0` MUST NOT be exceeded.
+
+## Handles
+
+- 0 = stdin (`req_read`)
+- 1 = stdout (`res_write/res_end`)
+- 2 = log stream (`res_write/res_end`)
+- Newly created handles returned by `_ctl` MUST NOT be 0–2.
+- Handles MUST be stable within a run and MUST NOT alias active handles.
+
+## Versioning
+
+- Hosts and guests MUST reject unknown or mismatched ABI versions.
+- There is no runtime ABI negotiation in v1.
 
 ## Versioning and compatibility
 
