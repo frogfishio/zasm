@@ -56,3 +56,5 @@ void recvec_free(recvec_t* r);
 
 int parse_jsonl_record(const char* line, record_t* out); // 0=ok, nonzero=error
 void record_free(record_t* r);
+int validate_record_conform(const record_t* r, char* err, size_t errlen);
+int validate_record_strict(const char* line, const record_t* r, char* err, size_t errlen);

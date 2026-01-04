@@ -29,3 +29,15 @@
 - Add WAT emission golden tests for each mnemonic (including trap/strict paths).
 - Add end-to-end run tests per feature class (assemble → link → run).
 - Expand fuzzing coverage for lexer/parser and JSONL ingestion with invariant checks.
+
+## IMPORTANT
+
+- Add a linker input conformance mode (flag or default) that validates incoming JSONL against the IR schema without assuming it was produced by `zas`.
+- Define and document a "Integrator Pack" for third-party compiler authors:
+  - Clear instructions for emitting compliant JSONL IR.
+  - A conformance test suite they can run against their compiler output.
+  - Expected outputs / golden files for representative programs.
+- Provide a normative C integration "cloak" in the integrator pack:
+  - C header/implementation for host ABI bindings.
+  - Reference host harness that works without WebAssembly (pure C embedding).
+  - Cross-compilation guidance and build scripts.

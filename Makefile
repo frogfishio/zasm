@@ -85,6 +85,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
   all clean zas zld zrun zlnt dirs install \
   build bump bump-version dist dist-$(PLATFORM) \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi \
+  integrator-pack dist-integrator-pack \
   test-asm-suite \
   test-hello test-wat test-loop-wat test-loop \
   test-ld-regreg test-add-hl-imm test-data-directives test-compare-conds \
@@ -92,7 +93,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
   test-cat test-upper test-stream test-alloc test-isa-smoke test-fizzbuzz test-twofile \
   test-strict test-trap test-zrun-log \
   test-unknownsym test-badcond test-badlabel test-badmem \
-  test-wat-validate test-wasm-opt test-zlnt test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports \
+  test-wat-validate test-wasm-opt test-zlnt test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-conform-zld \
   test-fuzz-zas test-fuzz-zld
 
 all: zas zld
@@ -178,7 +179,7 @@ test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fiz
 
 test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
-test-validation: test-wat-validate test-wasm-opt test-zlnt
+test-validation: test-wat-validate test-wasm-opt test-zlnt test-conform-zld
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -359,6 +360,15 @@ test-abi-entry: zas zld
 
 test-abi-imports: zas zld
 	test/abi_imports.sh
+
+test-conform-zld: zld
+	test/conform_zld.sh
+
+integrator-pack:
+	./docs/integrator_pack/pack.sh $(CURDIR)/integrator_pack
+
+dist-integrator-pack:
+	./docs/integrator_pack/pack.sh $(CURDIR)/dist/integrator_pack
 
 clean:
 	rm -rf $(BUILD) $(BIN_ROOT)

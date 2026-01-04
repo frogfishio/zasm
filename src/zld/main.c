@@ -115,7 +115,7 @@ static void print_help(void) {
           "zld — JSONL IR to WAT compiler\n"
           "\n"
           "Usage:\n"
-          "  zld [--verify|--manifest|--names] [--mem-max <size>] [--verbose] [--json]\n"
+          "  zld [--verify|--manifest|--names] [--mem-max <size>] [--conform] [--verbose] [--json]\n"
           "  zld --tool -o <output.wat> <input.jsonl>...\n"
           "\n"
           "Options:\n"
@@ -125,6 +125,8 @@ static void print_help(void) {
           "  --manifest    Emit manifest JSON instead of WAT\n"
           "  --names       Emit custom name section metadata\n"
           "  --mem-max     Set maximum linear memory size\n"
+          "  --conform     Enforce JSONL conformance checks\n"
+          "  --conform=strict  Enforce full JSONL schema constraints\n"
           "  --tool        Enable filelist + -o output mode\n"
           "  -o <path>     Write WAT/manifest to a file (tool mode only)\n"
           "  --verbose     Emit debug-friendly diagnostics to stderr\n"
@@ -138,6 +140,8 @@ int main(int argc, char** argv) {
   int verify_only = 0;
   int manifest_only = 0;
   int emit_names = 0;
+  int conform = 0;
+  int conform_strict = 0;
   int tool_mode = 0;
   const char* out_path = NULL;
   const char* inputs[256];
@@ -155,6 +159,15 @@ int main(int argc, char** argv) {
       }
       if (strcmp(argv[i], "--tool") == 0) {
         tool_mode = 1;
+        continue;
+      }
+      if (strcmp(argv[i], "--conform") == 0) {
+        conform = 1;
+        continue;
+      }
+      if (strcmp(argv[i], "--conform=strict") == 0) {
+        conform = 1;
+        conform_strict = 1;
         continue;
       }
       if (strcmp(argv[i], "--verbose") == 0) {
@@ -233,6 +246,11 @@ int main(int argc, char** argv) {
   } else {
     diag_emit("info", NULL, 0, "mode=stream");
   }
+  if (conform_strict) {
+    diag_emit("info", NULL, 0, "conform=strict");
+  } else if (conform) {
+    diag_emit("info", NULL, 0, "conform=1");
+  }
   if (mem_max_bytes > 0) {
     diag_emit("info", NULL, 0, "mem-max=%llu", (unsigned long long)mem_max_bytes);
   }
@@ -272,6 +290,20 @@ int main(int argc, char** argv) {
           recvec_free(&recs);
           return 2;
         }
+        if (conform) {
+          char errbuf[128];
+          int bad = conform_strict
+            ? validate_record_strict(line, &r, errbuf, sizeof(errbuf))
+            : validate_record_conform(&r, errbuf, sizeof(errbuf));
+          if (bad != 0) {
+            diag_emit("error", path, (int)line_no, "conformance: %s", errbuf);
+            record_free(&r);
+            free(line);
+            fclose(f);
+            recvec_free(&recs);
+            return 2;
+          }
+        }
         recvec_push(&recs, r);
       }
       fclose(f);
@@ -290,6 +322,19 @@ int main(int argc, char** argv) {
         free(line);
         recvec_free(&recs);
         return 2;
+      }
+      if (conform) {
+        char errbuf[128];
+        int bad = conform_strict
+          ? validate_record_strict(line, &r, errbuf, sizeof(errbuf))
+          : validate_record_conform(&r, errbuf, sizeof(errbuf));
+        if (bad != 0) {
+          diag_emit("error", NULL, 0, "conformance: %s", errbuf);
+          record_free(&r);
+          free(line);
+          recvec_free(&recs);
+          return 2;
+        }
       }
       recvec_push(&recs, r);
     }

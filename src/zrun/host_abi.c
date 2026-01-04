@@ -151,6 +151,12 @@ wasm_trap_t* zrun_res_write(void* env, wasmtime_caller_t* caller,
   results[0].kind = WASMTIME_I32;
   tracef(e, "res_write(res=%d, ptr=%d, len=%d)", args[0].of.i32, ptr, len);
 
+  if (getenv("ZRUN_FORCE_OUT_ERROR")) {
+    if (e->strict) return trap_msg("zrun: res_write forced error");
+    results[0].of.i32 = -1;
+    return NULL;
+  }
+
   if (ptr < 0 || len < 0) {
     if (e->strict) return trap_msg("zrun: res_write invalid args");
     results[0].of.i32 = -1; return NULL;

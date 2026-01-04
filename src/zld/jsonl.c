@@ -310,3 +310,150 @@ int parse_jsonl_record(const char* line, record_t* out) {
 
   return 9;
 }
+
+static int sym_ok(const char* s) {
+  return s && s[0] != 0;
+}
+
+static int ident_ok(const char* s) {
+  if (!s || !s[0]) return 0;
+  unsigned char c = (unsigned char)s[0];
+  if (!(isalpha(c) || c == '_' || c == '.' || c == '$')) return 0;
+  for (size_t i = 1; s[i]; i++) {
+    c = (unsigned char)s[i];
+    if (!(isalnum(c) || c == '_' || c == '.' || c == '$')) return 0;
+  }
+  return 1;
+}
+
+int validate_record_conform(const record_t* r, char* err, size_t errlen) {
+  if (!r) return 1;
+  if (r->line <= 0) {
+    snprintf(err, errlen, "missing loc.line");
+    return 1;
+  }
+  if (r->k == JREC_INSTR) {
+    if (!sym_ok(r->m)) {
+      snprintf(err, errlen, "missing mnemonic");
+      return 1;
+    }
+    for (size_t i = 0; i < r->nops; i++) {
+      const operand_t* o = &r->ops[i];
+      if (o->t == JOP_NONE) {
+        snprintf(err, errlen, "invalid operand type");
+        return 1;
+      }
+      if ((o->t == JOP_SYM || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
+        snprintf(err, errlen, "empty operand string");
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (r->k == JREC_DIR) {
+    if (!sym_ok(r->d)) {
+      snprintf(err, errlen, "missing directive");
+      return 1;
+    }
+    if (r->name && !sym_ok(r->name)) {
+      snprintf(err, errlen, "empty directive name");
+      return 1;
+    }
+    for (size_t i = 0; i < r->nargs; i++) {
+      const operand_t* o = &r->args[i];
+      if (o->t == JOP_NONE) {
+        snprintf(err, errlen, "invalid arg type");
+        return 1;
+      }
+      if ((o->t == JOP_SYM || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
+        snprintf(err, errlen, "empty arg string");
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (r->k == JREC_LABEL) {
+    if (!sym_ok(r->label)) {
+      snprintf(err, errlen, "missing label");
+      return 1;
+    }
+    return 0;
+  }
+  snprintf(err, errlen, "unknown record kind");
+  return 1;
+}
+
+static int loc_present(const char* line) {
+  return line && strstr(line, "\"loc\"") != NULL;
+}
+
+int validate_record_strict(const char* line, const record_t* r, char* err, size_t errlen) {
+  if (!r) return 1;
+  if (loc_present(line) && r->line <= 0) {
+    snprintf(err, errlen, "invalid loc.line");
+    return 1;
+  }
+  if (r->k == JREC_INSTR) {
+    if (!sym_ok(r->m)) {
+      snprintf(err, errlen, "missing mnemonic");
+      return 1;
+    }
+    for (size_t i = 0; i < r->nops; i++) {
+      const operand_t* o = &r->ops[i];
+      if (o->t == JOP_NONE) {
+        snprintf(err, errlen, "invalid operand type");
+        return 1;
+      }
+      if ((o->t == JOP_SYM || o->t == JOP_MEM) && !ident_ok(o->s)) {
+        snprintf(err, errlen, "invalid identifier");
+        return 1;
+      }
+      if ((o->t == JOP_STR) && !sym_ok(o->s)) {
+        snprintf(err, errlen, "empty string");
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (r->k == JREC_DIR) {
+    if (!sym_ok(r->d)) {
+      snprintf(err, errlen, "missing directive");
+      return 1;
+    }
+    if (strcmp(r->d, "DB") && strcmp(r->d, "DW") && strcmp(r->d, "RESB") &&
+        strcmp(r->d, "PUBLIC") && strcmp(r->d, "EXTERN") && strcmp(r->d, "STR") &&
+        strcmp(r->d, "EQU")) {
+      snprintf(err, errlen, "unknown directive");
+      return 1;
+    }
+    if (r->name && !ident_ok(r->name)) {
+      snprintf(err, errlen, "invalid directive name");
+      return 1;
+    }
+    for (size_t i = 0; i < r->nargs; i++) {
+      const operand_t* o = &r->args[i];
+      if (o->t == JOP_NONE) {
+        snprintf(err, errlen, "invalid arg type");
+        return 1;
+      }
+      if ((o->t == JOP_SYM || o->t == JOP_MEM) && !ident_ok(o->s)) {
+        snprintf(err, errlen, "invalid identifier");
+        return 1;
+      }
+      if ((o->t == JOP_STR) && !sym_ok(o->s)) {
+        snprintf(err, errlen, "empty string");
+        return 1;
+      }
+    }
+    return 0;
+  }
+  if (r->k == JREC_LABEL) {
+    if (!ident_ok(r->label)) {
+      snprintf(err, errlen, "invalid label");
+      return 1;
+    }
+    return 0;
+  }
+  snprintf(err, errlen, "unknown record kind");
+  return 1;
+}
