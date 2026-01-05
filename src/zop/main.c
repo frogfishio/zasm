@@ -14,11 +14,12 @@ static void print_help(void) {
           "zop — opcode JSONL packer (zasm-opcodes-v1 -> raw bytes)\n"
           "\n"
           "Usage:\n"
-          "  zop [-o <output.bin>] [input.jsonl]\n"
+          "  zop [-o <output.bin>] [--container] [input.jsonl]\n"
           "\n"
           "Options:\n"
           "  --help        Show this help message\n"
           "  --version     Show version information\n"
+          "  --container   Emit .zasm.bin container header before opcode bytes\n"
           "  -o <path>     Write output bytes to a file (default: stdout)\n"
           "\n"
           "Output naming style (convention only):\n"
@@ -146,7 +147,41 @@ static void write_u32_le(FILE* out, uint32_t v) {
   fwrite(b, 1, 4, out);
 }
 
-static void write_hex_bytes(FILE* out, const char* hex) {
+typedef struct {
+  FILE* f;
+  uint8_t* buf;
+  size_t len;
+  size_t cap;
+  int container;
+} outbuf_t;
+
+static void out_write(outbuf_t* out, const void* data, size_t n) {
+  if (!out->container) {
+    fwrite(data, 1, n, out->f);
+    return;
+  }
+  if (out->len + n > out->cap) {
+    size_t next = out->cap ? out->cap : 256;
+    while (next < out->len + n) next *= 2;
+    uint8_t* buf = (uint8_t*)realloc(out->buf, next);
+    if (!buf) die_line(0, "out of memory");
+    out->buf = buf;
+    out->cap = next;
+  }
+  memcpy(out->buf + out->len, data, n);
+  out->len += n;
+}
+
+static void write_u32_le_buf(outbuf_t* out, uint32_t v) {
+  unsigned char b[4];
+  b[0] = (unsigned char)(v & 0xFF);
+  b[1] = (unsigned char)((v >> 8) & 0xFF);
+  b[2] = (unsigned char)((v >> 16) & 0xFF);
+  b[3] = (unsigned char)((v >> 24) & 0xFF);
+  out_write(out, b, 4);
+}
+
+static void write_hex_bytes(outbuf_t* out, const char* hex) {
   size_t n = strlen(hex);
   if (n % 2 != 0) {
     die_line(0, "hex length must be even");
@@ -158,11 +193,12 @@ static void write_hex_bytes(FILE* out, const char* hex) {
     if (!end || *end != 0 || v < 0 || v > 255) {
       die_line(0, "invalid hex byte");
     }
-    fputc((unsigned char)v, out);
+    unsigned char b = (unsigned char)v;
+    out_write(out, &b, 1);
   }
 }
 
-static void handle_op_line(const char* line, int line_no, FILE* out) {
+static void handle_op_line(const char* line, int line_no, outbuf_t* out) {
   long op = 0, rd = 0, rs1 = 0, rs2 = 0, imm12 = 0;
   if (parse_int_key(line, "op", &op) <= 0 ||
       parse_int_key(line, "rd", &rd) <= 0 ||
@@ -187,11 +223,11 @@ static void handle_op_line(const char* line, int line_no, FILE* out) {
                    ((uint32_t)rs1 << 16) |
                    ((uint32_t)rs2 << 12) |
                    ((uint32_t)imm12 & 0xFFFu);
-  write_u32_le(out, word0);
-  for (size_t i = 0; i < ext_n; i++) write_u32_le(out, ext[i]);
+  write_u32_le_buf(out, word0);
+  for (size_t i = 0; i < ext_n; i++) write_u32_le_buf(out, ext[i]);
 }
 
-static void handle_bytes_line(const char* line, int line_no, FILE* out) {
+static void handle_bytes_line(const char* line, int line_no, outbuf_t* out) {
   char* hex = NULL;
   int rc = parse_string_key(line, "hex", &hex);
   if (rc <= 0) die_line(line_no, "missing or invalid hex string");
@@ -199,9 +235,24 @@ static void handle_bytes_line(const char* line, int line_no, FILE* out) {
   free(hex);
 }
 
+static void write_container(FILE* out, const uint8_t* buf, size_t len) {
+  unsigned char hdr[16];
+  memcpy(hdr, "ZASB", 4);
+  hdr[4] = 1; hdr[5] = 0; /* version */
+  hdr[6] = 0; hdr[7] = 0; /* flags */
+  hdr[8] = 0; hdr[9] = 0; hdr[10] = 0; hdr[11] = 0; /* entry_off */
+  hdr[12] = (unsigned char)(len & 0xFF);
+  hdr[13] = (unsigned char)((len >> 8) & 0xFF);
+  hdr[14] = (unsigned char)((len >> 16) & 0xFF);
+  hdr[15] = (unsigned char)((len >> 24) & 0xFF);
+  fwrite(hdr, 1, sizeof(hdr), out);
+  if (len) fwrite(buf, 1, len, out);
+}
+
 int main(int argc, char** argv) {
   const char* out_path = NULL;
   const char* in_path = NULL;
+  int container = 0;
 
   for (int i = 1; i < argc; i++) {
     const char* arg = argv[i];
@@ -212,6 +263,10 @@ int main(int argc, char** argv) {
     if (strcmp(arg, "--version") == 0) {
       printf("zop %s\n", ZASM_VERSION);
       return 0;
+    }
+    if (strcmp(arg, "--container") == 0) {
+      container = 1;
+      continue;
     }
     if (strcmp(arg, "-o") == 0) {
       if (i + 1 >= argc) die_line(0, "missing -o argument");
@@ -237,6 +292,11 @@ int main(int argc, char** argv) {
     if (!out) die_line(0, "failed to open output");
   }
 
+  outbuf_t obuf;
+  memset(&obuf, 0, sizeof(obuf));
+  obuf.f = out;
+  obuf.container = container ? 1 : 0;
+
   char* line = NULL;
   size_t cap = 0;
   int line_no = 0;
@@ -258,14 +318,19 @@ int main(int argc, char** argv) {
     int krc = parse_string_key(p, "k", &kind);
     if (krc <= 0) die_line(line_no, "missing record kind");
     if (strcmp(kind, "op") == 0) {
-      handle_op_line(p, line_no, out);
+      handle_op_line(p, line_no, &obuf);
     } else if (strcmp(kind, "bytes") == 0) {
-      handle_bytes_line(p, line_no, out);
+      handle_bytes_line(p, line_no, &obuf);
     } else {
       free(kind);
       die_line(line_no, "unknown record kind");
     }
     free(kind);
+  }
+
+  if (obuf.container) {
+    write_container(out, obuf.buf, obuf.len);
+    free(obuf.buf);
   }
 
   free(line);

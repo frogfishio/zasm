@@ -27,3 +27,5 @@ All notable changes to this project will be documented in this file.
 - Added bounds-checked memory access emission for `zxc` arm64 with mem_base/mem_size in the API.
 - Added a minimal x86_64 `zxc` backend (Group A) and error-path conformance tests.
 - Added bounds-checked LDIR/FILL shims in the arm64 translator and updated arm64 tests for new encodings.
+- Added `zcloak-jit`, a first-party runner that JITs `.zasm.bin` opcode streams via `zxc`.
+- Added `.zasm.bin` container spec and `zop --container` to emit the header for JIT execution.

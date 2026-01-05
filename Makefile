@@ -99,7 +99,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 .PHONY: \
   all clean zas zld zrun zlnt zop zxc-lib dirs install \
   build bump bump-version dist dist-$(PLATFORM) \
-  zcloak cloak-lib cloak-example cloak-tests \
+  zcloak zcloak-jit cloak-lib cloak-example cloak-tests \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
   integrator-pack dist-integrator-pack \
   test-asm-suite \
@@ -421,7 +421,11 @@ test-abi-ctl: zrun
 test-conform-zld: zld
 	test/conform_zld.sh
 
-test-cloak-smoke: zcloak cloak-example
+test-cloak-smoke: zcloak zcloak-jit cloak-example test-cloak-jit
+
+test-cloak-jit: zcloak-jit
+	sh test/cloak_jit_smoke.sh
+	sh test/cloak_jit_negative.sh
 	test/cloak_smoke.sh
 
 test-cloak-abi: zcloak cloak-tests
@@ -448,6 +452,7 @@ CLOAK_CPPFLAGS := -Isrc/cloak -Iinclude
 CLOAK_CFLAGS := $(CFLAGS) -fPIC
 CLOAK_LIB := $(BIN)/liblembeh_cloak$(SHLIB_EXT)
 ZCLOAK_OBJ := $(CLOAK_BUILD)/main.o $(CLOAK_BUILD)/host.o
+ZCLOAK_JIT_OBJ := $(CLOAK_BUILD)/jit_main.o $(CLOAK_BUILD)/host.o
 CLOAK_OBJ := $(CLOAK_BUILD)/lembeh_cloak.o
 CLOAK_EXAMPLE := $(CLOAK_BUILD)/echo_guest$(SHLIB_EXT)
 CLOAK_TEST_SRCS := $(wildcard test/cloak_guests/*.c)
@@ -464,6 +469,10 @@ $(CLOAK_LIB): $(CLOAK_OBJ) | dirs
 zcloak: cloak-lib $(ZCLOAK_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZCLOAK_OBJ) -L$(BIN) -llembeh_cloak $(SHLIB_RPATH) $(SHLIB_LDLIBS) -o $(BIN)/zcloak
 	ln -sf $(PLATFORM)/zcloak $(BIN_ROOT)/zcloak
+
+zcloak-jit: cloak-lib zxc-lib $(ZCLOAK_JIT_OBJ) | dirs
+	$(CC) $(CFLAGS) $(ZCLOAK_JIT_OBJ) -L$(BIN) -llembeh_cloak -lzxc $(SHLIB_RPATH) $(SHLIB_LDLIBS) -o $(BIN)/zcloak-jit
+	ln -sf $(PLATFORM)/zcloak-jit $(BIN_ROOT)/zcloak-jit
 
 cloak-example: $(CLOAK_EXAMPLE)
 
