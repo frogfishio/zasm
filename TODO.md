@@ -77,3 +77,7 @@
     - Compare/set + branch behavior tests (EQ/NE/LT/GT + JR).
     - Cross-backend equivalence tests (same program, same output).
     - Pseudo-op expansion determinism tests (LDIR/FILL/DROP).
+- Cortex-M (nice-to-have):
+  - Implement `--target cortex-m` per `docs/spec/cortex_m.md`.
+  - Define the minimal runtime ABI and linker script for bare-metal output.
+  - Add conformance tests for 32-bit ops, bounds traps, and determinism.

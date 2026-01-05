@@ -23,6 +23,7 @@ without assuming a `zas` frontend.
 - **ISA Spec:** `docs/spec/isa.md`
 - **Tooling:** `zld --conform` and `zld --conform=strict`
 - **C Cloak:** `docs/integrator_pack/c_cloak/` (normative host interface)
+- **JIT Codepack:** `docs/integrator_pack/jit/` (reference JIT runtime snapshot)
 
 ## Bundled pack locations
 

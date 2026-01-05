@@ -99,7 +99,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 .PHONY: \
   all clean zas zld zrun zlnt zop zxc-lib dirs install \
   build bump bump-version dist dist-$(PLATFORM) \
-  zcloak zcloak-jit cloak-lib cloak-example cloak-tests \
+  zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
   integrator-pack dist-integrator-pack \
   test-asm-suite \
@@ -114,10 +114,11 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld zrun zlnt zop
+build: zas zld zrun zlnt zop zasm-bin-wrap
 
-install: zas zld zrun zlnt zop
+install: zas zld zrun zlnt zop zasm-bin-wrap
 	@mkdir -p $(DESTDIR)$(BINDIR)
+	@cp tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
@@ -615,3 +616,8 @@ $(ZRUN_BUILD)/%.o: src/zrun/%.c | dirs
 zrun: $(ZRUN_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZRUN_OBJ) -o $(BIN)/zrun $(LDFLAGS) $(ZRUN_LDFLAGS)
 	ln -sf $(PLATFORM)/zrun $(BIN_ROOT)/zrun
+
+# ---- helper tools ----
+
+zasm-bin-wrap:
+	@chmod +x tools/zasm_bin_wrap.py

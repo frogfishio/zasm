@@ -255,6 +255,7 @@ JIT error semantics:
 | [docs/spec/ir.md](./docs/spec/ir.md) | **Normative** JSONL IR format |
 | [docs/spec/opcode_encoding.md](./docs/spec/opcode_encoding.md) | **Normative** binary opcode encoding |
 | [docs/spec/zasm_bin.md](./docs/spec/zasm_bin.md) | **Normative** `.zasm.bin` container format |
+| [docs/integrator_pack/jit/README.md](./docs/integrator_pack/jit/README.md) | JIT codepack snapshot (integrator pack) |
 | [docs/integrator_pack.md](./docs/integrator_pack.md) | Third-party compiler integration guide |
 | [lembeh/CLOAK_INTEGRATOR_GUIDE.md](./lembeh/CLOAK_INTEGRATOR_GUIDE.md) | **Normative** cloak runtime implementation guide |
 
