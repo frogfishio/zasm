@@ -22,6 +22,10 @@ At its core, zasm defines a **64-bit register-based virtual processor** with a c
 - **Ahead-of-time compiled** to WebAssembly (WASM)
 - **Translated** to other ISAs (RISC-V RV64I planned)
 
+Beyond the core CPU profile, future work explores specialized profiles:
+**zASMA** (accelerator/GPU), **zASMF** (FPGA), and **zASM32** (Cortex‑M class).
+These are parked specs today and are not implemented yet.
+
 The assembly syntax uses Z80-inspired mnemonics for human readability—but this is **not a Z80 emulator**. It is a modern, purpose-built virtual silicon designed for cross-platform deterministic execution with formal ABI contracts.
 
 > **Status:** v1.0.5 — Normative specs for ISA, IR, ABI, and opcode encoding are stable. Breaking changes trigger major version bumps.
@@ -255,6 +259,8 @@ JIT error semantics:
 | [docs/spec/ir.md](./docs/spec/ir.md) | **Normative** JSONL IR format |
 | [docs/spec/opcode_encoding.md](./docs/spec/opcode_encoding.md) | **Normative** binary opcode encoding |
 | [docs/spec/zasm_bin.md](./docs/spec/zasm_bin.md) | **Normative** `.zasm.bin` container format |
+| [docs/spec/accelerator.md](./docs/spec/accelerator.md) | Accelerator profile (CUDA/Vulkan/Metal; draft) |
+| [docs/spec/fpga.md](./docs/spec/fpga.md) | FPGA profile (HLS/RTL; draft) |
 | [docs/integrator_pack/jit/README.md](./docs/integrator_pack/jit/README.md) | JIT codepack snapshot (integrator pack) |
 | [docs/integrator_pack.md](./docs/integrator_pack.md) | Third-party compiler integration guide |
 | [lembeh/CLOAK_INTEGRATOR_GUIDE.md](./lembeh/CLOAK_INTEGRATOR_GUIDE.md) | **Normative** cloak runtime implementation guide |

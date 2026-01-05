@@ -5,7 +5,7 @@
 
 This document defines a **future** target profile for generating Cortex-M
 microcontroller binaries from ZASM opcodes. It is a **nice-to-have** roadmap
-specification and is not implemented yet.
+specification and is not implemented yet. Profile name: **zASM32**.
 
 ## 1. Scope
 
