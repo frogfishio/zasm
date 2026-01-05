@@ -303,10 +303,10 @@ wasm_trap_t* zrun_alloc(void* env, wasmtime_caller_t* caller,
   size_t aligned = (n + 3u) & ~3u;
   if (e->heap_ptr + aligned > mem_size) {
     wasmtime_context_t* ctx = wasmtime_caller_context(caller);
-    uint64_t page_size = wasmtime_memory_page_size(ctx, &mem);
+    uint64_t page_size = 65536;
     uint64_t needed = (uint64_t)e->heap_ptr + (uint64_t)aligned;
-    uint64_t current_pages = page_size ? (mem_size / page_size) : 0;
-    uint64_t needed_pages = page_size ? ((needed + page_size - 1) / page_size) : 0;
+    uint64_t current_pages = mem_size / page_size;
+    uint64_t needed_pages = (needed + page_size - 1) / page_size;
     uint64_t cap_bytes = e->mem_cap_bytes;
     uint64_t cap_pages = 0;
     if (cap_bytes > 0 && page_size > 0) {
