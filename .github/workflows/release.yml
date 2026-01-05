@@ -19,13 +19,13 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y bison flex clang
+          sudo apt-get install -y bison flex clang ripgrep
 
       - name: Install deps (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install bison flex
+          brew install bison flex ripgrep
           echo "BISON=$(brew --prefix bison)/bin/bison" >> "$GITHUB_ENV"
           echo "FLEX=$(brew --prefix flex)/bin/flex" >> "$GITHUB_ENV"
 
@@ -57,13 +57,17 @@ jobs:
       - name: Build + test
         run: |
           make test-asm-suite
+          make dist
 
       - name: Package artifacts
         shell: bash
         run: |
           set -euo pipefail
+          plat_dir="$(ls -d dist/*/ | head -n1)"
+          plat_dir="${plat_dir%/}"
+          base="$(basename "$plat_dir")"
           mkdir -p dist
-          tar -czf "dist/zasm-${{ runner.os }}-${{ runner.arch }}.tar.gz" -C bin zas zld zrun
+          tar -czf "dist/zasm-${base}.tar.gz" -C dist "$base"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -71,9 +75,46 @@ jobs:
           name: zasm-${{ runner.os }}-${{ runner.arch }}
           path: dist/*.tar.gz
 
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            bison
+            flex
+
+      - name: Build dist (Windows)
+        shell: msys2 {0}
+        run: |
+          make dist-windows-x86_64 NO_ZRUN=1 CC=gcc
+
+      - name: Package artifacts (Windows)
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          plat_dir="$(ls -d dist/*/ | head -n1)"
+          plat_dir="${plat_dir%/}"
+          base="$(basename "$plat_dir")"
+          mkdir -p dist
+          tar -czf "dist/zasm-${base}.tar.gz" -C dist "$base"
+
+      - name: Upload artifacts (Windows)
+        uses: actions/upload-artifact@v4
+        with:
+          name: zasm-windows-x86_64
+          path: dist/*.tar.gz
+
   release:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, build-windows]
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4

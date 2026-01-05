@@ -138,10 +138,17 @@ dist: build
 	$(MAKE) clean
 	$(MAKE) dist-$(PLATFORM)
 
-dist-$(PLATFORM): zas zld zrun zlnt zop $(VERSION_HEADER)
+DIST_TOOLS := zas zld zlnt zop
+ifneq ($(NO_ZRUN),1)
+  DIST_TOOLS += zrun
+endif
+
+dist-$(PLATFORM): $(DIST_TOOLS) $(VERSION_HEADER)
 	@mkdir -p $(DIST_PLATFORM_DIR)
-	@cp $(BIN)/zas $(BIN)/zld $(BIN)/zrun $(BIN)/zlnt $(BIN)/zop $(DIST_PLATFORM_DIR)/
+	@cp $(foreach t,$(DIST_TOOLS),$(BIN)/$(t)) $(DIST_PLATFORM_DIR)/
 	@cp $(VERSION_FILE) $(DIST_PLATFORM_DIR)/
+	@mkdir -p $(DIST_PLATFORM_DIR)/docs
+	@cp -R docs/tools $(DIST_PLATFORM_DIR)/docs/
 
 bump: bump-version
 
