@@ -107,7 +107,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
   test-cat test-upper test-stream test-alloc test-isa-smoke test-fizzbuzz test-twofile \
   test-strict test-trap test-zrun-log \
   test-unknownsym test-badcond test-badlabel test-badmem \
-  test-wat-validate test-wasm-opt test-zlnt test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl test-conform-zld \
+  test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl test-conform-zld \
   test-fuzz-zas test-fuzz-zld
 
 all: zas zld
@@ -193,7 +193,7 @@ test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fiz
 
 test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
-test-validation: test-wat-validate test-wasm-opt test-zlnt test-conform-zld
+test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -348,6 +348,9 @@ test-wasm-opt: zas zld
 test-zlnt: zas zlnt
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zlnt
 	cat examples/upper.asm | $(BIN)/zas | $(BIN)/zlnt
+
+test-opcode-golden:
+	test/opcode_golden.sh
 
 # --- Fuzz tests ---
 

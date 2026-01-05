@@ -1,37 +1,10 @@
 # TO DO
 
 - New spec impact (lembeh/CLOAK_INTEGRATOR_GUIDE.md):
-  - Align ABI imports to exact surface: `req_read`, `res_write`, `res_end`, `log`, `_alloc`, `_free`, `_ctl` (no extras).
   - Rename/adjust linker WAT emission to use `_alloc/_free/_ctl` names and update allowlist/manifest.
-  - Implement `_ctl` handling in zrun host ABI with ZCL1 framing + Hopper payloads (CAPS_LIST required).
-  - Add ZCL1 parsing/response validation helpers (magic, version, payload_len, error envelopes).
-  - Enforce guest memory model in zrun for non-WASM hosts: flat byte space + bounds checks.
-  - Make `_alloc` deterministic and return offsets within guest space; `_free` must not crash on invalid ptr.
-  - Reserve handles 0–2 semantics in runtime/tests (stdin/stdout/log) and ensure new handles never collide.
-  - Update `docs/spec/abi.md` to match the new canonical guide (or add a v1.0.0 Cloak section pointing to it).
   - Update `docs/tools/zrun.md` to document `_ctl`, handle semantics, and determinism guarantees.
-  - Update `docs/integrator_pack.md` + C cloak to reflect `_ctl`, `_alloc/_free`, and guest memory model.
-  - Add conformance tests for `_ctl`:
-    - CAPS_LIST with n=0 success response
-    - unknown op returns `t_ctl_unknown_op` envelope
-    - malformed frame returns `-1` and writes nothing
-    - response too large for resp_cap returns `-1`
   - Add ABI tests for handle rules: opaque handles, reserved 0–2, nonblocking timeout_ms=0.
   - Add manifest tests for `_ctl` primitive discovery.
-
-- Build a first-party cloak (outside the integrator pack) and run tests through it:
-  - Create `src/cloak/` runtime built from the integrator pack C cloak code (vendored, not copied by hand).
-  - Define a stable public API for the cloak host (init, load module, invoke entrypoint, teardown).
-  - Implement the host memory model in the cloak runtime (flat byte space, bounds checks).
-  - Wire `_alloc/_free/_ctl` and stream I/O to the host API with deterministic behavior.
-  - Add a minimal host harness CLI (e.g., `zcloak`) to run a WAT/WASM module with stdin/stdout.
-  - Provide a no-capabilities `_ctl` implementation returning CAPS_LIST n=0.
-  - Add a capability stub interface and deterministic handle allocator for future caps.
-  - Add a cloak build target and install path in `Makefile` (local tool, not dist).
-  - Add test harness to run ABI tests through the cloak instead of zrun (parallel target).
-  - Add "from the other side" test suite: run existing `test/abi_*` and runtime fixtures via `zcloak`.
-  - Add CI/Make targets: `test-abi-cloak`, `test-runtime-cloak`, and `test-all-cloak`.
-  - Document how to run cloak tests and how the cloak uses the integrator pack code.
 
 - Add `zas --format` and define canonical style rules in `POETICS.md` (formatter output must match the style guide).
 - Build a VS Code extension with syntax highlighting, linting, and formatting using tool mode + JSON diagnostics.
@@ -63,15 +36,41 @@
 - Add end-to-end run tests per feature class (assemble → link → run).
 - Expand fuzzing coverage for lexer/parser and JSONL ingestion with invariant checks.
 
+- Audit: determinism, auditability, security (project-wide; prioritize codegen determinism):
+  - Define audit scope + threat model with primary focus on deterministic code generation; document assumptions.
+  - Inventory all non-deterministic inputs (time, RNG, I/O, env, filesystem, network) and pin/ban them.
+  - Add codegen determinism tests (same source/config -> byte-identical output across runs).
+  - Add cross-machine codegen determinism tests (same source/config -> identical output on macOS/Linux).
+  - Verify deterministic ordering for `_ctl`, `req_read`, `res_write`, and handle allocation; add tests.
+  - Review alloc/free and memory bounds checks for OOB, overflow, and integer wrap; add tests.
+  - Audit error handling for closed streams, invalid handles, and invalid pointers; ensure no crashes.
+  - Add reproducible build checklist (compiler flags, timestamps, build paths, version embedding).
+  - Add structured logging guidance for audit trails (what events, format, redaction policy).
+  - Add security review for input parsers (asm, JSONL, WAT) with fuzzing + sanitizer runs.
+  - Add dependency audit + version pinning policy (vendored libs, licenses, CVE checks).
+  - Define and publish a conformance/security regression test suite for CI gating.
+
 ## IMPORTANT
 
-- Finalize the normative C integration cloak (memory model + alloc/free hooks + invoke contract) and update docs/spec accordingly.
-- Add a reference host harness in the cloak pack (pure C embedding).
 - Add cross-compilation guidance and build scripts for the C cloak.
 
 
 # FUTURE TASKS
-
-- consider deeply what opcodes (hex) should Zasm have. We have effectively built a "processor" and it's not a toy but 64bit RISC CPU. It needs correct opcodes.
-
-- create another tool "zxc" (ZASM Cross Compiler): we get raw binary opcodes and crosscompile them on load to the current CPU architecture (not JIT but on load) and we go opcode for opcode compile supporting mac silicon and x86 linux at first then others. We already have non-wasm cloak so what we really need is zxc tool but more than that an embeddable zxc code that could transpile on load and plug the code onto a custom cloak
+- Build `zxc` (ZASM Cross Compiler) + embeddable library:
+  - Define a two-stage input: JSONL opcode stream for tooling/authoring, raw opcode bytes for the compiler.
+  - Add a `zas --target` mode to emit JSONL in the opcode stream format (e.g., `--target opcodes`).
+  - Add a `zas --emit-bin` mode to emit raw opcode bytes for `zxc`.
+  - Define output targets (macOS arm64, Linux x86_64) and a target selection API.
+  - Implement opcode-to-native translation pipeline (opcode-by-opcode, ahead-of-time on load).
+  - Add an embeddable C API (`libzxc`) for translation + execution within a custom cloak.
+  - Create a CLI `zxc` wrapper that uses `libzxc` for standalone translation.
+  - Define how translated code binds to cloak ABI (req_read/res_write/etc) without WASM.
+  - Add verification tests comparing behavior with the interpreter/VM (or reference runner).
+  - Add test fixtures for platform parity and deterministic outputs.
+  - Document binary format, API usage, and supported targets; add a roadmap for new targets.
+  - Add backend validation suites for `--target wasm`, `--target zasm`, and `--target rv64i`:
+    - Encode/decode golden tests for every opcode in `docs/spec/opcode_encoding.md`.
+    - Small backend corpus for arithmetic/logic (32/64), loads/stores (sign/zero), div/rem traps.
+    - Compare/set + branch behavior tests (EQ/NE/LT/GT + JR).
+    - Cross-backend equivalence tests (same program, same output).
+    - Pseudo-op expansion determinism tests (LDIR/FILL/DROP).
