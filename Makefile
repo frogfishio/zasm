@@ -33,6 +33,8 @@ DIST_PLATFORM_DIR = $(DIST_DIR)/$(PLATFORM)
 WASMTIME_C_API_DIR_BASE := external/wasmtime-c-api
 
 ZAS_BUILD := $(BUILD)/zas
+ZOP_BUILD := $(BUILD)/zop
+ZXC_BUILD := $(BUILD)/zxc
 ZRUN_BUILD := $(BUILD)/zrun
 CLOAK_BUILD := $(BUILD)/cloak
 CLOAK_TEST_BUILD := $(BUILD)/cloak_tests
@@ -95,7 +97,7 @@ ZAS_OBJ := \
 ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded-internal-declaration
 
 .PHONY: \
-  all clean zas zld zrun zlnt dirs install \
+  all clean zas zld zrun zlnt zop zxc-lib dirs install \
   build bump bump-version dist dist-$(PLATFORM) \
   zcloak cloak-lib cloak-example cloak-tests \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
@@ -108,21 +110,22 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
   test-strict test-trap test-zrun-log \
   test-unknownsym test-badcond test-badlabel test-badmem \
   test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl test-conform-zld \
-  test-fuzz-zas test-fuzz-zld
+  test-fuzz-zas test-fuzz-zld test-zxc-arm64 test-zxc-x86
 
 all: zas zld
 
-build: zas zld zrun zlnt
+build: zas zld zrun zlnt zop
 
-install: zas zld zrun zlnt
+install: zas zld zrun zlnt zop
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
 	@install -m 0755 $(BIN)/zlnt $(DESTDIR)$(BINDIR)/zlnt
+	@install -m 0755 $(BIN)/zop $(DESTDIR)$(BINDIR)/zop
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -134,9 +137,9 @@ dist: build
 	$(MAKE) clean
 	$(MAKE) dist-$(PLATFORM)
 
-dist-$(PLATFORM): zas zld zrun zlnt $(VERSION_HEADER)
+dist-$(PLATFORM): zas zld zrun zlnt zop $(VERSION_HEADER)
 	@mkdir -p $(DIST_PLATFORM_DIR)
-	@cp $(BIN)/zas $(BIN)/zld $(BIN)/zrun $(BIN)/zlnt $(DIST_PLATFORM_DIR)/
+	@cp $(BIN)/zas $(BIN)/zld $(BIN)/zrun $(BIN)/zlnt $(BIN)/zop $(DIST_PLATFORM_DIR)/
 	@cp $(VERSION_FILE) $(DIST_PLATFORM_DIR)/
 
 bump: bump-version
@@ -194,8 +197,42 @@ test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fiz
 test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
 test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
+test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
+
+test-zop-bytes: zop
+	sh test/zop_bytes.sh
+
+test-zas-opcodes-directives: zas zop
+	sh test/zas_opcodes_directives.sh
+
+test-zxc-arm64: zxc-lib
+	@arch=$$(uname -m); \
+	if [ "$$arch" != "arm64" ] && [ "$$arch" != "aarch64" ]; then \
+	  echo "zxc arm64 smoke: skipped (arch=$$arch)"; \
+	  exit 0; \
+	fi; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_smoke.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_smoke; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_load_store.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_load_store; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_ld_ext.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_ld_ext; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_compare_branch.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_compare_branch; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_call.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_call; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_macro.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_macro; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_div_guard.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_div_guard; \
+	$(CC) $(CFLAGS) -Iinclude test/zxc_arm64_errors.c $(BIN)/libzxc.a -o $(BUILD)/zxc_arm64_errors; \
+	$(BUILD)/zxc_arm64_smoke; \
+	$(BUILD)/zxc_arm64_load_store; \
+	$(BUILD)/zxc_arm64_ld_ext; \
+	$(BUILD)/zxc_arm64_compare_branch; \
+	$(BUILD)/zxc_arm64_call; \
+	$(BUILD)/zxc_arm64_macro; \
+	$(BUILD)/zxc_arm64_div_guard; \
+	$(BUILD)/zxc_arm64_errors
+
+test-zxc-x86: zxc-lib
+	$(CC) $(CFLAGS) -Iinclude test/zxc_x86_64_errors.c $(BIN)/libzxc.a -o $(BUILD)/zxc_x86_64_errors; \
+	$(BUILD)/zxc_x86_64_errors
 
 test-asm-suite: test-asm test-runtime test-validation test-fuzz-zld
 
@@ -461,6 +498,46 @@ zld: $(ZLD_OBJ) | dirs
 	ln -sf $(PLATFORM)/zld $(BIN_ROOT)/zld
 
 .PHONY: zld
+
+# ---- zop (opcode JSONL -> raw bytes) ----
+
+ZOP_SRC := \
+  src/zop/main.c
+
+ZOP_OBJ := \
+  $(ZOP_BUILD)/main.o
+
+$(ZOP_BUILD)/%.o: src/zop/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zop -c $< -o $@
+
+zop: $(ZOP_OBJ) | dirs
+	$(CC) $(CFLAGS) $(ZOP_OBJ) -o $(BIN)/zop $(LDFLAGS)
+	ln -sf $(PLATFORM)/zop $(BIN_ROOT)/zop
+
+.PHONY: zop
+
+# ---- zxc (opcode -> native) ----
+
+ZXC_SRC := \
+  src/zxc/arm64.c \
+  src/zxc/x86_64.c
+
+ZXC_OBJ := \
+  $(ZXC_BUILD)/arm64.o \
+  $(ZXC_BUILD)/x86_64.o
+
+ZXC_LIB := $(BIN)/libzxc.a
+
+$(ZXC_BUILD)/%.o: src/zxc/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zxc -c $< -o $@
+
+zxc-lib: $(ZXC_LIB)
+
+$(ZXC_LIB): $(ZXC_OBJ) | dirs
+	@rm -f $@
+	@ar rcs $@ $^
+
+.PHONY: zxc-lib
 
 # ---- zcc (IR -> C) ----
 

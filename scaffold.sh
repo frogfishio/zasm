@@ -23,7 +23,7 @@ touch \
   src/common/diag.c \
   src/common/diag.h
 
-# zas (ZASM -> JSONL)
+# zas (zASM -> JSONL)
 touch \
   src/zas/main.c \
   src/zas/zasm.l \

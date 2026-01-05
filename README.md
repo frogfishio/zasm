@@ -1,7 +1,7 @@
 
 # zasm – A Deterministic, Pipeline-Friendly Assembler for WebAssembly
 
-**zasm** is a small, focused toolchain that compiles a readable Z80-inspired assembly language (ZASM) into WebAssembly via a clean, versioned intermediate representation.
+**zasm** is a small, focused toolchain that compiles a readable Z80-inspired assembly language (zASM) into WebAssembly via a clean, versioned intermediate representation.
 
 > **Status:** v1.0.0 (Normative). The JSONL IR and host ABI are stable. Breaking changes will trigger a major version bump.
 
@@ -98,7 +98,7 @@ zasm is built on formal stability contracts. Detailed normative specifications a
 * **[docs/developers.md](./docs/developers.md)** – Getting started and hello world.
 * **[docs/project_structure.md](./docs/project_structure.md)** – Repository layout and conventions.
 * **[docs/integrator_pack.md](./docs/integrator_pack.md)** – Integrator Pack for third-party compiler authors.
-* **[docs/tools/zas.md](./docs/tools/zas.md)** – Assembler usage (ZASM → JSONL IR).
+* **[docs/tools/zas.md](./docs/tools/zas.md)** – Assembler usage (zASM → JSONL IR).
 * **[docs/tools/zld.md](./docs/tools/zld.md)** – JSONL IR → WAT lowering behavior.
 * **[docs/tools/zrun.md](./docs/tools/zrun.md)** – Local runner for modules exporting `lembeh_handle`.
 * **[docs/tools/zlnt.md](./docs/tools/zlnt.md)** – JSONL lint/analyzer.

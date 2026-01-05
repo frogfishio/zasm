@@ -3,7 +3,7 @@
 
 # Lembeh C Cloak (Normative Host Interface)
 
-This is a minimal, normative C interface for hosts that integrate ZASM modules
+This is a minimal, normative C interface for hosts that integrate zASM modules
 without WebAssembly. It defines the required host primitives and a stable
 entrypoint signature.
 

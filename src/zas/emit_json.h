@@ -21,3 +21,5 @@ void emit_label(const char* name, int line);
 void emit_instr(const char* mnemonic, const operand_t* ops, size_t nops, int line);
 void emit_dir(const char* d, const char* name_opt, const operand_t* args, size_t nargs, int line);
 void emit_set_lint(int on);
+void emit_set_target(const char* target);
+int emit_has_error(void);

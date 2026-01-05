@@ -1,7 +1,7 @@
 <!-- SPDX-FileCopyrightText: 2025 Frogfish -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# ZASM IR v1.0.0 (Normative)
+# zASM IR v1.0.0 (Normative)
 
 ## Purpose
 

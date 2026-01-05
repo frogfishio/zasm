@@ -9,7 +9,7 @@ Thanks for contributing. This repo is intentionally small, stream-first, and hos
 
 `zasm` is a two-stage toolchain:
 
-- **`zas`** — ZASM (text) → **JSONL IR** (one record per line) on stdout
+- **`zas`** — zASM (text) → **JSONL IR** (one record per line) on stdout
 - **`zld`** — JSONL IR → **WAT** (single module) on stdout
 - **`zrun`** — local runner/harness (Wasmtime host) for tests + debugging
 

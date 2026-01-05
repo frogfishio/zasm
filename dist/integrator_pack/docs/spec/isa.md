@@ -1,11 +1,11 @@
 <!-- SPDX-FileCopyrightText: 2025 Frogfish -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# ZASM ISA v1.0.0 (Normative)
+# zASM ISA v1.0.0 (Normative)
 
 ## Purpose and scope
 
-ZASM is a human-facing assembly language that lowers to WAT. This document defines
+zASM is a human-facing assembly language that lowers to WAT. This document defines
 its register model, instruction set, directives, and primitive calling conventions.
 All conforming assemblers/linkers MUST follow these rules.
 

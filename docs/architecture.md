@@ -3,7 +3,7 @@
 
 # zasm Architecture
 
-zasm is a small, stream-first toolchain that compiles a Z80‑flavored assembly language (“ZASM”) into WebAssembly.
+zasm is a small, stream-first toolchain that compiles a Z80‑flavored assembly language (“zASM”) into WebAssembly.
 
 The architecture is intentionally simple:
 
@@ -13,7 +13,7 @@ The architecture is intentionally simple:
 
 The toolchain is split into **two binaries** (plus a local harness):
 
-- **`zas`** — parses ZASM text → emits **JSONL IR** (one record per line)
+- **`zas`** — parses zASM text → emits **JSONL IR** (one record per line)
 - **`zld`** — reads JSONL IR → emits **WAT** (one WebAssembly text module)
 - **`zrun`** — local runner/harness for executing `.wat/.wasm` and driving golden tests
 
@@ -29,7 +29,7 @@ This separation keeps the system composable:
 ## Pipeline
 
 ```
-ZASM source (text)
+zASM source (text)
   → zas (stdin→stdout)
   → JSONL IR (stream)
   → zld (stdin→stdout)
@@ -52,7 +52,7 @@ This supports Unix-style composition and makes it easy to embed the toolchain in
 
 ### Responsibilities
 
-- lex/parse ZASM
+- lex/parse zASM
 - normalize syntax into a small set of IR records
 - attach locations (`line`) for diagnostics
 - reject invalid syntax early
@@ -294,6 +294,23 @@ Why:
 ### Two-stage pipeline with a stable JSONL contract
 
 `zas` and `zld` are split by a versioned JSONL IR.
+
+### Planned opcode pipeline (`zxc`)
+
+Future backend flow adds a second JSONL boundary for low-level opcode streams:
+
+```
+zas (zASM text)
+  -> JSONL IR (zasm-v1.0)
+  -> JSONL opcode stream (zasm-opcodes-v1)
+  -> zxc
+  -> target backend (zasm opcode bytes | x86_64 | arm64 | ...)
+```
+
+Notes:
+- The opcode JSONL stream is fully resolved (no labels or relocations).
+- `zxc` consumes raw opcode bytes; JSONL is an authoring/tooling format that
+  can be packed into the byte stream.
 
 Why:
 

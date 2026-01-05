@@ -3,7 +3,7 @@
 
 # Stream ABI v1.0.0 (Normative)
 
-This document defines the required host ABI for ZASM-generated modules.
+This document defines the required host ABI for zASM-generated modules.
 All conforming modules and hosts MUST follow this contract.
 
 ## Module interface

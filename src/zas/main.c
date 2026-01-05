@@ -72,8 +72,8 @@ static void print_help(void) {
           "zas — ZASM assembler\n"
           "\n"
           "Usage:\n"
-          "  zas [--lint] [--verbose] [--json]\n"
-          "  zas --tool -o <output.jsonl> <input.asm>...\n"
+          "  zas [--lint] [--verbose] [--json] [--target <ir|opcodes>]\n"
+          "  zas --tool -o <output.jsonl> [--target <ir|opcodes>] <input.asm>...\n"
           "\n"
           "Options:\n"
           "  --help        Show this help message\n"
@@ -81,6 +81,7 @@ static void print_help(void) {
           "  --lint        Parse/validate without emitting JSONL\n"
           "  --tool        Enable filelist + -o output mode\n"
           "  -o <path>     Write JSONL IR to a file (tool mode only)\n"
+          "  --target      Output target: ir (default) or opcodes\n"
           "  --verbose     Emit debug-friendly diagnostics to stderr (disabled with --lint)\n"
           "  --json        Emit diagnostics as JSON lines (stderr)\n"
           "\n"
@@ -92,6 +93,7 @@ int main(int argc, char** argv) {
   int lint = 0;
   int tool_mode = 0;
   const char* out_path = NULL;
+  const char* target = "ir";
   const char* inputs[256];
   int ninputs = 0;
 
@@ -127,6 +129,18 @@ int main(int argc, char** argv) {
         return 2;
       }
       out_path = argv[++i];
+      continue;
+    }
+    if (strcmp(arg, "--target") == 0) {
+      if (i + 1 >= argc) {
+        diag_emit("error", NULL, 0, "--target requires a value");
+        return 2;
+      }
+      target = argv[++i];
+      if (strcmp(target, "ir") != 0 && strcmp(target, "opcodes") != 0) {
+        diag_emit("error", NULL, 0, "unknown target: %s", target);
+        return 2;
+      }
       continue;
     }
     if (arg[0] == '-') {
@@ -168,6 +182,7 @@ int main(int argc, char** argv) {
     // Lint mode suppresses JSONL output so tooling can validate without emitting code.
     emit_set_lint(1);
   }
+  emit_set_target(target);
 
   if (tool_mode && !lint) {
     if (!freopen(out_path, "w", stdout)) {
@@ -208,7 +223,7 @@ int main(int argc, char** argv) {
     rc = yyparse();
   }
 
-  if (rc != 0) return 1;
+  if (rc != 0 || emit_has_error()) return 1;
   diag_emit("info", NULL, 0, "ok");
   return 0;
 }

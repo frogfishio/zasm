@@ -57,9 +57,12 @@
 
 # FUTURE TASKS
 - Build `zxc` (ZASM Cross Compiler) + embeddable library:
-  - Define a two-stage input: JSONL opcode stream for tooling/authoring, raw opcode bytes for the compiler.
+  - Implement `zxc` ingestion of raw opcode bytes (core reader/decoder).
   - Add a `zas --target` mode to emit JSONL in the opcode stream format (e.g., `--target opcodes`).
   - Add a `zas --emit-bin` mode to emit raw opcode bytes for `zxc`.
+  - Implement opcode groups iteratively (to full conformance) for x86_64 beyond Group A:
+    - mul/div/rem, shifts/rotates, immediate loads, loads/stores, compare/branch, control flow, macro-ops.
+  - Add full Group J parity tests for x86_64 once memory ops exist (OOB, div0, invalid encodings).
   - Define output targets (macOS arm64, Linux x86_64) and a target selection API.
   - Implement opcode-to-native translation pipeline (opcode-by-opcode, ahead-of-time on load).
   - Add an embeddable C API (`libzxc`) for translation + execution within a custom cloak.
@@ -74,3 +77,20 @@
     - Compare/set + branch behavior tests (EQ/NE/LT/GT + JR).
     - Cross-backend equivalence tests (same program, same output).
     - Pseudo-op expansion determinism tests (LDIR/FILL/DROP).
+
+- Build a first-party cloak runtime that loads `.zasm.bin` and JITs per-platform:
+  - Define the new deliverable name and packaging (binary, library, or both) and add to `build`/`dist`.
+  - Specify the `.zasm.bin` container contract (endianness, entrypoint offset, optional metadata).
+  - Add a platform detection module (macOS arm64, Linux x86_64, Windows x86_64) with explicit error paths.
+  - Implement a loader that reads `.zasm.bin` into memory and validates length/alignment.
+  - Add a `zxc` dispatch layer that selects the correct backend per platform and reports `ZXC_ERR_*`.
+  - Provide a JIT code buffer allocator with W^X discipline and optional guard pages.
+  - Define a stable guest memory model for the cloak (mem_base + mem_size) and plumb into `zxc_*_translate`.
+  - Emit bounds-checked loads/stores in the translator for every backend and enforce trap-on-OOB.
+  - Implement the lembeh ABI surface as native call shims (req_read/res_write/res_end/log/_alloc/_free/_ctl).
+  - Wire lembeh entrypoint (`lembeh_handle`) to call into the JIT-compiled function with mapped regs.
+  - Add a minimal execution harness with signal handling for BRK/illegal instruction (arm64) or UD2 (x86_64).
+  - Add deterministic startup: fixed register initialization, zeroed memory, and repeatable allocator state.
+  - Add end-to-end tests: load `.zasm.bin` -> JIT -> call `lembeh_handle` -> validate output.
+  - Add negative tests: malformed bin, unknown opcode, OOB load/store, div0 trap, invalid handle.
+  - Document usage: CLI flags, memory sizing, platform support, and error semantics.

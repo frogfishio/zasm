@@ -7,7 +7,7 @@ This directory defines the **stable pipeline boundary** between `zas` and `zld`.
 
 Version: **v1.0** (current stable contract).
 
-- `zas` reads **ZASM** from stdin and writes **JSONL IR** (one JSON object per line).
+- `zas` reads **zASM** from stdin and writes **JSONL IR** (one JSON object per line).
 - `zld` reads **JSONL IR** from stdin and writes a single **WAT module**.
 
 ## Files
