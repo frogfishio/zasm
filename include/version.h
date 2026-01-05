@@ -1,5 +1,5 @@
 /* Auto-generated. */
 #ifndef ZASM_VERSION_H
 #define ZASM_VERSION_H
-#define ZASM_VERSION "1.0.5"
+#define ZASM_VERSION "1.0.6"
 #endif

@@ -19,6 +19,7 @@ LDFLAGS ?=
 #   make BISON=/opt/homebrew/opt/bison/bin/bison FLEX=/opt/homebrew/opt/flex/bin/flex
 BISON ?= bison
 FLEX  ?= flex
+RG ?= $(shell command -v rg 2>/dev/null || command -v grep 2>/dev/null)
 
 BUILD := build
 BIN_ROOT := bin
@@ -270,8 +271,8 @@ test-loop: test-loop-wat
 
 test-ld-regreg: zas zld
 	cat examples/cat.asm | $(BIN)/zas | $(BIN)/zld > build/cat.wat
-	@rg -q -F 'local.get $$HL' build/cat.wat
-	@rg -q -F 'local.set $$DE' build/cat.wat
+	@$(RG) -q -F 'local.get $$HL' build/cat.wat
+	@$(RG) -q -F 'local.set $$DE' build/cat.wat
 
 test-add-hl-imm: zas zld
 	cat examples/ptrstep.asm | $(BIN)/zas | $(BIN)/zld > build/ptrstep.wat
@@ -280,12 +281,12 @@ test-add-hl-imm: zas zld
 
 test-data-directives: zas zld zrun
 	cat examples/data.asm | $(BIN)/zas | $(BIN)/zld > build/data.wat
-	@rg -q -F '(global $$msg i32 (i32.const ' build/data.wat
-	@rg -q -F '(global $$msg_len i32 (i32.const 3))' build/data.wat
-	@rg -q -F '(global $$buf i32 (i32.const ' build/data.wat
+	@$(RG) -q -F '(global $$msg i32 (i32.const ' build/data.wat
+	@$(RG) -q -F '(global $$msg_len i32 (i32.const 3))' build/data.wat
+	@$(RG) -q -F '(global $$buf i32 (i32.const ' build/data.wat
 	@awk '/A\\0a\\00/ {found=1} END{exit !found}' build/data.wat
 	$(BIN)/zrun build/data.wat > build/data.out 2>build/data.err
-	@od -An -tx1 build/data.out | tr -d ' \\n' | rg -q '^410a00$$'
+	@od -An -tx1 build/data.out | tr -d ' \\n' | $(RG) -q '^410a00$$'
 
 test-compare-conds: zas zld
 	cat examples/compare_conds.asm | $(BIN)/zas | $(BIN)/zld > build/compare_conds.wat
@@ -298,31 +299,31 @@ test-regmoves: zas zld
 
 test-names: zas zld
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --names > build/hello.names.wat
-	@rg -q -F '(custom "name"' build/hello.names.wat
+	@$(RG) -q -F '(custom "name"' build/hello.names.wat
 
 test-linkage: zas zld
 	cat examples/export.asm | $(BIN)/zas | $(BIN)/zld > build/export.wat
-	@rg -q -F '(export "main" (func $$main))' build/export.wat
+	@$(RG) -q -F '(export "main" (func $$main))' build/export.wat
 	cat examples/extern.asm | $(BIN)/zas | $(BIN)/zld > build/extern.wat
-	@rg -q -F '(import "env" "noop" (func $$noop (param i32 i32)))' build/extern.wat
+	@$(RG) -q -F '(import "env" "noop" (func $$noop (param i32 i32)))' build/extern.wat
 
 test-manifest: zas zld
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --manifest > build/hello.manifest.json
-	@rg -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
-	@rg -q -F '"lembeh_handle"' build/hello.manifest.json
-	@rg -q -F '"_out"' build/hello.manifest.json
+	@$(RG) -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
+	@$(RG) -q -F '"lembeh_handle"' build/hello.manifest.json
+	@$(RG) -q -F '"_out"' build/hello.manifest.json
 
 test-bytes: zas zld zrun
 	cat examples/bytes.asm | $(BIN)/zas | $(BIN)/zld > build/bytes.wat
 	$(BIN)/zrun build/bytes.wat > build/bytes.out 2>build/bytes.err
-	@od -An -tx1 build/bytes.out | tr -d ' \\n' | rg -q '^41$$'
+	@od -An -tx1 build/bytes.out | tr -d ' \\n' | $(RG) -q '^41$$'
 
 test-str-equ: zas zld zrun
 	cat examples/str_equ.asm | $(BIN)/zas | $(BIN)/zld > build/str_equ.wat
-	@rg -q -F '(global $$msg_len i32 (i32.const 3))' build/str_equ.wat
-	@rg -q -F '(global $$buf_size i32 (i32.const 16))' build/str_equ.wat
+	@$(RG) -q -F '(global $$msg_len i32 (i32.const 3))' build/str_equ.wat
+	@$(RG) -q -F '(global $$buf_size i32 (i32.const 16))' build/str_equ.wat
 	$(BIN)/zrun build/str_equ.wat > build/str_equ.out 2>build/str_equ.err
-	@od -An -tx1 build/str_equ.out | tr -d ' \\n' | rg -q '^48690a$$'
+	@od -An -tx1 build/str_equ.out | tr -d ' \\n' | $(RG) -q '^48690a$$'
 
 # --- Runtime/integration tests ---
 
@@ -343,40 +344,40 @@ test-isa-smoke: zas zld zrun
 test-fizzbuzz: zas zld zrun
 	cat examples/fizzbuzz.asm | $(BIN)/zas | $(BIN)/zld > build/fizzbuzz.wat
 	$(BIN)/zrun build/fizzbuzz.wat > build/fizzbuzz.out 2>build/fizzbuzz.err
-	@rg -q -F 'FizzBuzz' build/fizzbuzz.out
+	@$(RG) -q -F 'FizzBuzz' build/fizzbuzz.out
 
 test-twofile: zas zld zrun
 	cat examples/hello_twofile.asm examples/lib_hello.asm | $(BIN)/zas | $(BIN)/zld > build/twofile.wat
 	$(BIN)/zrun build/twofile.wat > build/twofile.out 2>build/twofile.err
-	@rg -q -F 'Hello from lib' build/twofile.out
+	@$(RG) -q -F 'Hello from lib' build/twofile.out
 
 test-strict: zas zld zrun
 	cat examples/bad_strict.asm | $(BIN)/zas | $(BIN)/zld > build/bad_strict.wat
 	@$(BIN)/zrun build/bad_strict.wat > build/bad_strict.out 2>build/bad_strict.err
-	@bash -ec "if $(BIN)/zrun --strict build/bad_strict.wat > build/bad_strict_strict.out 2>build/bad_strict_strict.err; then echo \"expected strict failure\"; exit 1; fi; rg -q -F 'res_write OOB' build/bad_strict_strict.err"
+	@bash -ec "if $(BIN)/zrun --strict build/bad_strict.wat > build/bad_strict_strict.out 2>build/bad_strict_strict.err; then echo \"expected strict failure\"; exit 1; fi; $(RG) -q -F 'res_write OOB' build/bad_strict_strict.err"
 
 test-trap: zas zld zrun
 	cat examples/bad_trap.asm | $(BIN)/zas | $(BIN)/zld > build/bad_trap.wat
-	@bash -ec "if $(BIN)/zrun build/bad_trap.wat > build/bad_trap.out 2>build/bad_trap.err; then echo \"expected trap\"; exit 1; fi; rg -q -F 'trap' build/bad_trap.err"
+	@bash -ec "if $(BIN)/zrun build/bad_trap.wat > build/bad_trap.out 2>build/bad_trap.err; then echo \"expected trap\"; exit 1; fi; $(RG) -q -F 'trap' build/bad_trap.err"
 
 test-zrun-log: zas zld zrun
 	cat examples/log.asm | $(BIN)/zas | $(BIN)/zld > build/log.wat
 	$(BIN)/zrun build/log.wat 1>/tmp/log.out 2>/tmp/log.err
-	@rg -q "^\\[demo\\] hello" /tmp/log.err
+	@$(RG) -q "^\\[demo\\] hello" /tmp/log.err
 
 # --- Negative/error tests ---
 
 test-unknownsym: zas zld
-	@bash -ec 'if cat examples/unknownsym.asm | $(BIN)/zas | $(BIN)/zld > /tmp/unknownsym.wat 2>/tmp/unknownsym.err; then echo "expected failure"; exit 1; fi; rg -q "unknown symbol does_not_exist" /tmp/unknownsym.err'
+	@bash -ec 'if cat examples/unknownsym.asm | $(BIN)/zas | $(BIN)/zld > /tmp/unknownsym.wat 2>/tmp/unknownsym.err; then echo "expected failure"; exit 1; fi; $(RG) -q "unknown symbol does_not_exist" /tmp/unknownsym.err'
 
 test-badcond: zas zld
-	@bash -ec 'if cat examples/badcond.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badcond.wat 2>/tmp/badcond.err; then echo "expected failure"; exit 1; fi; rg -q "unknown JR condition WTF" /tmp/badcond.err'
+	@bash -ec 'if cat examples/badcond.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badcond.wat 2>/tmp/badcond.err; then echo "expected failure"; exit 1; fi; $(RG) -q "unknown JR condition WTF" /tmp/badcond.err'
 
 test-badlabel: zas zld
-	@bash -ec 'if cat examples/badlabel.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badlabel.wat 2>/tmp/badlabel.err; then echo "expected failure"; exit 1; fi; rg -q "unknown label missing_label" /tmp/badlabel.err'
+	@bash -ec 'if cat examples/badlabel.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badlabel.wat 2>/tmp/badlabel.err; then echo "expected failure"; exit 1; fi; $(RG) -q "unknown label missing_label" /tmp/badlabel.err'
 
 test-badmem: zas zld
-	@bash -ec 'if cat examples/badmem.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badmem.wat 2>/tmp/badmem.err; then echo "expected failure"; exit 1; fi; rg -q "only \\(HL\\) supported" /tmp/badmem.err'
+	@bash -ec 'if cat examples/badmem.asm | $(BIN)/zas | $(BIN)/zld > /tmp/badmem.wat 2>/tmp/badmem.err; then echo "expected failure"; exit 1; fi; $(RG) -q "only \\(HL\\) supported" /tmp/badmem.err'
 
 # --- Validation/tools ---
 
