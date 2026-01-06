@@ -1,0 +1,5 @@
+INC HL
+DEC DE
+ADD HL, DE
+SUB HL, 5
+CP HL, 0x2A

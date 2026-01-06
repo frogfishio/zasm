@@ -1,0 +1,4 @@
+{"ir":"zasm-v1.0","k":"label","name":".L1","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"$func"}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"label","name":"$func","loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":3}}

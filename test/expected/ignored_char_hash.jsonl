@@ -1,0 +1,1 @@
+{"ir":"zasm-v1.0","k":"instr","m":"ADD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":10}],"loc":{"line":2}}

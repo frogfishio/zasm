@@ -1,0 +1,2 @@
+{"ir":"zasm-v1.0","k":"label","name":"entry","loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[],"loc":{"line":2}}

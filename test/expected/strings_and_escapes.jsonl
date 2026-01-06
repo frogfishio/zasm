@@ -1,0 +1,1 @@
+{"ir":"zasm-v1.0","k":"dir","d":"DB","args":[{"t":"str","v":"a\\n"},{"t":"str","v":"b\\t"},{"t":"str","v":"c\\q"},{"t":"num","v":0}],"loc":{"line":2}}

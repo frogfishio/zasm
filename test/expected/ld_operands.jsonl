@@ -1,0 +1,4 @@
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"num","v":1}],"loc":{"line":2}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"mem","base":"HL"},{"t":"sym","v":"A"}],"loc":{"line":3}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"A"},{"t":"mem","base":"HL"}],"loc":{"line":4}}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":16}],"loc":{"line":5}}

@@ -1,0 +1,2 @@
+CALL _log
+RET

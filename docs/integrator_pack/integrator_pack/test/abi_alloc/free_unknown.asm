@@ -1,0 +1,3 @@
+LD HL, 1234
+CALL _free
+RET
