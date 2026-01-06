@@ -696,32 +696,12 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
     }
     prologue_len = out_len;
   }
-  /*
-   * prologue: create a simple C-style frame
-   * sp -= 32
-   * [sp]     = x19 (callee-saved we repurpose for entry LR copy)
-   * [sp,#16] = x29
-   * [sp,#24] = x30 (caller LR)
-   * x29 = sp
-   * x19 = x30 (remember entry LR)
-   */
-  if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 31, 31, 32))) { /* sub sp,sp,#32 */
+  /* prologue: save callee-saved x19 and caller LR on stack, keep LR copy in x19 */
+  if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 31, 31, 16))) { /* sub sp,sp,#16 */
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
-  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(19, 31, 0))) { /* str x19,[sp] */
-    res.err = ZXC_ERR_OUTBUF;
-    return res;
-  }
-  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(29, 31, 2))) { /* str x29,[sp,#16] */
-    res.err = ZXC_ERR_OUTBUF;
-    return res;
-  }
-  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(30, 31, 3))) { /* str x30,[sp,#24] */
-    res.err = ZXC_ERR_OUTBUF;
-    return res;
-  }
-  if (!emit_u32(out, out_cap, &out_len, enc_mov_reg(29, 31))) { /* mov x29, sp */
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(19, 31, 1))) { /* str x19,[sp,#8] */
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
@@ -1056,12 +1036,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           } else {
             enc = enc_asrv(is64s, rd_m, rs1_m, t);
           }
-      }
+        }
         break;
       }
       case ZOP_LD: {
-        /* Always materialize immediates, so LD behaves like a true load-immediate. */
-        uint64_t imm = (uint64_t)imm12;
         if (imm12 == -2048 || imm12 == -2047) {
           size_t need = (imm12 == -2048) ? 4 : 8;
           if (off + 4 + need > in_len) {
@@ -1074,6 +1052,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                         ((uint32_t)in[off + 5] << 8) |
                         ((uint32_t)in[off + 6] << 16) |
                         ((uint32_t)in[off + 7] << 24);
+          uint64_t imm = 0;
           if (imm12 == -2048) {
             imm = (uint64_t)(int64_t)(int32_t)w1;
             off += 8;
@@ -1085,17 +1064,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
             imm = ((uint64_t)w2 << 32) | (uint64_t)w1;
             off += 12;
           }
+          if (!emit_mov_imm64(out, out_cap, &out_len, rd_m, imm)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+          break;
         } else {
-          off += 4;
+          uint16_t uimm = (uint16_t)(imm12 < 0 ? -imm12 : imm12);
+          if (imm12 < 0) {
+            enc = enc_sub_imm(1, rd_m, 31, uimm);
+          } else {
+            enc = enc_add_imm(1, rd_m, 31, uimm);
+          }
         }
-        if (!emit_mov_imm64(out, out_cap, &out_len, rd_m, imm)) {
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        enc = 0;
-        continue;
+        break;
       }
       case ZOP_CP: {
         enc = enc_sub_reg(0, ZXC_CMP, rs1_m, rs2_m);
@@ -1602,26 +1587,19 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_RET: {
-        /* restore frame: x29,x30 and x19, then return */
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(19, 31, 0))) { /* ldr x19,[sp] */
+        if (!emit_u32(out, out_cap, &out_len, enc_mov_reg(30, ZXC_ENTRY_LR))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(29, 31, 2))) { /* ldr x29,[sp,#16] */
+        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(19, 31, 1))) { /* ldr x19,[sp,#8] */
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(30, 31, 3))) { /* ldr x30,[sp,#24] */
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 31, 31, 32))) { /* add sp,sp,#32 */
+        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 31, 31, 16))) { /* add sp,sp,#16 */
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
