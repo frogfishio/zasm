@@ -14,14 +14,41 @@ static void usage(const char *prog) {
     "  %s --tool -o <out.o> <input.jsonl>... [--debug]\n\n"
     "Options:\n"
     "  --help        Show this help message\n"
-    "  --version     Show version information\n"
+    "  --version     Show version information (from ./VERSION)\n"
     "  --input       Input JSONL IR (zasm-v1.0)\n"
     "  --o           Output Mach-O object path (default: src/lower/arm64/out/out.o)\n"
     "  --tool        Enable filelist mode: multiple inputs, required -o\n"
-    "  --debug       Verbose debug/trace output (audit symbols, counts)\n\n"
+    "  --debug       Verbose debug/trace output (symbol audit, counts)\n\n"
+    "Exit codes: 0=ok, 2=parse error, 3=codegen error, 4=emit error, 1=usage/IO\n\n"
     "License: GPLv3+\n"
     "© 2026 Frogfish — Author: Alexander Croft\n",
     prog, prog);
+}
+
+static const char *read_version(void) {
+  static char buf[32];
+  const char *candidates[] = {
+    "VERSION",
+    "../VERSION",
+    "../../VERSION",
+    "../../../VERSION",
+    "../../../../VERSION",
+  };
+  FILE *v = NULL;
+  for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
+    v = fopen(candidates[i], "r");
+    if (v) break;
+  }
+  if (!v) return "unknown";
+  size_t n = fread(buf, 1, sizeof(buf)-1, v);
+  fclose(v);
+  if (n == 0) return "unknown";
+  buf[n] = 0;
+  /* trim trailing newline */
+  for (size_t i = 0; i < n; i++) {
+    if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = 0; break; }
+  }
+  return buf;
 }
 
 static int is_reg(const char *s) {
@@ -75,7 +102,7 @@ int main(int argc, char **argv) {
   }
 
   if (show_version) {
-    printf("lower (zasm->mach-o arm64) 0.1.0\n");
+    printf("lower (zasm->mach-o arm64) %s\n", read_version());
     return 0;
   }
 
