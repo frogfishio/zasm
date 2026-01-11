@@ -14,5 +14,13 @@ Deliver a feature-complete JSON IR (`zasm-v1.0`) → macOS arm64 lowerer that em
 ## ACCEPTANCE CRITERIA
 - Parses valid `schema/ir/v1/record.schema.json` streams and rejects invalid ones with clear line diagnostics.
 - Emits correct ARM64 machine code and data for all supported mnemonics/directives, with relocations resolving against generated symbols and EXTERN imports.
-- Produces a Mach-O object/archive that `clang` can link on macOS arm64; exports PUBLIC symbols (incl. `lembeh_handle`) and references host primitives via C ABI.
-- Deterministic outputs for identical inputs (no timestamp/host variance); build target succeeds from a clean checkout; tests/fixtures pass.*** End Patch
+- Produces a Mach-O object/archive that `clang` can link on macOS arm64; exports PUBLIC symbols (incl. `main` if declared) and references host primitives via C ABI.
+- Deterministic outputs for identical inputs (no timestamp/host variance); build target succeeds from a clean checkout; tests/fixtures pass.
+
+### Codegen backend detail plan
+- Contract: define `codegen.h` with `cg_blob_t` (code/data buffers, symtab entries, reloc list), reloc type IDs aligned to `main.c`, and entrypoints (`cg_emit_arm64`, `cg_free`).
+- Instruction selection: map zasm mnemonics/operands to ARM64 encodings (arith/logical, shifts/rotates, compares/branches, loads/stores, CALL/RET/host primitives), reject unsupported forms with clear errors.
+- Data/layout: assemble DB/DW/RESB/STR/EQU into contiguous data with symbol names/offsets; carry PUBLIC/EXTERN metadata; track label offsets for code/data.
+- Relocations: emit reloc records for all symbol refs (text→text/data, data→text/data, externs) using ADRP+ADD/branch/data encodings consistent with the Mach-O writer.
+- Prologue/epilogue/ABI: generate lembeh C-call entry, save/restore state, honor stack alignment, initialize guest-mem slot.
+- Validation/tests: add parser+codegen smoke test on fixtures to assert blob sizes, sym/reloc counts; ensure deterministic output.

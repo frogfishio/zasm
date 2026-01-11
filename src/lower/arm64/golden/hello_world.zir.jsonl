@@ -1,0 +1,7 @@
+{"ir":"zasm-v1.0","k":"dir","d":"EXTERN","args":[{"t":"str","v":"env"},{"t":"str","v":"puts"},{"t":"sym","v":"puts"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"main"}]}
+{"ir":"zasm-v1.0","k":"label","name":"main"}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"HL"},{"t":"sym","v":"hello_str"}]}
+{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"puts"},{"t":"sym","v":"HL"}]}
+{"ir":"zasm-v1.0","k":"instr","m":"RET","ops":[]}
+{"ir":"zasm-v1.0","k":"dir","d":"STR","name":"hello_str","args":[{"t":"str","v":"Hello, world!"},{"t":"num","v":10}]}

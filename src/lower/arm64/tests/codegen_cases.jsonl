@@ -1,0 +1,12 @@
+{"ir":"zasm-v1.0","k":"dir","d":"DB","name":"msg","args":[{"t":"str","v":"Hi"},{"t":"num","v":0}]}
+{"ir":"zasm-v1.0","k":"dir","d":"RESB","name":"buf","args":[{"t":"num","v":9000}]}
+{"ir":"zasm-v1.0","k":"instr","m":"LD","ops":[{"t":"sym","v":"HL"},{"t":"num","v":42}]}
+{"ir":"zasm-v1.0","k":"instr","m":"AND","ops":[{"t":"sym","v":"HL"},{"t":"num","v":15}]}
+{"ir":"zasm-v1.0","k":"instr","m":"POPC","ops":[{"t":"sym","v":"HL"}]}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"NE"},{"t":"sym","v":"far"}]}
+{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"f"},{"t":"num","v":1},{"t":"num","v":2},{"t":"num","v":3},{"t":"num","v":4},{"t":"num","v":5},{"t":"num","v":6},{"t":"num","v":7},{"t":"num","v":8},{"t":"num","v":9},{"t":"num","v":10}]}
+{"ir":"zasm-v1.0","k":"instr","m":"JR","ops":[{"t":"sym","v":"far"}]}
+{"ir":"zasm-v1.0","k":"label","name":"far"}
+{"ir":"zasm-v1.0","k":"instr","m":"ST8","ops":[{"t":"mem","base":"msg"},{"t":"sym","v":"HL"},{"t":"num","v":1}]}
+{"ir":"zasm-v1.0","k":"instr","m":"ST32","ops":[{"t":"mem","base":"buf"},{"t":"sym","v":"HL"},{"t":"num","v":20000}]}
+{"ir":"zasm-v1.0","k":"instr","m":"LD32S64","ops":[{"t":"sym","v":"DE"},{"t":"mem","base":"buf"},{"t":"num","v":20000}]}
