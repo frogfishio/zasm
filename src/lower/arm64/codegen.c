@@ -180,7 +180,7 @@ static uint8_t cond_from_sym(const char *s){
 static size_t estimate_instr_words(const ir_entry_t *e) {
   if (!e || e->kind!=IR_ENTRY_INSTR) return 0;
   const char *m = e->u.instr.mnem ? e->u.instr.mnem : "";
-  if (strcmp(m,"RET")==0) return 1;
+  if (strcmp(m,"RET")==0) return 2;
   if (strcmp(m,"CALL")==0) return 32; /* space for loading several args + bl */
   if (strcmp(m,"JR")==0) return 3; /* conditional fallbacks may emit extra skip */
   if (strcmp(m,"LD")==0 && e->u.instr.op_count>=2 && e->u.instr.ops[1].kind==IR_OP_SYM) return 4; /* adrp+add+ldr */
@@ -226,6 +226,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   if (!ir || !out) return -1;
   memset(out,0,sizeof(*out));
   symtab_add(&out->syms,"lembeh_handle",0);
+#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); cg_free(out); return -1; } while (0)
+#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); cg_free(out); return -1; } while (0)
 
   /* Sizing pass */
   size_t code_words = 0;
@@ -236,7 +238,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
-      symtab_add(&out->syms, e->u.label.name ? e->u.label.name : "", 0);
+      symtab_add(&out->syms, e->u.label.name ? e->u.label.name : "", (size_t)-1);
       continue;
     }
     if (e->kind == IR_ENTRY_DIR) {
@@ -245,17 +247,16 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         case IR_DIR_DW:
         case IR_DIR_STR:
           data_len += e->u.dir.data_len;
-          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, 0);
+          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)-1);
           break;
         case IR_DIR_RESB:
           data_len += e->u.dir.reserve_len;
-          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, 0);
+          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)-1);
           break;
         case IR_DIR_EQU:
           if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
           break;
         case IR_DIR_PUBLIC:
-          if (e->u.dir.name && !symtab_has(out->syms, e->u.dir.name)) symtab_add(&out->syms, e->u.dir.name, 0);
           break;
         case IR_DIR_EXTERN:
           break;
@@ -263,6 +264,17 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       continue;
     }
     if (e->kind == IR_ENTRY_INSTR) {
+      /* Pre-declare memory symbols referenced by name (non-register base). */
+      for (size_t i = 0; i < e->u.instr.op_count; i++) {
+        ir_op_t *op = &e->u.instr.ops[i];
+        if (op->kind == IR_OP_MEM && op->mem_base) {
+          int base = map_reg(op->mem_base);
+          if (base < 0 && !symtab_has(out->syms, op->mem_base)) {
+            symtab_add(&out->syms, op->mem_base, (size_t)-1);
+            data_len += 8; /* default slot */
+          }
+        }
+      }
       code_words += estimate_instr_words(e);
     }
   }
@@ -272,7 +284,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   out->data_off = out->code_len;
   out->code = (unsigned char *)calloc(1,out->code_len);
   out->data = (unsigned char *)calloc(1,data_len?data_len:1);
-  if (!out->code || !out->data) { cg_free(out); return -1; }
+  if (!out->code || !out->data) { CG_FAIL(NULL, "out of memory"); }
   uint32_t *w = (uint32_t *)out->code;
 
   /* Second pass */
@@ -283,7 +295,12 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
-      if (e->u.label.name) symtab_update(out->syms, e->u.label.name, pcw*4);
+      if (e->u.label.name) {
+        /* Point entry labels at prologue start if we're still at initial prologue. */
+        size_t off = pcw*4;
+        if (pcw <= prologue_words) off = 0;
+        symtab_update(out->syms, e->u.label.name, off);
+      }
       continue;
     }
     if (e->kind == IR_ENTRY_DIR) {
@@ -318,7 +335,11 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     ir_op_t *ops = e->u.instr.ops;
     size_t nops = e->u.instr.op_count;
 
-    if (strcmp(m,"RET")==0) { w[pcw++] = enc_ret(); continue; }
+    if (strcmp(m,"RET")==0) {
+      w[pcw++] = enc_ldp_fp_lr();
+      w[pcw++] = enc_ret();
+      continue;
+    }
 
       if (strcmp(m,"CALL")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
       /* Marshal arguments into x0-x7, spill rest on stack (16-byte aligned). */
@@ -340,15 +361,20 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         ir_op_t *arg = &ops[i];
         if (i-1 < gp_regs) {
           uint8_t reg = (uint8_t)(i-1);
-          if (arg->kind == IR_OP_NUM) {
-            emit_mov_imm64(w, &pcw, reg, (uint64_t)arg->unum);
-          } else if (arg->kind == IR_OP_SYM) {
+        if (arg->kind == IR_OP_NUM) {
+          emit_mov_imm64(w, &pcw, reg, (uint64_t)arg->unum);
+        } else if (arg->kind == IR_OP_SYM) {
+          int rmap = map_reg(arg->sym);
+          if (rmap >= 0) {
+            w[pcw++] = enc_add_imm(1, reg, (uint8_t)rmap, 0);
+          } else {
             emit_adrp_add(out, w, &pcw, reg, arg->sym);
-          } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
+          }
+        } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
-            if (base < 0) { cg_free(out); return -1; }
+            if (base < 0) { CG_FAIL(e, "CALL arg mem base must be register"); }
             w[pcw++] = enc_add_imm(1, reg, (uint8_t)base, 0);
-          } else { cg_free(out); return -1; }
+          } else { CG_FAIL(e, "unsupported CALL arg"); }
         } else {
           size_t spill_index = i-1-gp_regs;
           size_t spill_off = spill_index*8;
@@ -359,9 +385,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
             emit_adrp_add(out,w,&pcw,tmp,arg->sym);
           } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
-            if (base < 0) { cg_free(out); return -1; }
+            if (base < 0) { CG_FAIL(e, "CALL spill mem base must be register"); }
             w[pcw++] = enc_add_imm(1, tmp, (uint8_t)base, 0);
-          } else { cg_free(out); return -1; }
+          } else { CG_FAIL(e, "unsupported CALL spill arg"); }
           if (spill_off/8 < 4096) {
             uint16_t imm12 = (uint16_t)(spill_off/8);
             w[pcw++] = enc_str_x_imm(tmp, 31, imm12); /* store to sp+spill_off */
@@ -389,10 +415,10 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       continue;
     }
 
-      if (strcmp(m,"JR")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
+    if (strcmp(m,"JR")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
       if (nops==1) {
         symtab_entry *target = find_sym(out->syms, ops[0].sym);
-        if (target && branch_rel_ok((int64_t)target->off - (int64_t)(pcw*4))) {
+        if (target && target->off != (size_t)-1 && branch_rel_ok((int64_t)target->off - (int64_t)(pcw*4))) {
           int64_t disp = (int64_t)target->off - (int64_t)(pcw*4);
           int32_t imm26 = (int32_t)(disp/4);
           w[pcw++] = enc_b_placeholder() | ((uint32_t)imm26 & 0x03FFFFFFu);
@@ -403,10 +429,10 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         }
       } else if (nops==2 && ops[1].kind==IR_OP_SYM) {
         symtab_entry *target = find_sym(out->syms, ops[1].sym);
-        if (!target) { cg_free(out); return -1; }
+        if (!target) { CG_FAILF(e, "JR target '%s' missing", ops[1].sym ? ops[1].sym : "(null)"); }
         int64_t disp = (int64_t)target->off - (int64_t)(pcw*4);
         int32_t imm19 = (int32_t)(disp/4);
-        if (imm19 < -0x40000 || imm19 > 0x3FFFF) {
+        if (target->off == (size_t)-1 || imm19 < -0x40000 || imm19 > 0x3FFFF) {
           uint8_t cond = cond_from_sym(ops[0].sym);
           uint8_t inv = cond ^ 1u;
           /* skip over the reloc branch if condition false */
@@ -418,27 +444,27 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           uint8_t cond = cond_from_sym(ops[0].sym);
           w[pcw++] = enc_b_cond(cond, imm19);
         }
-      } else { cg_free(out); return -1; }
+      } else { CG_FAIL(e, "invalid JR operands"); }
       continue;
     }
 
     if (strcmp(m,"CP")==0 && nops>=2) {
       int r0 = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (r0<0) { cg_free(out); return -1; }
+      if (r0<0) { CG_FAIL(e, "CP dst must be register"); }
       if (ops[1].kind==IR_OP_SYM) {
         int r1 = map_reg(ops[1].sym);
-        if (r1<0) { cg_free(out); return -1; }
+        if (r1<0) { CG_FAIL(e, "CP src must be register"); }
         w[pcw++] = enc_cmp_reg(0,r0,r1);
       } else if (ops[1].kind==IR_OP_NUM) {
         emit_mov_imm64(w,&pcw,5,(uint64_t)ops[1].unum);
         w[pcw++] = enc_cmp_reg(0,r0,5);
-      } else { cg_free(out); return -1; }
+      } else { CG_FAIL(e, "CP src unsupported"); }
       continue;
     }
 
     if ((strcmp(m,"INC")==0 || strcmp(m,"DEC")==0) && nops>=1) {
       int rd = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "INC/DEC requires register"); }
       if (strcmp(m,"INC")==0) w[pcw++] = enc_add_imm(1,(uint8_t)rd,(uint8_t)rd,1);
       else w[pcw++] = enc_sub_imm(1,(uint8_t)rd,(uint8_t)rd,1);
       continue;
@@ -446,7 +472,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if (strcmp(m,"DROP")==0 && nops>=1) {
       int rd = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "DROP requires register"); }
       /* zero the register to mark drop */
       w[pcw++] = enc_sub_reg(1,(uint8_t)rd,(uint8_t)rd,(uint8_t)rd);
       continue;
@@ -482,16 +508,16 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if ((strncmp(m,"EQ",2)==0 || strncmp(m,"NE",2)==0 || strstr(m,"LT")||strstr(m,"GT")||strstr(m,"LE")||strstr(m,"GE")) && nops>=2) {
       int r0 = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (r0<0) { cg_free(out); return -1; }
+      if (r0<0) { CG_FAIL(e, "cmp dst must be register"); }
       int is64 = strstr(m,"64") != NULL;
       if (ops[1].kind==IR_OP_SYM) {
         int r1 = map_reg(ops[1].sym);
-        if (r1<0) { cg_free(out); return -1; }
+        if (r1<0) { CG_FAIL(e, "cmp src must be register"); }
         w[pcw++] = enc_cmp_reg(is64,r0,r1);
       } else if (ops[1].kind==IR_OP_NUM) {
         emit_mov_imm64(w,&pcw,5,(uint64_t)ops[1].unum);
         w[pcw++] = enc_cmp_reg(is64,r0,5);
-      } else { cg_free(out); return -1; }
+      } else { CG_FAIL(e, "cmp src unsupported"); }
       uint8_t cond = cond_from_sym(m);
       w[pcw++] = enc_cset(r0, cond);
       continue;
@@ -502,11 +528,11 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       int rd = map_reg(ops[0].sym);
       int rs = (ops[1].kind==IR_OP_SYM)?map_reg(ops[1].sym):-1;
       long long imm = (ops[1].kind==IR_OP_NUM)?ops[1].num:0;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "shift dst must be register"); }
       int is64 = strstr(m,"64") != NULL;
       uint8_t rd_u = (uint8_t)rd;
       if (ops[1].kind==IR_OP_SYM) {
-        if (rs<0) { cg_free(out); return -1; }
+        if (rs<0) { CG_FAIL(e, "shift src must be register"); }
         if (strcmp(m,"SLA")==0 || strcmp(m,"SLA64")==0) w[pcw++] = enc_lslv(is64, rd_u, rd_u, (uint8_t)rs);
         else if (strcmp(m,"SRL")==0 || strcmp(m,"SRL64")==0) w[pcw++] = enc_lsrv(is64, rd_u, rd_u, (uint8_t)rs);
         else if (strcmp(m,"SRA")==0 || strcmp(m,"SRA64")==0) w[pcw++] = enc_asrv(is64, rd_u, rd_u, (uint8_t)rs);
@@ -518,7 +544,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         }
       } else {
         int width = is64 ? 64 : 32;
-        if (imm < 0 || imm >= width) { cg_free(out); return -1; }
+        if (imm < 0 || imm >= width) { CG_FAIL(e, "shift imm out of range"); }
         uint64_t adj = (strcmp(m,"ROL")==0 || strcmp(m,"ROL64")==0) ? (uint64_t)((width - (imm & (width-1))) & (width-1)) : (uint64_t)imm;
         emit_mov_imm64(w,&pcw,5,adj);
         if (strcmp(m,"SLA")==0 || strcmp(m,"SLA64")==0) w[pcw++] = enc_lslv(is64, rd_u, rd_u, 5);
@@ -531,9 +557,13 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if ((strcmp(m,"LD")==0 || strncmp(m,"LD",2)==0) && nops>=2) {
       int rd = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "LD dst must be register"); }
       if (ops[1].kind==IR_OP_SYM) {
-        if (strcmp(m,"LD")==0) {
+        int rs = map_reg(ops[1].sym);
+        if (rs>=0) {
+          /* register move */
+          w[pcw++] = enc_add_reg(1, (uint8_t)rd, 31, (uint8_t)rs);
+        } else if (strcmp(m,"LD")==0) {
           emit_adrp_add(out,w,&pcw,rd,ops[1].sym); /* load address */
         } else {
           emit_adrp_add(out,w,&pcw,rd,ops[1].sym);
@@ -542,7 +572,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           else if (strcmp(m,"LD32")==0 || strcmp(m,"LD32U64")==0 || strcmp(m,"LD32S64")==0) w[pcw++] = enc_ldr_w((uint8_t)rd,(uint8_t)rd,0);
           else w[pcw++] = enc_ldr_x_imm((uint8_t)rd,(uint8_t)rd,0);
         }
-      } else if (ops[1].kind==IR_OP_NUM && strcmp(m,"LD")==0) {
+      } else if (ops[1].kind==IR_OP_NUM) {
+        /* Immediate load for LD/LDxx: materialize constant. */
         emit_mov_imm64(w,&pcw,(uint8_t)rd,(uint64_t)ops[1].unum);
       } else if (ops[1].kind==IR_OP_MEM) {
         int base = map_reg(ops[1].mem_base);
@@ -586,14 +617,14 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           else if (strcmp(m,"LD32S64")==0) w[pcw++] = enc_ldr_sw_x((uint8_t)rd,addr_reg,0);
           else w[pcw++] = enc_ldr_x_imm((uint8_t)rd,addr_reg,0);
         }
-      } else { cg_free(out); return -1; }
+      } else { CG_FAIL(e, "unsupported LD operand"); }
       continue;
     }
 
     if (strncmp(m,"ST",2)==0 && nops>=2) {
       int base=-1, src=-1; long long off=0;
       if (ops[0].kind==IR_OP_MEM) { base=map_reg(ops[0].mem_base); if (nops>=2 && ops[1].kind==IR_OP_SYM) src=map_reg(ops[1].sym); }
-      if (src<0) { cg_free(out); return -1; }
+      if (src<0) { CG_FAIL(e, "ST src must be register"); }
       if (nops>=3 && ops[2].kind==IR_OP_NUM) off=ops[2].num;
       uint16_t imm12=0;
       int scale=3;
@@ -633,7 +664,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       int rd = map_reg(ops[0].sym);
       int rs = (ops[1].kind==IR_OP_SYM)?map_reg(ops[1].sym):-1;
       long long imm = (ops[1].kind==IR_OP_NUM)?ops[1].num:0;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "arith dst must be register"); }
       int is64 = strstr(m,"64") != NULL;
       if (strcmp(m,"MUL")==0) {
         uint8_t rhs = (uint8_t)rs;
@@ -692,7 +723,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       int rd = map_reg(ops[0].sym);
       int rs = (ops[1].kind==IR_OP_SYM)?map_reg(ops[1].sym):-1;
       long long imm = (ops[1].kind==IR_OP_NUM)?ops[1].num:0;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "div/rem dst must be register"); }
       int is64 = strstr(m,"64") != NULL;
       int is_signed = (strncmp(m,"DIVS",4)==0 || strncmp(m,"REMS",4)==0);
       int is_rem = (strncmp(m,"REM",3)==0);
@@ -716,7 +747,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if ((strcmp(m,"CLZ")==0 || strcmp(m,"CTZ")==0 || strcmp(m,"CLZ64")==0 || strcmp(m,"CTZ64")==0) && nops>=1) {
       int rd = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "CLZ/CTZ requires register"); }
       int is64 = strstr(m,"64") != NULL;
       if (strcmp(m,"CTZ")==0 || strcmp(m,"CTZ64")==0) {
         w[pcw++] = enc_rbit(is64, (uint8_t)rd, (uint8_t)rd);
@@ -729,7 +760,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if ((strcmp(m,"POPC")==0 || strcmp(m,"POPC64")==0) && nops>=1) {
       int rd = (ops[0].kind==IR_OP_SYM)?map_reg(ops[0].sym):-1;
-      if (rd<0) { cg_free(out); return -1; }
+      if (rd<0) { CG_FAIL(e, "POPC requires register"); }
       int is64 = strstr(m,"64") != NULL;
       uint8_t tmp1 = 5, tmp2 = 6;
       uint64_t m1 = is64 ? 0x5555555555555555ULL : 0x55555555ULL;
@@ -775,8 +806,18 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       continue;
     }
 
-    cg_free(out);
-    return -1;
+    CG_FAIL(e, "unsupported mnemonic");
+  }
+
+  /* Place any auto-reserved symbols that lacked offsets. */
+  for (symtab_entry *s = out->syms; s; s = s->next) {
+    if (s->off == (size_t)-1) {
+      s->off = out->code_len + data_off;
+      if (data_off + 8 <= out->data_len) {
+        memset(out->data + data_off, 0, 8);
+      }
+      data_off += 8;
+    }
   }
 
   w[pcw++] = enc_ldp_fp_lr();
