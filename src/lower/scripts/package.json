@@ -1,0 +1,16 @@
+{
+  "name": "zasm-lowerer-scripts",
+  "version": "1.0.0",
+  "description": "Utility scripts for the zasm lowerer (schema validation, etc).",
+  "license": "MIT",
+  "author": "",
+  "type": "commonjs",
+  "scripts": {
+    "validate:ir": "node validate-ir.js --input ../arm64/fixtures/sample.zobj.jsonl",
+    "test:parser": "bash ../arm64/tests/run_json_ir_parse.sh"
+  },
+  "devDependencies": {
+    "ajv": "^8.17.1",
+    "ajv-formats": "^3.0.1"
+  }
+}

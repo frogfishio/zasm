@@ -1,0 +1,9 @@
+{"ir":"zasm-v1.0","k":"label","name":"start"}
+{"ir":"zasm-v1.0","k":"instr","m":"CALL","ops":[{"t":"sym","v":"handler"},{"t":"mem","base":"HL"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"lembeh_handle"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"EXTERN","args":[{"t":"str","v":"mod"},{"t":"str","v":"field"},{"t":"str","v":"alias"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"DB","name":"bytes","args":[{"t":"num","v":1},{"t":"str","v":"A"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"DW","args":[{"t":"num","v":258}]}
+{"ir":"zasm-v1.0","k":"dir","d":"RESB","args":[{"t":"num","v":4}]}
+{"ir":"zasm-v1.0","k":"dir","d":"STR","name":"msg","args":[{"t":"str","v":"hi"}]}
+{"ir":"zasm-v1.0","k":"dir","d":"EQU","name":"const","args":[{"t":"num","v":42}]}
