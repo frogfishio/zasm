@@ -319,3 +319,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
 <p align="center">
   <em>zasm: Write once, run deterministically everywhere.</em>
 </p>
+
+## Tools
+
+- `zas`: assembler → JSONL/opcodes (docs/tools/zas.md)
+- `lower`: JSON IR (zasm-v1.0) → macOS arm64 Mach-O (docs/tools/lower.md)
+- `zxc`: experimental cross-compilers (docs/tools/zxc.md)
+- `zir`: IR utilities
+
