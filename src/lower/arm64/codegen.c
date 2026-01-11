@@ -68,13 +68,14 @@ void cg_free(cg_blob_t *out) {
   memset(out, 0, sizeof(*out));
 }
 
-static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const char *sym) {
+static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const char *sym, uint32_t line) {
   if (!out || !sym) return;
   cg_reloc_t *r = (cg_reloc_t *)calloc(1, sizeof(cg_reloc_t));
   if (!r) return;
   r->instr_off = instr_off;
   r->type = type;
   r->sym = dupstr(sym);
+  r->line = line;
   r->next = out->relocs;
   out->relocs = r;
   out->reloc_count++;
@@ -214,12 +215,12 @@ static void emit_mov_imm64(uint32_t *w, size_t *pcw, uint8_t rd, uint64_t imm) {
   if (!emitted) w[(*pcw)++] = enc_movz(rd,0,0);
 }
 
-static void emit_adrp_add(cg_blob_t *out,uint32_t *w,size_t *pcw,int rd,const char *sym){
+static void emit_adrp_add(cg_blob_t *out,uint32_t *w,size_t *pcw,int rd,const char *sym, uint32_t line){
   size_t off = (*pcw)*4;
   w[(*pcw)++] = 0x90000000u | (uint32_t)rd; /* ADRP rd, sym@PAGE */
-  add_reloc(out,(uint32_t)off,0,sym);
+  add_reloc(out,(uint32_t)off,0,sym,line);
   w[(*pcw)++] = 0x91000000u | ((uint32_t)rd<<5) | (uint32_t)rd; /* ADD rd, rd, sym@PAGEOFF */
-  add_reloc(out,(uint32_t)(off+4),1,sym);
+  add_reloc(out,(uint32_t)(off+4),1,sym,line);
 }
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
@@ -368,7 +369,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           if (rmap >= 0) {
             w[pcw++] = enc_add_imm(1, reg, (uint8_t)rmap, 0);
           } else {
-            emit_adrp_add(out, w, &pcw, reg, arg->sym);
+            emit_adrp_add(out, w, &pcw, reg, arg->sym, (uint32_t)e->loc.line);
           }
         } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
@@ -382,7 +383,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           if (arg->kind == IR_OP_NUM) {
             emit_mov_imm64(w,&pcw,tmp,(uint64_t)arg->unum);
           } else if (arg->kind == IR_OP_SYM) {
-            emit_adrp_add(out,w,&pcw,tmp,arg->sym);
+            emit_adrp_add(out,w,&pcw,tmp,arg->sym,(uint32_t)e->loc.line);
           } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
             if (base < 0) { CG_FAIL(e, "CALL spill mem base must be register"); }
@@ -400,7 +401,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         }
       }
       w[pcw] = enc_bl_placeholder();
-      add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym);
+      add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym,(uint32_t)e->loc.line);
       pcw++;
       if (to_spill) {
         size_t spill_bytes = to_spill*8;
@@ -424,7 +425,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           w[pcw++] = enc_b_placeholder() | ((uint32_t)imm26 & 0x03FFFFFFu);
         } else {
           w[pcw] = enc_b_placeholder();
-          add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym);
+          add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym,(uint32_t)e->loc.line);
           pcw++;
         }
       } else if (nops==2 && ops[1].kind==IR_OP_SYM) {
@@ -438,7 +439,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           /* skip over the reloc branch if condition false */
           w[pcw++] = enc_b_cond(inv, 1);
           w[pcw] = enc_b_placeholder();
-          add_reloc(out,(uint32_t)(pcw*4),2, ops[1].sym);
+          add_reloc(out,(uint32_t)(pcw*4),2, ops[1].sym,(uint32_t)e->loc.line);
           pcw++;
         } else {
           uint8_t cond = cond_from_sym(ops[0].sym);
@@ -564,9 +565,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           /* register move */
           w[pcw++] = enc_add_reg(1, (uint8_t)rd, 31, (uint8_t)rs);
         } else if (strcmp(m,"LD")==0) {
-          emit_adrp_add(out,w,&pcw,rd,ops[1].sym); /* load address */
+          emit_adrp_add(out,w,&pcw,rd,ops[1].sym,(uint32_t)e->loc.line); /* load address */
         } else {
-          emit_adrp_add(out,w,&pcw,rd,ops[1].sym);
+          emit_adrp_add(out,w,&pcw,rd,ops[1].sym,(uint32_t)e->loc.line);
           if (strcmp(m,"LD8U")==0 || strcmp(m,"LD8S")==0 || strcmp(m,"LD8U64")==0 || strcmp(m,"LD8S64")==0) w[pcw++] = enc_ldr_b((uint8_t)rd,(uint8_t)rd,0);
           else if (strcmp(m,"LD16U")==0 || strcmp(m,"LD16S")==0 || strcmp(m,"LD16U64")==0 || strcmp(m,"LD16S64")==0) w[pcw++] = enc_ldr_h((uint8_t)rd,(uint8_t)rd,0);
           else if (strcmp(m,"LD32")==0 || strcmp(m,"LD32U64")==0 || strcmp(m,"LD32S64")==0) w[pcw++] = enc_ldr_w((uint8_t)rd,(uint8_t)rd,0);
@@ -586,7 +587,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         else if (strcmp(m,"LD32")==0 || strcmp(m,"LD32S64")==0 || strcmp(m,"LD32U64")==0) scale=2;
         uint8_t addr_reg = (uint8_t)((base < 0) ? rd : base);
         if (base < 0) { /* treat mem base as symbol */
-          emit_adrp_add(out,w,&pcw,addr_reg,ops[1].mem_base);
+          emit_adrp_add(out,w,&pcw,addr_reg,ops[1].mem_base,(uint32_t)e->loc.line);
         }
         if (base >=0 && uimm12_scaled(off,scale,&imm12)) {
           if (strcmp(m,"LD8U")==0 || strcmp(m,"LD8U64")==0) w[pcw++] = enc_ldr_b((uint8_t)rd,addr_reg,imm12);
@@ -635,7 +636,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       int base_is_sym = (base < 0);
       if (base_is_sym) {
         addr_reg = 5;
-        emit_adrp_add(out,w,&pcw,addr_reg,ops[0].mem_base);
+        emit_adrp_add(out,w,&pcw,addr_reg,ops[0].mem_base,(uint32_t)e->loc.line);
       }
       if (!uimm12_scaled(off,scale,&imm12)) {
         if (!base_is_sym) {

@@ -212,6 +212,17 @@ static char *tok_strdup(const char *js, const jsmntok_t *tok) {
   return s;
 }
 
+static void print_line_err(size_t line_no, const char *line, const char *msg) {
+  char snippet[96];
+  size_t i = 0, j = 0;
+  while (line && line[i] && line[i] != '\n' && j < sizeof(snippet)-1) {
+    if (!iscntrl((unsigned char)line[i])) snippet[j++] = line[i];
+    i++;
+  }
+  snippet[j] = 0;
+  fprintf(stderr, "[json-ir][line %zu] %s%s%s\n", line_no, msg, snippet[0] ? " | " : "", snippet);
+}
+
 static long long tok_to_int(const char *js, const jsmntok_t *tok, int *ok) {
   if (!tok || tok->type != JSMN_PRIMITIVE) { if (ok) *ok = 0; return 0; }
   errno = 0;
@@ -437,13 +448,13 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       tok_count = jsmn_parse(&p, line, (size_t)n, toks, (size_t)tok_cap);
       if (tok_count >= 0) break;
       if (tok_count == -1) { tok_cap *= 2; continue; }
-      fprintf(stderr, "[json-ir][line %zu] invalid JSON\n", line_no);
+      print_line_err(line_no, line, "invalid JSON");
       free(toks);
       rc = -1;
       goto fail_line;
     }
     if (tok_count < 1 || toks[0].type != JSMN_OBJECT) {
-      fprintf(stderr, "[json-ir][line %zu] expected object record\n", line_no);
+      print_line_err(line_no, line, "expected object record");
       free(toks);
       rc = -1;
       goto fail_line;
@@ -451,14 +462,14 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     /* ir version */
     int ir_idx = find_key(line, toks, 0, "ir");
     if (ir_idx < 0 || !tok_streq(line, &toks[ir_idx], "zasm-v1.0")) {
-      fprintf(stderr, "[json-ir][line %zu] missing or invalid ir version\n", line_no);
+      print_line_err(line_no, line, "missing or invalid ir version");
       free(toks);
       rc = -1;
       goto fail_line;
     }
     int k_idx = find_key(line, toks, 0, "k");
     if (k_idx < 0 || toks[k_idx].type != JSMN_STRING) {
-      fprintf(stderr, "[json-ir][line %zu] missing k field\n", line_no);
+      print_line_err(line_no, line, "missing k field");
       free(toks);
       rc = -1;
       goto fail_line;
@@ -468,7 +479,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     if (tok_streq(line, &toks[k_idx], "label")) {
       int name_idx = find_key(line, toks, 0, "name");
       if (name_idx < 0 || toks[name_idx].type != JSMN_STRING) {
-        fprintf(stderr, "[json-ir][line %zu] label missing name\n", line_no);
+        print_line_err(line_no, line, "label missing name");
         free(toks);
         rc = -1;
         goto fail_line;
@@ -480,7 +491,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       int loc_idx = find_key(line, toks, 0, "loc");
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
-          fprintf(stderr, "[json-ir][line %zu] invalid loc\n", line_no);
+          print_line_err(line_no, line, "invalid loc");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
       }
@@ -490,7 +501,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       for (int i = 0; i < pairs; i++) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
             !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc")) {
-          fprintf(stderr, "[json-ir][line %zu] unknown field\n", line_no);
+          print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
         idx = tok_skip(toks, idx + 1);
@@ -499,7 +510,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       int m_idx = find_key(line, toks, 0, "m");
       int ops_idx = find_key(line, toks, 0, "ops");
       if (m_idx < 0 || toks[m_idx].type != JSMN_STRING || ops_idx < 0) {
-        fprintf(stderr, "[json-ir][line %zu] instr missing m/ops\n", line_no);
+        print_line_err(line_no, line, "instr missing m/ops");
         free(toks); rc = -1; goto fail_line;
       }
       entry = ir_entry_new(IR_ENTRY_INSTR);
@@ -507,13 +518,13 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       entry->u.instr.mnem = tok_strdup(line, &toks[m_idx]);
       if (!entry->u.instr.mnem) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
       if (parse_operands_array(line, toks, ops_idx, &entry->u.instr.ops, &entry->u.instr.op_count) != 0) {
-        fprintf(stderr, "[json-ir][line %zu] invalid instr operands\n", line_no);
+        print_line_err(line_no, line, "invalid instr operands");
         ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
       }
       int loc_idx = find_key(line, toks, 0, "loc");
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
-          fprintf(stderr, "[json-ir][line %zu] invalid loc\n", line_no);
+          print_line_err(line_no, line, "invalid loc");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
       }
@@ -523,7 +534,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
             !tok_streq(line, &toks[idx], "m") && !tok_streq(line, &toks[idx], "ops") &&
             !tok_streq(line, &toks[idx], "loc")) {
-          fprintf(stderr, "[json-ir][line %zu] unknown field\n", line_no);
+          print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
         idx = tok_skip(toks, idx + 1);
@@ -532,7 +543,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       int d_idx = find_key(line, toks, 0, "d");
       int args_idx = find_key(line, toks, 0, "args");
       if (d_idx < 0 || toks[d_idx].type != JSMN_STRING || args_idx < 0 || toks[args_idx].type != JSMN_ARRAY) {
-        fprintf(stderr, "[json-ir][line %zu] dir missing d/args\n", line_no);
+        print_line_err(line_no, line, "dir missing d/args");
         free(toks); rc = -1; goto fail_line;
       }
       entry = ir_entry_new(IR_ENTRY_DIR);
@@ -545,26 +556,23 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       else if (tok_streq(line, &toks[d_idx], "STR")) entry->u.dir.dir_kind = IR_DIR_STR;
       else if (tok_streq(line, &toks[d_idx], "EQU")) entry->u.dir.dir_kind = IR_DIR_EQU;
       else {
-        fprintf(stderr, "[json-ir][line %zu] unknown directive\n", line_no);
+        print_line_err(line_no, line, "unknown directive");
         ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
       }
       if (parse_operands_array(line, toks, args_idx, &entry->u.dir.args, &entry->u.dir.arg_count) != 0) {
-        fprintf(stderr, "[json-ir][line %zu] invalid directive args\n", line_no);
+        print_line_err(line_no, line, "invalid directive args");
         ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
       }
       int name_idx = find_key(line, toks, 0, "name");
       if (name_idx >= 0) {
-        if (toks[name_idx].type != JSMN_STRING) {
-          fprintf(stderr, "[json-ir][line %zu] dir name must be string\n", line_no);
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
-        }
+        if (toks[name_idx].type != JSMN_STRING) { print_line_err(line_no, line, "dir name must be string"); ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
         entry->u.dir.name = tok_strdup(line, &toks[name_idx]);
         if (!entry->u.dir.name) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
       }
       int loc_idx = find_key(line, toks, 0, "loc");
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
-          fprintf(stderr, "[json-ir][line %zu] invalid loc\n", line_no);
+          print_line_err(line_no, line, "invalid loc");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
       }
@@ -572,7 +580,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       switch (entry->u.dir.dir_kind) {
         case IR_DIR_PUBLIC:
           if (entry->u.dir.arg_count < 1 || entry->u.dir.args[0].kind != IR_OP_SYM || !entry->u.dir.args[0].sym) {
-            fprintf(stderr, "[json-ir][line %zu] PUBLIC requires sym arg\n", line_no);
+            print_line_err(line_no, line, "PUBLIC requires sym arg");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           if (entry->u.dir.name == NULL) {
@@ -583,7 +591,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
           break;
         case IR_DIR_EXTERN:
           if (entry->u.dir.arg_count < 2 || entry->u.dir.args[0].kind != IR_OP_STR || entry->u.dir.args[1].kind != IR_OP_STR) {
-            fprintf(stderr, "[json-ir][line %zu] EXTERN requires module/field strings\n", line_no);
+            print_line_err(line_no, line, "EXTERN requires module/field strings");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           entry->u.dir.extern_module = dup_cstr(entry->u.dir.args[0].str);
@@ -604,26 +612,26 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
           break;
         case IR_DIR_DB:
           if (append_bytes_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
-            fprintf(stderr, "[json-ir][line %zu] DB args invalid\n", line_no);
+            print_line_err(line_no, line, "DB args invalid");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           break;
         case IR_DIR_DW:
           if (append_words_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
-            fprintf(stderr, "[json-ir][line %zu] DW args invalid\n", line_no);
+            print_line_err(line_no, line, "DW args invalid");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           break;
         case IR_DIR_RESB:
           if (entry->u.dir.arg_count != 1 || entry->u.dir.args[0].kind != IR_OP_NUM || entry->u.dir.args[0].num < 0) {
-            fprintf(stderr, "[json-ir][line %zu] RESB requires one non-negative num\n", line_no);
+            print_line_err(line_no, line, "RESB requires one non-negative num");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           entry->u.dir.reserve_len = (size_t)entry->u.dir.args[0].num;
           break;
         case IR_DIR_STR:
           if (append_bytes_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
-            fprintf(stderr, "[json-ir][line %zu] STR args invalid\n", line_no);
+            print_line_err(line_no, line, "STR args invalid");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           entry->u.dir.has_equ_value = 1;
@@ -631,7 +639,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
           break;
         case IR_DIR_EQU:
           if (entry->u.dir.arg_count != 1 || entry->u.dir.args[0].kind != IR_OP_NUM) {
-            fprintf(stderr, "[json-ir][line %zu] EQU requires one num\n", line_no);
+            print_line_err(line_no, line, "EQU requires one num");
             ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
           }
           entry->u.dir.has_equ_value = 1;
@@ -644,13 +652,13 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
             !tok_streq(line, &toks[idx], "d") && !tok_streq(line, &toks[idx], "args") &&
             !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc")) {
-          fprintf(stderr, "[json-ir][line %zu] unknown field\n", line_no);
+          print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
         idx = tok_skip(toks, idx + 1);
       }
     } else {
-      fprintf(stderr, "[json-ir][line %zu] unknown k kind\n", line_no);
+      print_line_err(line_no, line, "unknown k kind");
       free(toks); rc = -1; goto fail_line;
     }
 

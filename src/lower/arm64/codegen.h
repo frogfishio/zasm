@@ -17,6 +17,7 @@ typedef struct cg_reloc {
   uint32_t instr_off;     /* byte offset within code section */
   uint32_t type;          /* 0=ADRP_PAGE, 1=ADD_PAGEOFF, 2=BRANCH26 */
   char *sym;              /* symbol name */
+  uint32_t line;          /* source line for diagnostics */
   struct cg_reloc *next;
 } cg_reloc_t;
 

@@ -268,9 +268,9 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
     /* Build symbol index map: locals first, then publics, then externs. */
     for (cg_reloc_t *r = blob->relocs; r; r = r->next) {
       uint8_t r_type = 0, pcr = 0;
-      if (!resolve_reloc_encoding(r->type, &r_type, &pcr)) FAIL("unsupported reloc type %u", r->type);
+      if (!resolve_reloc_encoding(r->type, &r_type, &pcr)) FAIL("unsupported reloc type %u (line %u)", r->type, r->line);
       int si = sym_index_of(ir, blob, local_count, public_count, r->sym);
-      if (si < 0) FAIL("reloc against unknown symbol '%s'", r->sym ? r->sym : "(null)");
+      if (si < 0) FAIL("reloc against unknown symbol '%s' (line %u)", r->sym ? r->sym : "(null)", r->line);
       struct relocation_info ri = {0};
       ri.r_address = r->instr_off;
       ri.r_extern = 1;
