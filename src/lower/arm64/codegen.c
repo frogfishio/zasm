@@ -132,8 +132,8 @@ static int map_reg(const char *sym) {
   if (!sym) return -1;
   if (strcmp(sym, "HL") == 0) return 0;  /* x0 */
   if (strcmp(sym, "DE") == 0) return 1;  /* x1 */
-  if (strcmp(sym, "A") == 0)  return 2;  /* x2 */
-  if (strcmp(sym, "BC") == 0) return 3;  /* x3 */
+  if (strcmp(sym, "BC") == 0) return 2;  /* x2 */
+  if (strcmp(sym, "A") == 0)  return 3;  /* x3 */
   if (strcmp(sym, "IX") == 0) return 4;  /* x4 */
   return -1;
 }
@@ -436,8 +436,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         if (target->off == (size_t)-1 || imm19 < -0x40000 || imm19 > 0x3FFFF) {
           uint8_t cond = cond_from_sym(ops[0].sym);
           uint8_t inv = cond ^ 1u;
-          /* skip over the reloc branch if condition false */
-          w[pcw++] = enc_b_cond(inv, 1);
+          /* skip over the reloc branch if condition false (skip 1 instruction -> imm19=2 because PC-relative) */
+          w[pcw++] = enc_b_cond(inv, 2);
           w[pcw] = enc_b_placeholder();
           add_reloc(out,(uint32_t)(pcw*4),2, ops[1].sym,(uint32_t)e->loc.line);
           pcw++;
