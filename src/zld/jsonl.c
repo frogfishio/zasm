@@ -27,7 +27,7 @@ void recvec_push(recvec_t* r, record_t rec) {
 
 static void operand_free(operand_t* o) {
   if (!o) return;
-  if ((o->t == JOP_SYM || o->t == JOP_STR || o->t == JOP_MEM) && o->s) free(o->s);
+  if ((o->t == JOP_SYM || o->t == JOP_REG || o->t == JOP_LBL || o->t == JOP_STR || o->t == JOP_MEM) && o->s) free(o->s);
   o->s = NULL;
 }
 
@@ -38,6 +38,7 @@ void record_free(record_t* r) {
   if (r->d) free(r->d);
   if (r->name) free(r->name);
   if (r->label) free(r->label);
+  if (r->section) free(r->section);
 
   for (size_t i = 0; i < r->nops; i++) operand_free(&r->ops[i]);
   free(r->ops);
@@ -128,6 +129,9 @@ static int parse_ir_version(const char* line) {
   if (n == strlen("zasm-v1.0") && strncmp(p, "zasm-v1.0", n) == 0) {
     return 1;
   }
+  if (n == strlen("zasm-v1.1") && strncmp(p, "zasm-v1.1", n) == 0) {
+    return 1;
+  }
   return -1;
 }
 
@@ -167,6 +171,8 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
     if (!pt) break;
     p = pt + strlen("\"t\":\"");
     if (strncmp(p, "sym", 3) == 0) op.t = JOP_SYM;
+    else if (strncmp(p, "reg", 3) == 0) op.t = JOP_REG;
+    else if (strncmp(p, "lbl", 3) == 0) op.t = JOP_LBL;
     else if (strncmp(p, "num", 3) == 0) op.t = JOP_NUM;
     else if (strncmp(p, "str", 3) == 0) op.t = JOP_STR;
     else if (strncmp(p, "mem", 3) == 0) op.t = JOP_MEM;
@@ -181,9 +187,45 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
       if (!pb) break;
       p = pb + strlen("\"base\":");
       p = skip_ws(p);
-      char* s = parse_json_string(&p);
-      if (!s) break;
-      op.s = s;
+      if (*p == '{') {
+        p = skip_ws(p+1);
+        const char* pt2 = strstr(p, "\"t\":\"");
+        if (!pt2) break;
+        p = pt2 + strlen("\"t\":\"");
+        if (strncmp(p, "reg", 3) == 0) op.base_is_reg = 1;
+        else op.base_is_reg = 0;
+        const char* tq2 = strchr(p, '"');
+        if (!tq2) break;
+        p = tq2 + 1;
+        const char* pv2 = strstr(p, "\"v\":");
+        if (!pv2) break;
+        p = pv2 + strlen("\"v\":");
+        p = skip_ws(p);
+        char* s = parse_json_string(&p);
+        if (!s) break;
+        op.s = s;
+        const char* pd = strstr(p, "\"disp\":");
+        if (pd) {
+          const char* tmp = pd + strlen("\"disp\":");
+          int okd = 0;
+          long dv = parse_json_int(&tmp, &okd);
+          if (okd) op.disp = dv;
+        }
+        const char* ps = strstr(p, "\"size\":");
+        if (ps) {
+          const char* tmp = ps + strlen("\"size\":");
+          int oks = 0;
+          long sv = parse_json_int(&tmp, &oks);
+          if (oks) op.size = (int)sv;
+        }
+        const char* endobj = strchr(p, '}');
+        if (!endobj) break;
+        p = endobj + 1;
+      } else {
+        char* s = parse_json_string(&p);
+        if (!s) break;
+        op.s = s;
+      }
     } else {
       const char* pv = strstr(p, "\"v\":");
       if (!pv) break;
@@ -206,6 +248,9 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
     const char* endobj = strchr(p, '}');
     if (!endobj) break;
     p = endobj + 1;
+
+    /* Normalize reg/lbl to sym for downstream */
+    if (op.t == JOP_REG || op.t == JOP_LBL) op.t = JOP_SYM;
 
     if (n == cap) {
       cap = cap ? cap * 2 : 8;
@@ -262,6 +307,12 @@ int parse_jsonl_record(const char* line, record_t* out) {
     int ok = 0;
     out->ops = parse_operand_array(pops, &out->nops, &ok);
     if (!ok) return 2;
+    /* normalize reg/lbl -> sym for downstream emitter expectations */
+    for (size_t i = 0; i < out->nops; i++) {
+      if (out->ops[i].t == JOP_REG || out->ops[i].t == JOP_LBL) {
+        out->ops[i].t = JOP_SYM;
+      }
+    }
     return 0;
   }
 
@@ -292,6 +343,21 @@ int parse_jsonl_record(const char* line, record_t* out) {
     int ok = 0;
     out->args = parse_operand_array(pargs, &out->nargs, &ok);
     if (!ok) return 3;
+    for (size_t i = 0; i < out->nargs; i++) {
+      if (out->args[i].t == JOP_REG || out->args[i].t == JOP_LBL) {
+        out->args[i].t = JOP_SYM;
+      }
+    }
+
+    const char* psect = find_key(line, "\"section\":\"");
+    if (psect) {
+      p = psect;
+      end = strchr(p, '"');
+      if (!end) return 3;
+      out->section = (char*)malloc((size_t)(end - p) + 1);
+      memcpy(out->section, p, (size_t)(end - p));
+      out->section[end - p] = 0;
+    }
     return 0;
   }
 
@@ -343,7 +409,7 @@ int validate_record_conform(const record_t* r, char* err, size_t errlen) {
         snprintf(err, errlen, "invalid operand type");
         return 1;
       }
-      if ((o->t == JOP_SYM || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
+      if ((o->t == JOP_SYM || o->t == JOP_REG || o->t == JOP_LBL || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
         snprintf(err, errlen, "empty operand string");
         return 1;
       }
@@ -365,7 +431,7 @@ int validate_record_conform(const record_t* r, char* err, size_t errlen) {
         snprintf(err, errlen, "invalid arg type");
         return 1;
       }
-      if ((o->t == JOP_SYM || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
+      if ((o->t == JOP_SYM || o->t == JOP_REG || o->t == JOP_LBL || o->t == JOP_STR || o->t == JOP_MEM) && !sym_ok(o->s)) {
         snprintf(err, errlen, "empty arg string");
         return 1;
       }
@@ -404,7 +470,7 @@ int validate_record_strict(const char* line, const record_t* r, char* err, size_
         snprintf(err, errlen, "invalid operand type");
         return 1;
       }
-      if ((o->t == JOP_SYM || o->t == JOP_MEM) && !ident_ok(o->s)) {
+      if ((o->t == JOP_SYM || o->t == JOP_REG || o->t == JOP_LBL || o->t == JOP_MEM) && !ident_ok(o->s)) {
         snprintf(err, errlen, "invalid identifier");
         return 1;
       }

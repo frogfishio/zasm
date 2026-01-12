@@ -257,14 +257,15 @@ int main(int argc, char** argv) {
   if (verify_only) diag_emit("info", NULL, 0, "verify-only");
   if (manifest_only) diag_emit("info", NULL, 0, "manifest-only");
 
+  /* Use run_driver to buffer/validate; exits on fatal error. */
   recvec_t recs;
   recvec_init(&recs);
-
+  /* run_driver will push into recs and free its own line buffer on error paths. */
+  /* We reuse the same logic here for now. */
   char* line = NULL;
   size_t cap = 0;
   ssize_t nread;
 
-  // Buffer the full stream: zld performs a layout/symbol pass before emission.
   if (tool_mode) {
     for (int i = 0; i < ninputs; i++) {
       const char* path = inputs[i];
@@ -280,7 +281,6 @@ int main(int argc, char** argv) {
         char* p = line;
         while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
         if (*p == 0) continue;
-
         record_t r;
         int rc = parse_jsonl_record(p, &r);
         if (rc != 0) {
@@ -310,11 +310,9 @@ int main(int argc, char** argv) {
     }
   } else {
     while ((nread = getline(&line, &cap, stdin)) != -1) {
-      // trim leading whitespace
       char* p = line;
       while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
       if (*p == 0) continue;
-
       record_t r;
       int rc = parse_jsonl_record(p, &r);
       if (rc != 0) {
@@ -339,9 +337,7 @@ int main(int argc, char** argv) {
       recvec_push(&recs, r);
     }
   }
-
   free(line);
-
   diag_emit("info", NULL, 0, "records=%zu", recs.n);
 
   if (verify_only) {

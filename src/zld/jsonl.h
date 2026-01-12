@@ -14,6 +14,8 @@ typedef enum {
 typedef enum {
   JOP_NONE = 0,
   JOP_SYM,
+  JOP_REG,
+  JOP_LBL,
   JOP_NUM,
   JOP_STR,
   JOP_MEM
@@ -23,6 +25,9 @@ typedef struct {
   op_kind_t t;
   char* s;     // for SYM/STR/MEM base (heap-allocated)
   long n;      // for NUM
+  long disp;   // for MEM displacement
+  int size;    // for MEM size hint (bytes)
+  int base_is_reg; // for MEM: 1 if base is reg, 0 otherwise
 } operand_t;
 
 typedef struct {
@@ -33,6 +38,7 @@ typedef struct {
   char* m;           // mnemonic
   operand_t* ops;
   size_t nops;
+  char* section;     // optional section hint (currently unused)
 
   // dir
   char* d;           // directive
