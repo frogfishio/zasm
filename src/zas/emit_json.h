@@ -6,6 +6,8 @@
 
 typedef enum {
   OP_SYM,
+  OP_LBL,
+  OP_REG,
   OP_NUM,
   OP_STR,
   OP_MEM
@@ -13,8 +15,11 @@ typedef enum {
 
 typedef struct {
   op_kind_t t;
-  const char* s;   // for SYM/STR/MEM base
+  const char* s;   // for SYM/LBL/REG/STR/MEM base
   long n;          // for NUM
+  long disp;       // for MEM displacement
+  int size;        // for MEM size hint (bytes), 0 if omitted
+  int base_is_reg; // for MEM: 1 if base is reg, 0 if sym
 } operand_t;
 
 void emit_label(const char* name, int line);

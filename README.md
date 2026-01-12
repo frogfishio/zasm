@@ -154,8 +154,8 @@ The **Integrator Pack** (`integrator_pack/`) provides schemas, conformance tests
 Building a domain-specific language? Emit JSONL IR and let zasm handle the hard parts:
 
 ```json
-{"ir":"zasm-v1.0","kind":"instr","op":"LD","ops":[{"t":"sym","v":"HL"},{"t":"sym","v":"msg"}],"loc":{"line":5}}
-{"ir":"zasm-v1.0","kind":"instr","op":"CALL","ops":[{"t":"sym","v":"_out"}],"loc":{"line":6}}
+{"ir":"zasm-v1.1","kind":"instr","op":"LD","ops":[{"t":"reg","v":"HL"},{"t":"sym","v":"msg"}],"loc":{"line":5}}
+{"ir":"zasm-v1.1","kind":"instr","op":"CALL","ops":[{"t":"sym","v":"_out"}],"loc":{"line":6}}
 ```
 
 No need to handle WASM's structured control flow—`zld` converts labels and jumps automatically.

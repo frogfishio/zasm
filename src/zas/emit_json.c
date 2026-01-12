@@ -14,8 +14,14 @@ typedef enum {
 } emit_target_t;
 static emit_target_t g_target = TARGET_IR;
 // Keep in lockstep with zld's required IR version gate.
-static const char* g_ir_version = "zasm-v1.0";
+static const char* g_ir_version = "zasm-v1.1";
 static const char* g_opcodes_version = "zasm-opcodes-v1";
+
+static int is_reg_name(const char* s) {
+  if (!s) return 0;
+  return strcmp(s, "HL") == 0 || strcmp(s, "DE") == 0 || strcmp(s, "BC") == 0 ||
+         strcmp(s, "A") == 0  || strcmp(s, "IX") == 0;
+}
 
 static void json_escape_str(const char* s) {
   // Minimal JSON string escaping for MVP
@@ -87,7 +93,23 @@ void emit_label(const char* name, int line) {
 static void emit_operand(const operand_t* op) {
   switch (op->t) {
     case OP_SYM:
-      printf("{\"t\":\"sym\",\"v\":");
+      if (is_reg_name(op->s)) {
+        printf("{\"t\":\"reg\",\"v\":");
+        json_escape_str(op->s);
+        printf("}");
+      } else {
+        printf("{\"t\":\"sym\",\"v\":");
+        json_escape_str(op->s);
+        printf("}");
+      }
+      break;
+    case OP_LBL:
+      printf("{\"t\":\"lbl\",\"v\":");
+      json_escape_str(op->s);
+      printf("}");
+      break;
+    case OP_REG:
+      printf("{\"t\":\"reg\",\"v\":");
       json_escape_str(op->s);
       printf("}");
       break;
@@ -101,7 +123,15 @@ static void emit_operand(const operand_t* op) {
       break;
     case OP_MEM:
       printf("{\"t\":\"mem\",\"base\":");
+      if (op->base_is_reg) {
+        printf("{\"t\":\"reg\",\"v\":");
+      } else {
+        printf("{\"t\":\"sym\",\"v\":");
+      }
       json_escape_str(op->s);
+      printf("}");
+      if (op->disp != 0) printf(",\"disp\":%ld", op->disp);
+      if (op->size != 0) printf(",\"size\":%d", op->size);
       printf("}");
       break;
   }
@@ -233,7 +263,7 @@ void emit_set_lint(int on) {
 void emit_set_target(const char* target) {
   if (!target || strcmp(target, "ir") == 0) {
     g_target = TARGET_IR;
-    g_ir_version = "zasm-v1.0";
+    g_ir_version = "zasm-v1.1";
     return;
   }
   if (strcmp(target, "opcodes") == 0) {

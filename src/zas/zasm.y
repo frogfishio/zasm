@@ -18,7 +18,17 @@ extern char* zasm_linebuf;
 
 static opnode_t* opnode_new_sym(char* s) {
   opnode_t* n = (opnode_t*)calloc(1, sizeof(*n));
-  n->op.t = OP_SYM; n->op.s = s;
+  if (strcmp(s,"HL")==0 || strcmp(s,"DE")==0 || strcmp(s,"BC")==0 || strcmp(s,"A")==0 || strcmp(s,"IX")==0) {
+    n->op.t = OP_REG;
+  } else {
+    n->op.t = OP_SYM;
+  }
+  n->op.s = s;
+  return n;
+}
+static opnode_t* opnode_new_lbl(char* s) {
+  opnode_t* n = (opnode_t*)calloc(1, sizeof(*n));
+  n->op.t = OP_LBL; n->op.s = s;
   return n;
 }
 static opnode_t* opnode_new_num(long v) {
@@ -34,6 +44,9 @@ static opnode_t* opnode_new_str(char* s) {
 static opnode_t* opnode_new_mem(char* s) {
   opnode_t* n = (opnode_t*)calloc(1, sizeof(*n));
   n->op.t = OP_MEM; n->op.s = s;
+  if (strcmp(s,"HL")==0 || strcmp(s,"DE")==0 || strcmp(s,"BC")==0 || strcmp(s,"A")==0 || strcmp(s,"IX")==0) {
+    n->op.base_is_reg = 1;
+  }
   return n;
 }
 
@@ -182,9 +195,9 @@ stmtinfo
     {
       $$.m = "JR";
       if ($3) {
-        $$.ops = opnode_append(opnode_new_sym($2), opnode_new_sym($3));
+        $$.ops = opnode_append(opnode_new_sym($2), opnode_new_lbl($3));
       } else {
-        $$.ops = opnode_new_sym($2);
+        $$.ops = opnode_new_lbl($2);
       }
     }
   | T_ADD operand T_COMMA operand

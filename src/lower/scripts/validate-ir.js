@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * Validate a JSONL IR file against schema/ir/v1/record.schema.json using AJV (draft 2020-12).
+ * Validate a JSONL IR file against a schema (default: schema/ir/v1/record.schema.json) using AJV (draft 2020-12).
  *
- * Usage: node validate-ir.js --input path/to/file.jsonl
+ * Usage: node validate-ir.js --input path/to/file.jsonl [--schema path/to/schema.json]
  */
 
 const fs = require("fs");
@@ -18,20 +18,26 @@ function die(msg) {
 function main() {
   const args = process.argv.slice(2);
   let input = null;
+  let schemaArg = null;
   for (let i = 0; i < args.length; i++) {
     if ((args[i] === "--input" || args[i] === "-i") && args[i + 1]) {
       input = args[i + 1];
+      i++;
+    } else if ((args[i] === "--schema" || args[i] === "-s") && args[i + 1]) {
+      schemaArg = args[i + 1];
       i++;
     } else if (!input) {
       input = args[i];
     }
   }
   if (!input) {
-    die("usage: node validate-ir.js --input path/to/file.jsonl");
+    die("usage: node validate-ir.js --input path/to/file.jsonl [--schema path/to/schema.json]");
   }
   const irPath = path.resolve(process.cwd(), input);
-  /* __dirname = src/lower/scripts; schema lives at repo root /schema/ir/v1/record.schema.json */
-  const schemaPath = path.resolve(__dirname, "../../../schema/ir/v1/record.schema.json");
+  /* __dirname = src/lower/scripts; default schema lives at repo root /schema/ir/v1.1/record.schema.json */
+  const schemaPath = schemaArg
+    ? path.resolve(process.cwd(), schemaArg)
+    : path.resolve(__dirname, "../../../schema/ir/v1.1/record.schema.json");
 
   let schema;
   try {
