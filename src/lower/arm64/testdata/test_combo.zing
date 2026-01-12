@@ -1,6 +1,0 @@
-withLocals[:a :b | sum | sum ← a + b. ret sum.].
-withoutLocals[:a :b sum ← a + b. ret sum.].
-main[
-  _ ← withLocals a:1 b:2.
-  ret (withoutLocals a:3 b:4).
-].

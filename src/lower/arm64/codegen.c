@@ -94,12 +94,21 @@ static void relocs_free(cg_reloc_t *r) {
   }
 }
 
+static void pcmap_free(cg_pc_map_t *p) {
+  while (p) {
+    cg_pc_map_t *n = p->next;
+    free(p);
+    p = n;
+  }
+}
+
 void cg_free(cg_blob_t *out) {
   if (!out) return;
   free(out->code);
   free(out->data);
   symtab_free(out->syms);
   relocs_free(out->relocs);
+  pcmap_free(out->pc_map);
   memset(out, 0, sizeof(*out));
 }
 
@@ -115,6 +124,18 @@ static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const c
   r->next = out->relocs;
   out->relocs = r;
   out->reloc_count++;
+}
+
+static void add_pc_map(cg_blob_t *out, uint32_t off, size_t ir_id, uint32_t line) {
+  if (!out) return;
+  cg_pc_map_t *p = (cg_pc_map_t *)calloc(1, sizeof(cg_pc_map_t));
+  if (!p) return;
+  p->off = off;
+  p->ir_id = ir_id;
+  p->line = line;
+  p->next = out->pc_map;
+  out->pc_map = p;
+  out->pc_map_count++;
 }
 
 /* ARM64 encodings */
@@ -413,6 +434,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       w[pcw++] = enc_mov_fp_sp();
       func_has_prologue = 1;
     }
+
+    /* Record map entry for this IR instruction. */
+    add_pc_map(out, (uint32_t)(pcw*4), e->id, (uint32_t)e->loc.line);
 
     if (strcmp(m,"RET")==0) {
       if (func_has_prologue) {

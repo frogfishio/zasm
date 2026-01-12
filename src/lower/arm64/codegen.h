@@ -22,6 +22,13 @@ typedef struct cg_reloc {
   struct cg_reloc *next;
 } cg_reloc_t;
 
+typedef struct cg_pc_map {
+  uint32_t off;           /* byte offset within code */
+  size_t ir_id;           /* IR record id */
+  uint32_t line;          /* IR loc line (0 if none) */
+  struct cg_pc_map *next;
+} cg_pc_map_t;
+
 /* Codegen output blob consumed by Mach-O writer. */
 typedef struct {
   unsigned char *code;
@@ -32,6 +39,8 @@ typedef struct {
   symtab_entry *syms;     /* linked list of symbols */
   cg_reloc_t *relocs;     /* linked list of relocations */
   uint32_t reloc_count;
+  cg_pc_map_t *pc_map;    /* mapping from code offsets to IR ids/lines */
+  uint32_t pc_map_count;
 } cg_blob_t;
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out);

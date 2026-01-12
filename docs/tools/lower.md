@@ -30,6 +30,7 @@ lower --version
 - `--with-src`: Include `src` records in the `--dump-ir` output.
 - `--strict`: Treat missing symbol declarations as errors (halts before emit).
 - `--json`: Emit the same JSON as `--emit-map`, but to stdout (symbols, relocs with ir_id, refs, layout, audit counts).
+- `--emit-pc-map <path>`: Write a JSON array mapping code offsets to IR ids/lines (PC→IR correlation).
 
 ### Machine-readable outputs
 
@@ -40,6 +41,7 @@ lower --version
   - `refs`: relocs grouped by symbol name
   - `audit`: missing/extra symbol counts
 - `--json`: Same schema as `--emit-map` but written to stdout for piping.
+- `--emit-pc-map <path>`: JSON array `{off, ir_id, line}` for each instruction offset (useful to map crashes back to IR).
 
 ### LLDB helper generation
 

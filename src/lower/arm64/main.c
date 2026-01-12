@@ -10,7 +10,7 @@
 
 static void usage(const char *prog) {
   fprintf(stderr,
-    "lower — JSON IR (zasm-v1.0) → macOS arm64 Mach-O\n\n"
+    "lower — JSON IR (zasm-v1.0/v1.1) → macOS arm64 Mach-O\n\n"
     "Usage:\n"
     "  %s --input <input.jsonl> [--o <out.o>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n"
     "  %s --tool -o <out.o> <input.jsonl>... [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n\n"
@@ -25,10 +25,11 @@ static void usage(const char *prog) {
     "  --dump-relocs Print relocations (offset, type, symbol, line, ir_id)\n"
     "  --dump-layout Print data layout offsets for symbols\n"
     "  --dump-asm    Print annotated disassembly (offsets, symbols)\n"
-    "  --dump-ir     Echo parsed IR with ids/src_ref (includes src records)\n"
-    "  --with-src    Retain src records when dumping IR\n"
+    "  --dump-ir     Echo parsed IR with ids/src_ref\n"
+    "  --with-src    Include src records in --dump-ir output\n"
     "  --json        Emit dumps as JSON to stdout (syms/relocs/layout/audit)\n"
     "  --emit-map    Write JSON map of symbols/relocs/layout to the given path\n"
+    "  --emit-pc-map Write JSON mapping of code offsets to IR ids/lines\n"
     "  --emit-lldb   Write an LLDB trace script to the given path\n"
     "  --trace-func  Function symbol to trace (default: main)\n"
     "  --trace-syms  Comma list of symbols to dump at trace breakpoints\n"
@@ -219,36 +220,37 @@ static void emit_lldb_script(const char *path,
     return;
   }
   fprintf(lf, "# Auto-generated LLDB trace script (lower)\n");
-  fprintf(lf, "# Usage: lldb <binary> -s %s\n", path);
+  fprintf(lf, "# Usage: lldb -b -s %s -- <binary>\n", path);
   if (binary_hint) fprintf(lf, "# target: %s\n", binary_hint);
+  fprintf(lf, "process handle SIGSEGV -n false -p true -s true\n");
+  fprintf(lf, "process handle SIGBUS  -n false -p true -s true\n");
+
+  /* Entry breakpoint */
   fprintf(lf, "breakpoint set -n %s\n", trace_func ? trace_func : "main");
-  fprintf(lf, "breakpoint command add 1\n");
-  fprintf(lf, "  printf \"\\n[trace] %s entry\\n\"\n", trace_func ? trace_func : "main");
+  fprintf(lf, "breakpoint command add 1 --one-liner \"printf \\\"[trace] %s entry\\\\n\\\"; ", trace_func ? trace_func : "main");
   for (size_t i = 0; i < nreg; i++) {
-    fprintf(lf, "  register read %s\n", regs[i]);
+    fprintf(lf, "register read %s; ", regs[i]);
   }
   for (size_t i = 0; i < nsym; i++) {
     const char *sect = NULL;
     size_t off = sym_offset(blob, syms[i], &sect);
-    fprintf(lf, "  printf \"[trace] %%s (%s @ %zu)\\n\", \"%s\"\n",
-            sect ? sect : "?", off, syms[i]);
-    fprintf(lf, "  expr -f hex -s 0 -- (uint64_t)&%s\n", syms[i]);
-    fprintf(lf, "  memory read --format hex --size 8 --count 4 '&%s'\n", syms[i]);
+    fprintf(lf, "printf \\\"[trace] %s (%s @ %zu)\\\\n\\\"; ", syms[i], sect ? sect : "?", off);
+    fprintf(lf, "expr -f hex -s 0 -- (uint64_t)&%s; ", syms[i]);
+    fprintf(lf, "memory read --format hex --size 8 --count 4 '&%s'; ", syms[i]);
   }
-  fprintf(lf, "  continue\n");
-  fprintf(lf, "end\n");
-  /* broad ret breakpoint; users can narrow further in LLDB if desired */
+  fprintf(lf, "continue\"\n");
+
+  /* RET breakpoint */
   fprintf(lf, "breakpoint set -p \"ret\"\n");
-  fprintf(lf, "breakpoint command add 2\n");
-  fprintf(lf, "  printf \"\\n[trace] %s ret\\n\"\n", trace_func ? trace_func : "main");
+  fprintf(lf, "breakpoint command add 2 --one-liner \"printf \\\"[trace] %s ret\\\\n\\\"; ", trace_func ? trace_func : "main");
   for (size_t i = 0; i < nreg; i++) {
-    fprintf(lf, "  register read %s\n", regs[i]);
+    fprintf(lf, "register read %s; ", regs[i]);
   }
   for (size_t i = 0; i < nsym; i++) {
-    fprintf(lf, "  memory read --format hex --size 8 --count 4 '&%s'\n", syms[i]);
+    fprintf(lf, "memory read --format hex --size 8 --count 4 '&%s'; ", syms[i]);
   }
-  fprintf(lf, "  continue\n");
-  fprintf(lf, "end\n");
+  fprintf(lf, "continue\"\n");
+
   fprintf(lf, "run\n");
   fclose(lf);
   free_list(syms, nsym);
@@ -264,6 +266,7 @@ int main(int argc, char **argv) {
   int dump_asm = 0, dump_ir = 0, with_src = 0;
   int strict = 0;
   const char *emit_map_path = NULL;
+  const char *emit_pc_map_path = NULL;
   int json_dump = 0;
   const char *emit_lldb_path = NULL;
   const char *trace_func = "main";
@@ -292,6 +295,7 @@ int main(int argc, char **argv) {
     if (strcmp(a, "--strict") == 0) { strict = 1; continue; }
     if (strcmp(a, "--json") == 0) { json_dump = 1; continue; }
     if (strcmp(a, "--emit-map") == 0 && argi < argc) { emit_map_path = argv[argi++]; continue; }
+    if (strcmp(a, "--emit-pc-map") == 0 && argi < argc) { emit_pc_map_path = argv[argi++]; continue; }
     if (strcmp(a, "--emit-lldb") == 0 && argi < argc) { emit_lldb_path = argv[argi++]; continue; }
     if (strcmp(a, "--trace-func") == 0 && argi < argc) { trace_func = argv[argi++]; continue; }
     if (strcmp(a, "--trace-syms") == 0 && argi < argc) { trace_syms = argv[argi++]; continue; }
@@ -442,6 +446,28 @@ int main(int argc, char **argv) {
       } else {
         emit_json_dump(mp, &blob, missing_count, extra_count);
         fclose(mp);
+      }
+    }
+
+    if (emit_pc_map_path && blob.pc_map) {
+      FILE *pp = fopen(emit_pc_map_path, "w");
+      if (!pp) {
+        perror("emit_pc_map open");
+      } else {
+        fprintf(pp, "[\n");
+        size_t idx = 0;
+        /* Count entries */
+        size_t count = 0;
+        for (cg_pc_map_t *c = blob.pc_map; c; c = c->next) count++;
+        cg_pc_map_t **arr = (cg_pc_map_t **)calloc(count, sizeof(cg_pc_map_t *));
+        for (cg_pc_map_t *c = blob.pc_map; c; c = c->next) arr[idx++] = c;
+        for (size_t i = 0; i < idx; i++) {
+          cg_pc_map_t *c = arr[idx - 1 - i];
+          fprintf(pp, "  {\"off\":%u,\"ir_id\":%zu,\"line\":%u}%s\n", c->off, c->ir_id, c->line, (i + 1 < idx) ? "," : "");
+        }
+        free(arr);
+        fprintf(pp, "]\n");
+        fclose(pp);
       }
     }
 
