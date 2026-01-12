@@ -56,6 +56,35 @@ static int symtab_has(symtab_entry *root, const char *name) {
   return 0;
 }
 
+typedef struct {
+  char *name;
+  size_t line;
+} seen_sym_t;
+
+static int seen_has(seen_sym_t *arr, size_t n, const char *name) {
+  if (!name) return 0;
+  for (size_t i = 0; i < n; i++) {
+    if (arr[i].name && strcmp(arr[i].name, name) == 0) return 1;
+  }
+  return 0;
+}
+
+static void seen_add(seen_sym_t **arr, size_t *n, size_t *cap, const char *name, size_t line) {
+  if (!name) return;
+  if (seen_has(*arr, *n, name)) return;
+  if (*n >= *cap) {
+    *cap = *cap ? (*cap * 2) : 16;
+    *arr = (seen_sym_t *)realloc(*arr, (*cap) * sizeof(seen_sym_t));
+  }
+  (*arr)[(*n)++] = (seen_sym_t){dupstr(name), line};
+}
+
+static void seen_free(seen_sym_t *arr, size_t n) {
+  if (!arr) return;
+  for (size_t i = 0; i < n; i++) free(arr[i].name);
+  free(arr);
+}
+
 static void relocs_free(cg_reloc_t *r) {
   while (r) {
     cg_reloc_t *n = r->next;
@@ -234,19 +263,26 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   if (!ir || !out) return -1;
   memset(out,0,sizeof(*out));
   symtab_add(&out->syms,"lembeh_handle",0);
-#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); cg_free(out); return -1; } while (0)
-#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); cg_free(out); return -1; } while (0)
+#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+
+  /* Collect labels and call targets for function boundary detection. */
+  seen_sym_t *call_targets = NULL;
+  size_t n_calls = 0, c_calls = 0;
+  seen_sym_t *label_list = NULL;
+  size_t n_labels = 0, c_labels = 0;
 
   /* Sizing pass */
   size_t code_words = 0;
   size_t data_len = 0;
-  const size_t prologue_words = 2;
-  const size_t epilogue_words = 2;
-  code_words += prologue_words;
+  size_t func_count = 0;
+  int first_label_seen = 0;
+  int any_instr = 0;
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
       symtab_add(&out->syms, e->u.label.name ? e->u.label.name : "", (size_t)-1);
+      seen_add(&label_list, &n_labels, &c_labels, e->u.label.name ? e->u.label.name : "", e->loc.line);
       continue;
     }
     if (e->kind == IR_ENTRY_DIR) {
@@ -272,6 +308,10 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       continue;
     }
     if (e->kind == IR_ENTRY_INSTR) {
+      any_instr = 1;
+      if (strcmp(e->u.instr.mnem ? e->u.instr.mnem : "", "CALL") == 0 && e->u.instr.op_count >= 1 && e->u.instr.ops[0].kind == IR_OP_SYM) {
+        seen_add(&call_targets, &n_calls, &c_calls, e->u.instr.ops[0].sym, e->loc.line);
+      }
       /* Pre-declare memory symbols referenced by name (non-register base). */
       for (size_t i = 0; i < e->u.instr.op_count; i++) {
         ir_op_t *op = &e->u.instr.ops[i];
@@ -283,10 +323,27 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           }
         }
       }
-      code_words += estimate_instr_words(e);
     }
   }
-  code_words += epilogue_words;
+
+  /* Determine function entry labels: first label, labels named "main", and labels that are CALL targets. */
+  for (size_t i = 0; i < n_labels; i++) {
+    int is_func = 0;
+    if (!first_label_seen) { is_func = 1; first_label_seen = 1; }
+    if (label_list[i].name && strcmp(label_list[i].name, "main") == 0) is_func = 1;
+    if (label_list[i].name && seen_has(call_targets, n_calls, label_list[i].name)) is_func = 1;
+    if (is_func) func_count++;
+  }
+  if (func_count == 0 && any_instr) func_count = 1;
+
+  /* Prologues add 2 words each; RET is budgeted at 2 words already. */
+  code_words += func_count * 2;
+
+  /* Second sizing loop for instructions. */
+  for (ir_entry_t *e = ir->head; e; e = e->next) {
+    if (e->kind == IR_ENTRY_INSTR) code_words += estimate_instr_words(e);
+  }
+
   out->code_len = code_words ? code_words*4 : 4;
   out->data_len = data_len;
   out->data_off = out->code_len;
@@ -298,16 +355,23 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   /* Second pass */
   size_t pcw = 0;
   size_t data_off = 0;
-  w[pcw++] = enc_stp_fp_lr();
-  w[pcw++] = enc_mov_fp_sp();
+  int in_func = 0;
+  int func_has_prologue = 0;
+  int func_seen = 0;
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
       if (e->u.label.name) {
-        /* Point entry labels at prologue start if we're still at initial prologue. */
-        size_t off = pcw*4;
-        if (pcw <= prologue_words) off = 0;
-        symtab_update(out->syms, e->u.label.name, off);
+        int is_func = 0;
+        if (!func_seen) is_func = 1;
+        if (strcmp(e->u.label.name, "main") == 0) is_func = 1;
+        if (seen_has(call_targets, n_calls, e->u.label.name)) is_func = 1;
+        if (is_func) {
+          func_seen = 1;
+          in_func = 1;
+          func_has_prologue = 0;
+        }
+        symtab_update(out->syms, e->u.label.name, pcw*4);
       }
       continue;
     }
@@ -343,9 +407,20 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     ir_op_t *ops = e->u.instr.ops;
     size_t nops = e->u.instr.op_count;
 
+    if (!in_func) { in_func = 1; func_has_prologue = 0; func_seen = 1; }
+    if (!func_has_prologue) {
+      w[pcw++] = enc_stp_fp_lr();
+      w[pcw++] = enc_mov_fp_sp();
+      func_has_prologue = 1;
+    }
+
     if (strcmp(m,"RET")==0) {
-      w[pcw++] = enc_ldp_fp_lr();
+      if (func_has_prologue) {
+        w[pcw++] = enc_ldp_fp_lr();
+      }
       w[pcw++] = enc_ret();
+      in_func = 0;
+      func_has_prologue = 0;
       continue;
     }
 
@@ -828,7 +903,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     }
   }
 
-  w[pcw++] = enc_ldp_fp_lr();
-  w[pcw++] = enc_ret();
+  seen_free(call_targets, n_calls);
+  seen_free(label_list, n_labels);
   return 0;
 }

@@ -6,7 +6,7 @@
 
 ```
 lower --input <input.jsonl> [--o <out.o>] [flags...]
-lower --tool -o <out.o> <input.jsonl>... [flags...]
+lower --tool --o <out.o> <input.jsonl>... [flags...]
 lower --help
 lower --version
 ```
@@ -26,9 +26,10 @@ lower --version
 - `--dump-relocs`: Print relocations (offset, type, symbol, line, ir_id).
 - `--dump-layout`: Print code/data sizes and per-symbol offsets (data-relative shown).
 - `--dump-asm`: Print 32-bit word hex dump with symbol labels for code offsets.
-- `--dump-ir`: Echo parsed IR with ids/src_ref; add `--with-src` to keep src records in the dump.
-- `--strict`: Promote certain warnings (currently: missing symbol declarations) to errors.
-- `--json`: Emit a machine-readable dump to stdout (same structure as `--emit-map`), including symbols, relocs (with ir_id), refs grouped by symbol, layout, and audit counts (missing/extra).
+- `--dump-ir`: Echo parsed IR with ids/src_ref.
+- `--with-src`: Include `src` records in the `--dump-ir` output.
+- `--strict`: Treat missing symbol declarations as errors (halts before emit).
+- `--json`: Emit the same JSON as `--emit-map`, but to stdout (symbols, relocs with ir_id, refs, layout, audit counts).
 
 ### Machine-readable outputs
 
