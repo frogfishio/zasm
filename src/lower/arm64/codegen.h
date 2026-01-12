@@ -18,6 +18,7 @@ typedef struct cg_reloc {
   uint32_t type;          /* 0=ADRP_PAGE, 1=ADD_PAGEOFF, 2=BRANCH26 */
   char *sym;              /* symbol name */
   uint32_t line;          /* source line for diagnostics */
+  size_t ir_id;           /* IR record id, 0 if unspecified */
   struct cg_reloc *next;
 } cg_reloc_t;
 

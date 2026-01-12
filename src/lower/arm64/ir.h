@@ -51,6 +51,7 @@ typedef enum {
 typedef struct ir_entry {
   ir_entry_kind_t kind;
   ir_loc_t loc;
+  size_t id; /* optional record id for tooling; 0 if unspecified */
   union {
     struct {
       char *name;
@@ -59,12 +60,14 @@ typedef struct ir_entry {
       char *mnem;
       ir_op_t *ops;
       size_t op_count;
+      size_t src_ref; /* optional source id */
     } instr;
     struct {
       ir_dir_kind_t dir_kind;
       char *name;       /* optional label on directive */
       ir_op_t *args;
       size_t arg_count;
+      size_t src_ref;   /* optional source id */
       /* Derived/expanded data for data-producing directives (DB/DW/STR/EQU). */
       unsigned char *data;
       size_t data_len;

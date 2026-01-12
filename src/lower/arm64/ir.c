@@ -27,7 +27,10 @@ void ir_init(ir_prog_t *p) {
 
 ir_entry_t *ir_entry_new(ir_entry_kind_t k) {
   ir_entry_t *e = (ir_entry_t *)calloc(1, sizeof(ir_entry_t));
-  if (e) e->kind = k;
+  if (e) {
+    e->kind = k;
+    e->id = 0;
+  }
   return e;
 }
 

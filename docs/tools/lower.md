@@ -1,53 +1,108 @@
-## lower — JSON IR (zasm-v1.0) → macOS arm64 Mach-O
+## lower — JSON IR (zasm-v1.0/v1.1) → macOS arm64 Mach-O
 
-`lower` consumes ZASM JSONL IR (`schema/ir/v1/record.schema.json`) and produces a Mach-O object suitable for linking with `clang` on macOS arm64. It also performs strict validation and line-aware diagnostics to help you debug IR generation.
+`lower` consumes ZASM JSONL IR (`schema/ir/v1/record.schema.json` or `schema/ir/v1.1/record.schema.json`) and produces a Mach-O object suitable for linking with `clang` on macOS arm64. It includes dump, audit, and tracing helpers for debugging IR, symbols, relocations, and layout.
 
 ### Usage
 
 ```
-lower --input <input.jsonl> [--o <out.o>] [--debug]
-lower --tool -o <out.o> <input.jsonl>... [--debug]
+lower --input <input.jsonl> [--o <out.o>] [flags...]
+lower --tool -o <out.o> <input.jsonl>... [flags...]
 lower --help
 lower --version
 ```
 
-### Options
+### Core flags
 
-- `--input <path>`: Input JSONL IR (zasm-v1.0). Required in non-tool mode.
+- `--input <path>`: Input JSONL IR. Required in non-tool mode (single file).
 - `--o <path>`: Output Mach-O object path (default: `src/lower/arm64/out/out.o`).
-- `--tool`: Filelist mode; allows multiple inputs but requires `-o`.
-- `--debug` / `--trace`: Verbose debug output (symbol audits, counts, refs/decls).
-- `--version`: Print version (read from `VERSION` in the repo).
+- `--tool`: Filelist mode; allow multiple inputs, requires `-o`.
+- `--version`: Print version (read from `VERSION`).
 - `--help`: Show help.
+
+### Diagnostics and dumps
+
+- `--debug`/`--trace`: Verbose audit (counts of labels/externs/refs; missing/extra symbol notices).
+- `--dump-syms`: Print symbol table (name, offset, section).
+- `--dump-relocs`: Print relocations (offset, type, symbol, line, ir_id).
+- `--dump-layout`: Print code/data sizes and per-symbol offsets (data-relative shown).
+- `--dump-asm`: Print 32-bit word hex dump with symbol labels for code offsets.
+- `--dump-ir`: Echo parsed IR with ids/src_ref; add `--with-src` to keep src records in the dump.
+- `--strict`: Promote certain warnings (currently: missing symbol declarations) to errors.
+- `--json`: Emit a machine-readable dump to stdout (same structure as `--emit-map`), including symbols, relocs (with ir_id), refs grouped by symbol, layout, and audit counts (missing/extra).
+
+### Machine-readable outputs
+
+- `--emit-map <path>`: Write JSON map with:
+  - `code_len`, `data_len`, `data_off`
+  - `symbols`: name/off/section
+  - `relocs`: off/type/sym/line/ir_id
+  - `refs`: relocs grouped by symbol name
+  - `audit`: missing/extra symbol counts
+- `--json`: Same schema as `--emit-map` but written to stdout for piping.
+
+### LLDB helper generation
+
+- `--emit-lldb <path>`: Emit an LLDB script that sets breakpoints, dumps registers/symbols, and runs.
+- `--trace-func <sym>`: Function symbol to break on (default: `main`).
+- `--trace-syms <list>`: Comma-separated symbols to dump (address + 4 qword read).
+- `--trace-regs <list>`: Comma-separated registers to read (`w0,x0` etc.).
+
+LLDB script notes:
+- Breaks at function entry and a broad `ret` catch; refine inside LLDB if needed.
+- Uses `&sym` so it remains valid post-link even if section layout shifts.
+- Invoke with `lldb <binary> -s <script>`.
 
 ### Exit codes
 
 - `0`: Success
+- `1`: Usage/IO error
 - `2`: Parse/validation error
 - `3`: Codegen error
 - `4`: Mach-O emit error
-- `1`: Usage/IO error
-
-### Diagnostics
-
-- Parser errors include line numbers and a snippet of the offending JSONL record.
-- Codegen and Mach-O emit errors include line numbers where available and name the failing symbol or mnemonic.
-- With `--debug`, a symbol audit reports refs minus decls and decls minus refs, plus counts of labels/data/extern/public.
 
 ### Examples
 
-- Lower a single IR file:
+- Lower and inspect syms/relocs/layout:
   ```
-  lower --input src/lower/arm64/golden/hello_world.zir.jsonl --o /tmp/hello.o
-  clang /tmp/hello.o -o /tmp/hello && /tmp/hello
-  ```
-
-- Tool mode with multiple inputs:
-  ```
-  lower --tool -o src/lower/arm64/out/bundle.o src/lower/arm64/golden/*.zir.jsonl
+  lower --debug --dump-syms --dump-relocs --dump-layout \
+        --input src/lower/arm64/testdata/hello_libzingcore.zir.jsonl \
+        --o /tmp/hello.o
   ```
 
-- Debug run to inspect symbol mismatches:
+- Emit machine-readable map to file:
   ```
-  lower --debug --input bad.zir.jsonl --o /tmp/bad.o
+  lower --emit-map /tmp/map.json \
+        --input src/lower/arm64/testdata/test_combo.zir.jsonl \
+        --o /tmp/test_combo.o
   ```
+
+- Stream JSON dump to stdout for tooling:
+  ```
+  lower --json --input src/lower/arm64/testdata/test_combo.zir.jsonl \
+        --o /tmp/test_combo.o > /tmp/map.json
+  ```
+
+- Dump IR and annotated code:
+  ```
+  lower --dump-ir --dump-asm \
+        --input src/lower/arm64/testdata/test_combo.zir.jsonl \
+        --o /tmp/test_combo.o
+  ```
+
+- Generate an LLDB trace helper script for a canary:
+  ```
+  lower --emit-lldb /tmp/trace.lldb --trace-func fn_Main__withoutLocals_28a_2Cb_29 \
+        --trace-syms var_fn_Main__withoutLocals_28a_2Cb_29_a,var_fn_Main__withoutLocals_28a_2Cb_29_b,tmp_0 \
+        --trace-regs w0,w1 \
+        --input src/lower/arm64/testdata/test_combo.zir.jsonl \
+        --o /tmp/test_combo.o
+  # usage: lldb /tmp/a.out -s /tmp/trace.lldb
+  ```
+
+### Notes
+
+- IR `id`/`src_ref` are preserved; relocs carry `ir_id` for cross-reference.
+- Symbol table dedupes by name; `--strict` currently errors on missing decls.
+- `--dump-asm` is a raw hex word dump; use `otool -tV <bin>` for full disassembly.
+- `refs` in JSON outputs are de-duplicated per symbol for easier tooling.
+- The Mach-O writer emits deterministic objects (no timestamps).

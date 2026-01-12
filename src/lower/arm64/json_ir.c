@@ -476,6 +476,21 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     }
 
     ir_entry_t *entry = NULL;
+    /* Optional record id */
+    size_t rec_id = 0;
+    size_t src_ref = 0;
+    int id_idx = find_key(line, toks, 0, "id");
+    if (id_idx >= 0 && toks[id_idx].type == JSMN_PRIMITIVE) {
+      int ok = 0;
+      long long v = tok_to_int(line, &toks[id_idx], &ok);
+      if (ok && v >= 0) rec_id = (size_t)v;
+    }
+    int sr_idx = find_key(line, toks, 0, "src_ref");
+    if (sr_idx >= 0 && toks[sr_idx].type == JSMN_PRIMITIVE) {
+      int ok = 0;
+      long long v = tok_to_int(line, &toks[sr_idx], &ok);
+      if (ok && v >= 0) src_ref = (size_t)v;
+    }
     if (tok_streq(line, &toks[k_idx], "label")) {
       int name_idx = find_key(line, toks, 0, "name");
       if (name_idx < 0 || toks[name_idx].type != JSMN_STRING) {
@@ -486,6 +501,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_LABEL);
       if (!entry) { free(toks); rc = -1; goto fail_line; }
+      entry->id = rec_id;
       entry->u.label.name = tok_strdup(line, &toks[name_idx]);
       if (!entry->u.label.name) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
       int loc_idx = find_key(line, toks, 0, "loc");
@@ -515,6 +531,8 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_INSTR);
       if (!entry) { free(toks); rc = -1; goto fail_line; }
+      entry->id = rec_id;
+      entry->u.instr.src_ref = src_ref;
       entry->u.instr.mnem = tok_strdup(line, &toks[m_idx]);
       if (!entry->u.instr.mnem) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
       if (parse_operands_array(line, toks, ops_idx, &entry->u.instr.ops, &entry->u.instr.op_count) != 0) {
@@ -548,6 +566,8 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_DIR);
       if (!entry) { free(toks); rc = -1; goto fail_line; }
+      entry->id = rec_id;
+      entry->u.dir.src_ref = src_ref;
       if      (tok_streq(line, &toks[d_idx], "PUBLIC")) entry->u.dir.dir_kind = IR_DIR_PUBLIC;
       else if (tok_streq(line, &toks[d_idx], "EXTERN")) entry->u.dir.dir_kind = IR_DIR_EXTERN;
       else if (tok_streq(line, &toks[d_idx], "DB")) entry->u.dir.dir_kind = IR_DIR_DB;
