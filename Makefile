@@ -555,6 +555,14 @@ ZEM_HOST_LIBHOPPER := $(ZEM_HOST_BUILD)/libhopper.a
 
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
+	$(ZEM_BUILD)/zem_debug.o \
+	$(ZEM_BUILD)/zem_exec.o \
+	$(ZEM_BUILD)/zem_mem.o \
+	$(ZEM_BUILD)/zem_heap.o \
+	$(ZEM_BUILD)/zem_op.o \
+	$(ZEM_BUILD)/zem_build.o \
+	$(ZEM_BUILD)/zem_util.o \
+	$(ZEM_BUILD)/zem_trace.o \
 	$(ZEM_BUILD)/zem.o \
 	$(ZEM_BUILD)/jsonl.o
 

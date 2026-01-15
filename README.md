@@ -243,6 +243,7 @@ JIT error semantics:
 | `zop` | Packer: JSONL opcode stream → `.zasm.bin` |
 | `zlnt` | Linter: Static analysis for JSONL IR |
 | `zrun` | Runner: Execute WAT/WASM via wasmtime |
+| `zem` | Emulator + debugger: Execute JSONL IR directly (trace/debug/events) |
 | `zcloak` | Pure-C cloak runtime (interpreter) |
 | `zcloak-jit` | JIT runner via libzxc |
 | `libzxc` | Embeddable cross-compiler library (C API) |
@@ -260,6 +261,7 @@ JIT error semantics:
 | [docs/spec/ir.md](./docs/spec/ir.md) | **Normative** JSONL IR format |
 | [docs/spec/opcode_encoding.md](./docs/spec/opcode_encoding.md) | **Normative** binary opcode encoding |
 | [docs/spec/zasm_bin.md](./docs/spec/zasm_bin.md) | **Normative** `.zasm.bin` container format |
+| [docs/tools/zem.md](./docs/tools/zem.md) | `zem` usage (debugger + JSONL stop events) |
 | [docs/spec/accelerator.md](./docs/spec/accelerator.md) | Accelerator profile (CUDA/Vulkan/Metal; draft) |
 | [docs/spec/fpga.md](./docs/spec/fpga.md) | FPGA profile (HLS/RTL; draft) |
 | [docs/integrator_pack/jit/README.md](./docs/integrator_pack/jit/README.md) | JIT codepack snapshot (integrator pack) |
