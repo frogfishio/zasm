@@ -347,11 +347,12 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     }
   }
 
-  /* Determine function entry labels: first label, labels named "main", and labels that are CALL targets. */
+  /* Determine function entry labels: first label, labels named "main", labels prefixed with "fn_", and labels that are CALL targets. */
   for (size_t i = 0; i < n_labels; i++) {
     int is_func = 0;
     if (!first_label_seen) { is_func = 1; first_label_seen = 1; }
     if (label_list[i].name && strcmp(label_list[i].name, "main") == 0) is_func = 1;
+    if (label_list[i].name && strncmp(label_list[i].name, "fn_", 3) == 0) is_func = 1;
     if (label_list[i].name && seen_has(call_targets, n_calls, label_list[i].name)) is_func = 1;
     if (is_func) func_count++;
   }
@@ -386,6 +387,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         int is_func = 0;
         if (!func_seen) is_func = 1;
         if (strcmp(e->u.label.name, "main") == 0) is_func = 1;
+        if (strncmp(e->u.label.name, "fn_", 3) == 0) is_func = 1;
         if (seen_has(call_targets, n_calls, e->u.label.name)) is_func = 1;
         if (is_func) {
           func_seen = 1;

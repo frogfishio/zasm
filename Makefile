@@ -41,6 +41,7 @@ ZIR_BUILD := $(BUILD)/zir
 ZRUN_BUILD := $(BUILD)/zrun
 CLOAK_BUILD := $(BUILD)/cloak
 CLOAK_TEST_BUILD := $(BUILD)/cloak_tests
+ZEM_BUILD := $(BUILD)/zem
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -101,7 +102,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 .PHONY: \
 	all clean zas zld zrun zlnt zop zxc zxc-lib zir dirs install \
-	build pipeline bump bump-version dist dist-$(PLATFORM) \
+	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
   zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
   integrator-pack dist-integrator-pack \
@@ -117,12 +118,12 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld zrun zlnt zop zxc zir zasm-bin-wrap
+build: zas zld zrun zlnt zop zxc zir zem zasm-bin-wrap
 
 pipeline: build
 	./scripts/pipeline.sh --skip-build
 
-install: zas zld zrun zlnt zop zxc zir zasm-bin-wrap
+install: zas zld zrun zlnt zop zxc zir zem zasm-bin-wrap
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@cp tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
@@ -132,9 +133,10 @@ install: zas zld zrun zlnt zop zxc zir zasm-bin-wrap
 	@install -m 0755 $(BIN)/zop $(DESTDIR)$(BINDIR)/zop
 	@install -m 0755 $(BIN)/zxc $(DESTDIR)$(BINDIR)/zxc
 	@install -m 0755 $(BIN)/zir $(DESTDIR)$(BINDIR)/zir
+	@install -m 0755 $(BIN)/zem $(DESTDIR)$(BINDIR)/zem
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -544,6 +546,40 @@ zld: $(ZLD_OBJ) | dirs
 	ln -sf $(PLATFORM)/zld $(BIN_ROOT)/zld
 
 .PHONY: zld
+
+# ---- zem (IR v1.1 emulator) ----
+
+ZEM_HOST_BUILD := $(BUILD)/zem_host
+ZEM_HOST_LIBZING := $(ZEM_HOST_BUILD)/libzingcore.a
+ZEM_HOST_LIBHOPPER := $(ZEM_HOST_BUILD)/libhopper.a
+
+ZEM_OBJ := \
+	$(ZEM_BUILD)/main.o \
+	$(ZEM_BUILD)/zem.o \
+	$(ZEM_BUILD)/jsonl.o
+
+$(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@
+
+$(ZEM_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
+
+zem-host: $(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER)
+
+$(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER): | dirs
+	$(MAKE) -C src/zem/host \
+	  BUILD="$(abspath $(ZEM_HOST_BUILD))" \
+	  CC="$(CC)" \
+	  CFLAGS="$(CFLAGS)" \
+	  AR="$(AR)" \
+	  ARFLAGS="$(ARFLAGS)" \
+	  $(abspath $(ZEM_HOST_LIBZING)) $(abspath $(ZEM_HOST_LIBHOPPER))
+
+zem: zem-host $(ZEM_OBJ) | dirs
+	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER) -o $(BIN)/zem $(LDFLAGS)
+	ln -sf $(PLATFORM)/zem $(BIN_ROOT)/zem
+
+.PHONY: zem zem-host
 
 # ---- zop (opcode JSONL -> raw bytes) ----
 
