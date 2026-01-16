@@ -20,6 +20,29 @@ typedef struct {
   uint64_t last_cmp_rhs;
 } zem_regs_t;
 
+typedef enum {
+  ZEM_REG_HL = 0,
+  ZEM_REG_DE = 1,
+  ZEM_REG_BC = 2,
+  ZEM_REG_IX = 3,
+  ZEM_REG_A = 4,
+  ZEM_REG_CMP_LHS = 5,
+  ZEM_REG_CMP_RHS = 6,
+  ZEM_REG__COUNT = 7,
+} zem_regid_t;
+
+typedef struct {
+  uint32_t pc;
+  const char *label;    // borrowed (points into rec storage)
+  int line;             // IR loc.line (or -1)
+  const char *mnemonic; // borrowed (points into rec storage)
+  int has;
+} zem_regprov_entry_t;
+
+typedef struct {
+  zem_regprov_entry_t v[ZEM_REG__COUNT];
+} zem_regprov_t;
+
 typedef struct {
   int enabled;
   int trace;
@@ -29,6 +52,15 @@ typedef struct {
   int repl_no_prompt;
   int debug_events;
   int debug_events_only;
+  // Trace filtering (optional). If any filters are set, step trace is reduced.
+  int trace_pc_range;
+  uint32_t trace_pc_lo;
+  uint32_t trace_pc_hi;
+  char trace_mnemonics[32][16];
+  size_t trace_nmnemonics;
+  char trace_call_targets[32][64];
+  size_t trace_ncall_targets;
+  uint32_t trace_sample_n; // 0/1 => no sampling, N => emit 1 out of N steps
   // Breakpoints are PC values (record indices).
   uint32_t break_pcs[256];
   size_t nbreak_pcs;
@@ -38,6 +70,16 @@ typedef struct {
   uint32_t v[256];
   size_t n;
 } zem_u32set_t;
+
+typedef struct {
+  uint32_t pc;
+  char *expr; // heap-allocated condition string (NULL means unconditional)
+} zem_bpcond_t;
+
+typedef struct {
+  zem_bpcond_t v[128];
+  size_t n;
+} zem_bpcondset_t;
 
 void zem_u32set_clear(zem_u32set_t *s);
 int zem_u32set_add_unique(zem_u32set_t *s, uint32_t v);
@@ -67,6 +109,10 @@ typedef struct {
   uint32_t size; // 1/2/4/8
   uint64_t last;
   int has_last;
+  uint32_t last_write_pc;
+  const char *last_write_label;
+  int last_write_line;
+  int has_last_write;
 } zem_watch_t;
 
 typedef struct {

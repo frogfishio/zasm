@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+int zem_failf(const char *fmt, ...);
+
 #include "zem_types.h"
 
 void zem_json_escape(FILE *out, const char *s);
@@ -18,6 +20,16 @@ int zem_jump_to_label(const zem_symtab_t *labels, const char *label, size_t *pc)
 
 int zem_mem_check_span(const zem_buf_t *mem, uint32_t addr, uint32_t len);
 
+const char *zem_regid_name(zem_regid_t id);
+void zem_regprov_clear(zem_regprov_t *p);
+void zem_regprov_note(zem_regprov_t *p, zem_regid_t id, uint32_t pc,
+					  const char *label, int line, const char *mnemonic);
+
+void zem_bpcondset_clear(zem_bpcondset_t *s);
+const char *zem_bpcondset_get(const zem_bpcondset_t *s, uint32_t pc);
+int zem_bpcondset_set(zem_bpcondset_t *s, uint32_t pc, const char *expr);
+int zem_bpcondset_remove(zem_bpcondset_t *s, uint32_t pc);
+
 uint32_t zem_rotl32(uint32_t x, uint32_t r);
 uint32_t zem_rotr32(uint32_t x, uint32_t r);
 uint32_t zem_clz32(uint32_t x);
@@ -29,3 +41,6 @@ uint64_t zem_rotr64(uint64_t x, uint64_t r);
 uint64_t zem_clz64(uint64_t x);
 uint64_t zem_ctz64(uint64_t x);
 uint64_t zem_popc64(uint64_t x);
+
+void zem_watchset_note_write(zem_watchset_t *ws, uint32_t addr, uint32_t len,
+							 uint32_t pc, const char *label, int line);

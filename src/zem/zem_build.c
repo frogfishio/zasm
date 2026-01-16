@@ -4,19 +4,92 @@
 #include "zem_build.h"
 
 #include <errno.h>
+#include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "zem_util.h"
 
-int zem_build_program(const char **inputs, int ninputs, recvec_t *out_recs) {
+static const char *rec_kind_str(rec_kind_t k) {
+  switch (k) {
+    case JREC_INSTR:
+      return "instr";
+    case JREC_DIR:
+      return "dir";
+    case JREC_LABEL:
+      return "label";
+    default:
+      return "none";
+  }
+}
+
+static int zem_build_fail_at(size_t rec_idx, const record_t *r, const char *fmt,
+                             ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("zem: error: ", stderr);
+  vfprintf(stderr, fmt, ap);
+  fputc('\n', stderr);
+  va_end(ap);
+
+  fprintf(stderr, "record=%zu kind=%s\n", rec_idx,
+          rec_kind_str(r ? r->k : JREC_NONE));
+  if (r && r->line >= 0) {
+    fprintf(stderr, "line=%d\n", r->line);
+  }
+  if (r) {
+    if (r->k == JREC_DIR && r->d) {
+      fprintf(stderr, "dir=%s\n", r->d);
+      if (r->name) fprintf(stderr, "name=%s\n", r->name);
+    } else if (r->k == JREC_INSTR && r->m) {
+      fprintf(stderr, "instr=%s\n", r->m);
+    } else if (r->k == JREC_LABEL && r->label) {
+      fprintf(stderr, "label=%s\n", r->label);
+    }
+  }
+  return 2;
+}
+
+static int ensure_src_cap(const char ***v, size_t *cap, size_t need) {
+  if (!v || !cap) return 0;
+  if (*cap >= need) return 1;
+  size_t newcap = (*cap == 0) ? 256 : (*cap * 2);
+  while (newcap < need) newcap *= 2;
+  const char **nv = (const char **)realloc((void *)*v, newcap * sizeof(**v));
+  if (!nv) return 0;
+  *v = nv;
+  *cap = newcap;
+  return 1;
+}
+
+int zem_build_program(const char **inputs, int ninputs, recvec_t *out_recs,
+                      const char ***out_pc_srcs) {
   recvec_init(out_recs);
+  const char **pc_srcs = NULL;
+  size_t pc_srcs_cap = 0;
+
+  int used_stdin = 0;
+
   for (int fi = 0; fi < ninputs; fi++) {
     const char *path = inputs[fi];
-    FILE *f = fopen(path, "rb");
-    if (!f) {
-      fprintf(stderr, "zem: cannot open %s: %s\n", path, strerror(errno));
-      return 2;
+    FILE *f = NULL;
+    if (strcmp(path, "-") == 0) {
+      if (used_stdin) {
+        int rc = zem_failf("stdin ('-') specified more than once");
+        recvec_free(out_recs);
+        free(pc_srcs);
+        return rc;
+      }
+      used_stdin = 1;
+      f = stdin;
+    } else {
+      f = fopen(path, "rb");
+      if (!f) {
+        int rc = zem_failf("cannot open %s: %s", path, strerror(errno));
+        recvec_free(out_recs);
+        free(pc_srcs);
+        return rc;
+      }
     }
     char *line = NULL;
     size_t cap = 0;
@@ -31,20 +104,41 @@ int zem_build_program(const char **inputs, int ninputs, recvec_t *out_recs) {
       record_t r;
       int rc = parse_jsonl_record(line, &r);
       if (rc != 0) {
-        fprintf(stderr, "zem: parse error (%s): code=%d\n", path, rc);
+        (void)zem_failf("parse error (%s): code=%d", path, rc);
         free(line);
-        fclose(f);
+        recvec_free(out_recs);
+        if (f && f != stdin) fclose(f);
+        free(pc_srcs);
         return 2;
       }
       recvec_push(out_recs, r);
+      if (out_pc_srcs) {
+        if (!ensure_src_cap(&pc_srcs, &pc_srcs_cap, out_recs->n)) {
+          free(line);
+          if (f && f != stdin) fclose(f);
+          recvec_free(out_recs);
+          free(pc_srcs);
+          return zem_failf("OOM building source map");
+        }
+        pc_srcs[out_recs->n - 1] = path;
+      }
     }
     free(line);
-    fclose(f);
+    if (f && f != stdin) fclose(f);
   }
   if (out_recs->n == 0) {
-    fprintf(stderr, "zem: empty input\n");
-    return 2;
+    int rc = zem_failf("empty input");
+    recvec_free(out_recs);
+    free(pc_srcs);
+    return rc;
   }
+
+  if (out_pc_srcs) {
+    *out_pc_srcs = pc_srcs;
+  } else {
+    free(pc_srcs);
+  }
+
   return 0;
 }
 
@@ -94,8 +188,7 @@ int zem_build_data_and_symbols(const recvec_t *recs, zem_buf_t *mem,
     if (r->k != JREC_DIR || !r->d) continue;
     if (strcmp(r->d, "DB") == 0) {
       if (!r->name) {
-        fprintf(stderr, "zem: DB missing name (line %d)\n", r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "DB missing name");
       }
       uint32_t base = (uint32_t)mem->len;
       for (size_t a = 0; a < r->nargs; a++) {
@@ -103,83 +196,68 @@ int zem_build_data_and_symbols(const recvec_t *recs, zem_buf_t *mem,
         if (op->t == JOP_STR && op->s) {
           size_t slen = strlen(op->s);
           if (!zem_buf_append(mem, op->s, slen)) {
-            fprintf(stderr, "zem: OOM building DB\n");
-            return 2;
+            return zem_build_fail_at(i, r, "OOM building DB");
           }
         } else if (op->t == JOP_NUM) {
           uint8_t b = (uint8_t)(op->n & 0xff);
           if (!zem_buf_append(mem, &b, 1)) {
-            fprintf(stderr, "zem: OOM building DB\n");
-            return 2;
+            return zem_build_fail_at(i, r, "OOM building DB");
           }
         } else {
-          fprintf(stderr, "zem: DB arg must be str/num (line %d)\n", r->line);
-          return 2;
+          return zem_build_fail_at(i, r, "DB arg must be str/num");
         }
       }
       if (!zem_symtab_put(syms, r->name, 1, base)) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       if (!mem_align4(mem)) {
-        fprintf(stderr, "zem: OOM aligning data\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM aligning data");
       }
       continue;
     }
 
     if (strcmp(r->d, "DW") == 0) {
       if (!r->name || r->nargs != 1 || r->args[0].t != JOP_NUM) {
-        fprintf(stderr, "zem: DW expects name + one numeric arg (line %d)\n",
-                r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "DW expects name + one numeric arg");
       }
       if (!zem_symtab_put(syms, r->name, 0, (uint32_t)r->args[0].n)) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       continue;
     }
 
     if (strcmp(r->d, "RESB") == 0) {
       if (!r->name || r->nargs != 1 || r->args[0].t != JOP_NUM) {
-        fprintf(stderr, "zem: RESB expects name + one numeric arg (line %d)\n",
-                r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "RESB expects name + one numeric arg");
       }
       long v = r->args[0].n;
       if (v < 0) v = 0;
       uint32_t base = (uint32_t)mem->len;
       if (!zem_symtab_put(syms, r->name, 1, base)) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       // Allocate zero-filled bytes.
       size_t n = (size_t)v;
       if (n) {
         uint8_t *z = (uint8_t *)calloc(1, n);
         if (!z) {
-          fprintf(stderr, "zem: OOM building RESB\n");
-          return 2;
+          return zem_build_fail_at(i, r, "OOM building RESB");
         }
         int ok = zem_buf_append(mem, z, n);
         free(z);
         if (!ok) {
-          fprintf(stderr, "zem: OOM building RESB\n");
-          return 2;
+          return zem_build_fail_at(i, r, "OOM building RESB");
         }
       }
       if (!mem_align4(mem)) {
-        fprintf(stderr, "zem: OOM aligning data\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM aligning data");
       }
       continue;
     }
 
     if (strcmp(r->d, "STR") == 0) {
       if (!r->name) {
-        fprintf(stderr, "zem: STR missing name (line %d)\n", r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "STR missing name");
       }
       uint32_t base = (uint32_t)mem->len;
       size_t slen_total = 0;
@@ -188,51 +266,43 @@ int zem_build_data_and_symbols(const recvec_t *recs, zem_buf_t *mem,
         if (op->t == JOP_STR && op->s) {
           size_t slen = strlen(op->s);
           if (!zem_buf_append(mem, op->s, slen)) {
-            fprintf(stderr, "zem: OOM building STR\n");
-            return 2;
+            return zem_build_fail_at(i, r, "OOM building STR");
           }
           slen_total += slen;
         } else if (op->t == JOP_NUM) {
           uint8_t b = (uint8_t)(op->n & 0xff);
           if (!zem_buf_append(mem, &b, 1)) {
-            fprintf(stderr, "zem: OOM building STR\n");
-            return 2;
+            return zem_build_fail_at(i, r, "OOM building STR");
           }
           slen_total += 1;
         } else {
-          fprintf(stderr, "zem: STR arg must be str/num (line %d)\n", r->line);
-          return 2;
+          return zem_build_fail_at(i, r, "STR arg must be str/num");
         }
       }
       if (!zem_symtab_put(syms, r->name, 1, base)) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       // Auto-define <name>_len as a constant.
       size_t len_name_len = strlen(r->name) + 5;
       char *len_name = (char *)malloc(len_name_len);
       if (!len_name) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       snprintf(len_name, len_name_len, "%s_len", r->name);
       int ok = zem_symtab_put(syms, len_name, 0, (uint32_t)slen_total);
       free(len_name);
       if (!ok) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       if (!mem_align4(mem)) {
-        fprintf(stderr, "zem: OOM aligning data\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM aligning data");
       }
       continue;
     }
 
     if (strcmp(r->d, "EQU") == 0) {
       if (!r->name || r->nargs != 1) {
-        fprintf(stderr, "zem: EQU expects name + one arg (line %d)\n", r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "EQU expects name + one arg");
       }
       uint32_t v = 0;
       const operand_t *a = &r->args[0];
@@ -240,16 +310,13 @@ int zem_build_data_and_symbols(const recvec_t *recs, zem_buf_t *mem,
         v = (uint32_t)a->n;
       } else if (a->t == JOP_SYM && a->s) {
         if (!op_to_u32(syms, NULL, a, &v)) {
-          fprintf(stderr, "zem: EQU unresolved symbol %s (line %d)\n", a->s, r->line);
-          return 2;
+          return zem_build_fail_at(i, r, "EQU unresolved symbol %s", a->s);
         }
       } else {
-        fprintf(stderr, "zem: EQU arg must be num/sym (line %d)\n", r->line);
-        return 2;
+        return zem_build_fail_at(i, r, "EQU arg must be num/sym");
       }
       if (!zem_symtab_put(syms, r->name, 0, v)) {
-        fprintf(stderr, "zem: OOM adding symbol\n");
-        return 2;
+        return zem_build_fail_at(i, r, "OOM adding symbol");
       }
       continue;
     }
@@ -269,8 +336,7 @@ int zem_build_label_index(const recvec_t *recs, zem_symtab_t *labels) {
     const record_t *r = &recs->v[i];
     if (r->k != JREC_LABEL || !r->label) continue;
     if (!zem_symtab_put(labels, r->label, 0, (uint32_t)i)) {
-      fprintf(stderr, "zem: OOM adding label\n");
-      return 2;
+      return zem_build_fail_at(i, r, "OOM adding label");
     }
   }
   return 0;

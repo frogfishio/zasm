@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 
 #include "zem_exec.h"
 
@@ -77,6 +78,171 @@ static int mem_store_u64le(zem_buf_t *mem, uint32_t addr, uint64_t v) {
   return zem_mem_store_u64le(mem, addr, v);
 }
 
+static int regid_from_ptr(const zem_regs_t *regs, const uint64_t *dst,
+                          zem_regid_t *out) {
+  if (!regs || !dst || !out) return 0;
+  if (dst == &regs->HL) {
+    *out = ZEM_REG_HL;
+    return 1;
+  }
+  if (dst == &regs->DE) {
+    *out = ZEM_REG_DE;
+    return 1;
+  }
+  if (dst == &regs->BC) {
+    *out = ZEM_REG_BC;
+    return 1;
+  }
+  if (dst == &regs->IX) {
+    *out = ZEM_REG_IX;
+    return 1;
+  }
+  if (dst == &regs->A) {
+    *out = ZEM_REG_A;
+    return 1;
+  }
+  return 0;
+}
+
+static void note_reg_write_ptr(zem_regprov_t *prov, const zem_regs_t *regs,
+                               const uint64_t *dst, uint32_t pc,
+                               const char *label, int line,
+                               const char *mnemonic) {
+  if (!prov) return;
+  zem_regid_t id;
+  if (!regid_from_ptr(regs, dst, &id)) return;
+  zem_regprov_note(prov, id, pc, label, line, mnemonic);
+}
+
+static const char *bpcond_skip_ws(const char *p) {
+  while (p && (*p == ' ' || *p == '\t')) p++;
+  return p;
+}
+
+static void bpcond_rstrip_ws(char *s) {
+  if (!s) return;
+  size_t n = strlen(s);
+  while (n && (s[n - 1] == ' ' || s[n - 1] == '\t')) {
+    s[--n] = 0;
+  }
+}
+
+static int bpcond_parse_u64_value(const char *s, const zem_regs_t *regs,
+                                  const zem_symtab_t *syms, uint64_t *out) {
+  if (!s || !out) return 0;
+  s = bpcond_skip_ws(s);
+  if (*s == 0) return 0;
+
+  if (regs) {
+    if (str_ieq(s, "HL")) {
+      *out = regs->HL;
+      return 1;
+    }
+    if (str_ieq(s, "DE")) {
+      *out = regs->DE;
+      return 1;
+    }
+    if (str_ieq(s, "BC")) {
+      *out = regs->BC;
+      return 1;
+    }
+    if (str_ieq(s, "IX")) {
+      *out = regs->IX;
+      return 1;
+    }
+    if (str_ieq(s, "A")) {
+      *out = regs->A;
+      return 1;
+    }
+    if (str_ieq(s, "CMP_LHS")) {
+      *out = regs->last_cmp_lhs;
+      return 1;
+    }
+    if (str_ieq(s, "CMP_RHS")) {
+      *out = regs->last_cmp_rhs;
+      return 1;
+    }
+  }
+
+  if (syms) {
+    int ignored_is_ptr = 0;
+    uint32_t v = 0;
+    if (zem_symtab_get(syms, s, &ignored_is_ptr, &v)) {
+      *out = (uint64_t)v;
+      return 1;
+    }
+  }
+
+  char *end = NULL;
+  unsigned long long v = strtoull(s, &end, 0);
+  if (!end || end == s) return 0;
+  *out = (uint64_t)v;
+  return 1;
+}
+
+static int bpcond_eval(const char *expr, const zem_regs_t *regs,
+                       const zem_symtab_t *syms, int *out_bool) {
+  if (!out_bool) return 0;
+  *out_bool = 0;
+  if (!expr) return 0;
+
+  const char *p = bpcond_skip_ws(expr);
+  if (*p == 0) return 0;
+
+  const char *op = NULL;
+  const char *op_s = NULL;
+  const char *ops[] = {"==", "!=", "<=", ">=", "<", ">"};
+  for (size_t i = 0; i < (sizeof(ops) / sizeof(ops[0])); i++) {
+    const char *hit = strstr(p, ops[i]);
+    if (!hit) continue;
+    if (!op || hit < op) {
+      op = hit;
+      op_s = ops[i];
+    }
+  }
+
+  if (!op) {
+    uint64_t v = 0;
+    if (!bpcond_parse_u64_value(p, regs, syms, &v)) return 0;
+    *out_bool = (v != 0);
+    return 1;
+  }
+
+  char lhs_buf[128];
+  char rhs_buf[128];
+  size_t lhs_len = (size_t)(op - p);
+  size_t op_len = strlen(op_s);
+  const char *rhs = op + op_len;
+
+  if (lhs_len >= sizeof(lhs_buf)) return 0;
+  memcpy(lhs_buf, p, lhs_len);
+  lhs_buf[lhs_len] = 0;
+  bpcond_rstrip_ws(lhs_buf);
+
+  rhs = bpcond_skip_ws(rhs);
+  size_t rhs_len = strlen(rhs);
+  if (rhs_len >= sizeof(rhs_buf)) return 0;
+  memcpy(rhs_buf, rhs, rhs_len + 1);
+  bpcond_rstrip_ws(rhs_buf);
+
+  uint64_t a = 0;
+  uint64_t b = 0;
+  if (!bpcond_parse_u64_value(bpcond_skip_ws(lhs_buf), regs, syms, &a)) return 0;
+  if (!bpcond_parse_u64_value(bpcond_skip_ws(rhs_buf), regs, syms, &b)) return 0;
+
+  int r = 0;
+  if (strcmp(op_s, "==") == 0) r = (a == b);
+  else if (strcmp(op_s, "!=") == 0) r = (a != b);
+  else if (strcmp(op_s, "<=") == 0) r = (a <= b);
+  else if (strcmp(op_s, ">=") == 0) r = (a >= b);
+  else if (strcmp(op_s, "<") == 0) r = (a < b);
+  else if (strcmp(op_s, ">") == 0) r = (a > b);
+  else return 0;
+
+  *out_bool = r;
+  return 1;
+}
+
 static int memop_addr_u32(const zem_symtab_t *syms, const zem_regs_t *regs,
                           const operand_t *memop, uint32_t *out_addr) {
   return zem_memop_addr_u32(syms, regs, memop, out_addr);
@@ -96,6 +262,180 @@ static int mem_grow_zero(zem_buf_t *mem, size_t new_len) {
 static int heap_alloc4(zem_buf_t *mem, uint32_t *heap_top, uint32_t size,
                        uint32_t *out_ptr) {
   return zem_heap_alloc4(mem, heap_top, size, out_ptr);
+}
+
+static void zem_diag_print_operand(FILE *out, const operand_t *o) {
+  if (!out || !o) return;
+  switch (o->t) {
+    case JOP_NUM:
+      fprintf(out, "%ld", o->n);
+      return;
+    case JOP_SYM:
+      fputs(o->s ? o->s : "(null)", out);
+      return;
+    case JOP_STR:
+      if (o->s) {
+        fputc('"', out);
+        for (const unsigned char *p = (const unsigned char *)o->s; *p; p++) {
+          unsigned char c = *p;
+          if (c == '\\') {
+            fputs("\\\\", out);
+          } else if (c == '"') {
+            fputs("\\\"", out);
+          } else if (c == '\n') {
+            fputs("\\n", out);
+          } else if (c == '\r') {
+            fputs("\\r", out);
+          } else if (c == '\t') {
+            fputs("\\t", out);
+          } else if (c >= 0x20 && c <= 0x7e) {
+            fputc((int)c, out);
+          } else {
+            fprintf(out, "\\x%02x", (unsigned)c);
+          }
+        }
+        fputc('"', out);
+      } else {
+        fputs("\"\"", out);
+      }
+      return;
+    case JOP_MEM:
+      fputc('(', out);
+      fputs(o->s ? o->s : "(null)", out);
+      if (o->disp) {
+        if (o->disp > 0)
+          fprintf(out, "+%ld", o->disp);
+        else
+          fprintf(out, "%ld", o->disp);
+      }
+      fputc(')', out);
+      if (o->size > 0) fprintf(out, ":%d", o->size);
+      return;
+    default:
+      fputs("(op?)", out);
+      return;
+  }
+}
+
+static void zem_diag_print_record(FILE *out, const record_t *r) {
+  if (!out || !r) return;
+  fputs("record: ", out);
+  if (r->k == JREC_INSTR) {
+    fputs(r->m ? r->m : "(null)", out);
+    if (r->nops) fputc(' ', out);
+    for (size_t i = 0; i < r->nops; i++) {
+      if (i) fputs(", ", out);
+      zem_diag_print_operand(out, &r->ops[i]);
+    }
+    fputc('\n', out);
+    return;
+  }
+  if (r->k == JREC_DIR) {
+    fputs(r->d ? r->d : "(null)", out);
+    if (r->name) {
+      fputc(' ', out);
+      fputs(r->name, out);
+    }
+    if (r->nargs) fputc(' ', out);
+    for (size_t i = 0; i < r->nargs; i++) {
+      if (i) fputs(", ", out);
+      zem_diag_print_operand(out, &r->args[i]);
+    }
+    fputc('\n', out);
+    return;
+  }
+  if (r->k == JREC_LABEL) {
+    fputs("label ", out);
+    fputs(r->label ? r->label : "(null)", out);
+    fputc('\n', out);
+    return;
+  }
+  fputs("(unknown)\n", out);
+}
+
+static void zem_diag_try_print_bytes_obj(FILE *out, const zem_buf_t *mem,
+                                        const char *name, uint64_t reg_u64) {
+  if (!out || !mem || !name) return;
+  uint32_t obj = (uint32_t)reg_u64;
+  if (obj == 0) return;
+  uint32_t ptr = 0;
+  uint32_t len = 0;
+  if (!zem_bytes_view(mem, obj, &ptr, &len)) return;
+
+  fprintf(out, "%s looks like bytes/str: ptr=0x%08" PRIx32 " len=%" PRIu32,
+          name, ptr, len);
+  if (!zem_mem_check_span(mem, ptr, len)) {
+    fputs(" (<oob>)\n", out);
+    return;
+  }
+
+  fputs(" preview=\"", out);
+  uint32_t n = len;
+  if (n > 64) n = 64;
+  for (uint32_t i = 0; i < n; i++) {
+    unsigned char c = mem->bytes[ptr + i];
+    if (c == '\\') {
+      fputs("\\\\", out);
+    } else if (c == '"') {
+      fputs("\\\"", out);
+    } else if (c == '\n') {
+      fputs("\\n", out);
+    } else if (c == '\r') {
+      fputs("\\r", out);
+    } else if (c == '\t') {
+      fputs("\\t", out);
+    } else if (c >= 0x20 && c <= 0x7e) {
+      fputc((int)c, out);
+    } else {
+      fputc('.', out);
+    }
+  }
+  fputc('"', out);
+  if (len > n) fputs("…", out);
+  fputc('\n', out);
+}
+
+static int zem_exec_fail_simple(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("zem: error: ", stderr);
+  vfprintf(stderr, fmt, ap);
+  fputc('\n', stderr);
+  va_end(ap);
+  return 2;
+}
+
+static int zem_exec_fail_at(size_t pc, const record_t *r,
+                            const char *const *pc_labels,
+                            const uint32_t *stack, size_t sp,
+                            const zem_regs_t *regs, const zem_buf_t *mem,
+                            const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("zem: error: ", stderr);
+  vfprintf(stderr, fmt, ap);
+  fputc('\n', stderr);
+  va_end(ap);
+
+  if (r && r->line >= 0) {
+    fprintf(stderr, "line=%d\n", r->line);
+  }
+  if (regs) {
+    zem_dbg_print_regs(stderr, regs);
+  }
+  if (stack || sp) {
+    zem_dbg_print_bt(stderr, stack, sp, pc_labels, 0, pc);
+  } else {
+    fprintf(stderr, "pc=%zu\n", pc);
+  }
+  if (r) {
+    zem_diag_print_record(stderr, r);
+  }
+  if (regs && mem) {
+    zem_diag_try_print_bytes_obj(stderr, mem, "HL", regs->HL);
+    zem_diag_try_print_bytes_obj(stderr, mem, "DE", regs->DE);
+  }
+  return 2;
 }
 
 static int op_to_u32(const zem_symtab_t *syms, const zem_regs_t *regs,
@@ -186,14 +526,18 @@ static int op_to_u64(const zem_symtab_t *syms, const zem_regs_t *regs,
 
 int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                      const zem_symtab_t *syms, const zem_symtab_t *labels,
-                     const zem_dbg_cfg_t *dbg_cfg) {
+                     const zem_dbg_cfg_t *dbg_cfg, const char *const *pc_srcs,
+                     const char *stdin_source_name) {
+  int rc = 0;
+  const char **pc_labels = NULL;
+  zem_op_t *ops = NULL;
   zem_regs_t regs;
   memset(&regs, 0, sizeof(regs));
 
   // Establish a simple bump heap above static data.
   if (!mem_align4(mem)) {
-    fprintf(stderr, "zem: OOM aligning heap base\n");
-    return 2;
+    rc = zem_exec_fail_simple("OOM aligning heap base");
+    goto done;
   }
   uint32_t heap_top = (uint32_t)mem->len;
 
@@ -220,6 +564,24 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   // Configure the global mem trace context for helper functions.
   zem_trace_set_mem_enabled(trace_mem_enabled);
 
+  // Configure trace step filters (optional).
+  zem_trace_clear_step_filters();
+  if (dbg_cfg) {
+    if (dbg_cfg->trace_pc_range) {
+      zem_trace_set_step_filter_pc_range(1, dbg_cfg->trace_pc_lo,
+                                         dbg_cfg->trace_pc_hi);
+    }
+    for (size_t i = 0; i < dbg_cfg->trace_nmnemonics; i++) {
+      zem_trace_add_step_filter_mnemonic(dbg_cfg->trace_mnemonics[i]);
+    }
+    for (size_t i = 0; i < dbg_cfg->trace_ncall_targets; i++) {
+      zem_trace_add_step_filter_call_target(dbg_cfg->trace_call_targets[i]);
+    }
+    if (dbg_cfg->trace_sample_n > 1) {
+      zem_trace_set_step_sample_n(dbg_cfg->trace_sample_n);
+    }
+  }
+
   zem_u32set_t breakpoints;
   memset(&breakpoints, 0, sizeof(breakpoints));
   if (dbg_cfg) {
@@ -228,12 +590,14 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
   }
 
-  const char **pc_labels = NULL;
+  zem_bpcondset_t bpconds;
+  memset(&bpconds, 0, sizeof(bpconds));
+
   if (dbg_enabled) {
     pc_labels = (const char **)calloc(recs->n ? recs->n : 1, sizeof(char *));
     if (!pc_labels) {
-      fprintf(stderr, "zem: OOM building debug label map\n");
-      return 2;
+      rc = zem_exec_fail_simple("OOM building debug label map");
+      goto done;
     }
     for (size_t i = 0; i < recs->n; i++) {
       const record_t *r = &recs->v[i];
@@ -243,11 +607,10 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
   }
 
-  zem_op_t *ops = (zem_op_t *)calloc(recs->n ? recs->n : 1, sizeof(zem_op_t));
+  ops = (zem_op_t *)calloc(recs->n ? recs->n : 1, sizeof(zem_op_t));
   if (!ops) {
-    if (pc_labels) free(pc_labels);
-    fprintf(stderr, "zem: OOM building opcode map\n");
-    return 2;
+    rc = zem_exec_fail_simple("OOM building opcode map");
+    goto done;
   }
   for (size_t i = 0; i < recs->n; i++) {
     const record_t *r = &recs->v[i];
@@ -278,9 +641,22 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   size_t pc = 0;
   zem_watchset_t watches;
   memset(&watches, 0, sizeof(watches));
+  zem_regprov_t regprov;
+  zem_regprov_clear(&regprov);
+  const char *cur_label = NULL;
   while (pc < recs->n) {
     const record_t *r = &recs->v[pc];
     const zem_op_t op = ops[pc];
+
+    int stop_bp_hit = 0;
+    uint32_t stop_bp_pc = 0;
+    const char *stop_bp_cond = NULL;
+    int stop_bp_cond_ok = 1;
+    int stop_bp_cond_result = 0;
+
+    if (pc_labels && pc < recs->n && pc_labels[pc]) {
+      cur_label = pc_labels[pc];
+    }
 
     if (trace_enabled && trace_pending) {
       zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
@@ -302,8 +678,31 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         should_break = 1;
         if (stop_reason == DBG_STOP_UNKNOWN) stop_reason = DBG_STOP_PAUSED;
       } else if (zem_u32set_contains(&breakpoints, (uint32_t)pc)) {
-        should_break = 1;
-        stop_reason = DBG_STOP_BREAKPOINT;
+        int ok = 1;
+        int cond_true = 1;
+        const char *cond = zem_bpcondset_get(&bpconds, (uint32_t)pc);
+        stop_bp_hit = 1;
+        stop_bp_pc = (uint32_t)pc;
+        stop_bp_cond = cond;
+        if (cond && *cond) {
+          cond_true = 0;
+          ok = bpcond_eval(cond, &regs, syms, &cond_true);
+        }
+        if (!ok) {
+          // Condition should have been validated when installed; fail-safe break.
+          should_break = 1;
+          stop_reason = DBG_STOP_BREAKPOINT;
+          stop_bp_cond_ok = 0;
+          stop_bp_cond_result = 1;
+        } else if (cond_true) {
+          should_break = 1;
+          stop_reason = DBG_STOP_BREAKPOINT;
+          stop_bp_cond_ok = 1;
+          stop_bp_cond_result = 1;
+        } else {
+          // Breakpoint present but condition evaluated false: no stop; clear.
+          stop_bp_hit = 0;
+        }
       } else if (next_active && sp == next_until_sp &&
                  pc == (size_t)next_target_pc) {
         should_break = 1;
@@ -318,19 +717,23 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (should_break) {
         if (debug_events) {
           zem_dbg_emit_stop_event(stderr, stop_reason, recs, pc_labels, pc,
-                                  &regs, sp, &breakpoints, &watches, mem);
+                                 pc_srcs, stdin_source_name, &regs, stack, sp,
+                                 &regprov, stop_bp_hit, stop_bp_pc,
+                                 stop_bp_cond, stop_bp_cond_ok,
+                                 stop_bp_cond_result, &breakpoints, &watches,
+                                 mem);
         }
         if (!debug_events_only) {
-          zem_dbg_print_watches(stderr, &watches, mem);
+          zem_dbg_print_watches(stderr, &watches, mem, pc_labels, recs->n);
         }
         dbg_run_mode_t chosen = run_mode;
-        if (!zem_dbg_repl(recs, labels, pc_labels, pc, &regs, mem, stack, sp,
-                          &breakpoints, &chosen, &next_target_pc,
-                          &finish_target_sp, repl_in, repl_no_prompt,
-                          stop_reason, &watches, debug_events_only)) {
-          free(ops);
-          if (pc_labels) free(pc_labels);
-          return 0;
+        if (!zem_dbg_repl(recs, labels, syms, pc_labels, pc, &regs, &regprov,
+                          mem, stack, sp, &breakpoints, &bpconds, &chosen,
+                          &next_target_pc, &finish_target_sp, repl_in,
+                          repl_no_prompt, stop_reason, &watches,
+                          debug_events_only)) {
+          rc = 0;
+          goto done;
         }
         run_mode = chosen;
         paused = 0;
@@ -361,9 +764,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (r->k != JREC_INSTR || !r->m) {
-      fprintf(stderr, "zem: unsupported record at idx=%zu\n", pc);
-      if (pc_labels) free(pc_labels);
-      return 2;
+      rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                            "unsupported record");
+      goto done;
     }
 
     if (trace_mem_enabled) {
@@ -386,8 +789,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
     if (op == ZEM_OP_LD) {
       if (r->nops != 2) {
-        fprintf(stderr, "zem: LD expects 2 operands (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "LD expects 2 operands");
+        goto done;
       }
 
       // Memory load/store subset (must be checked before generic reg assignment):
@@ -399,17 +803,18 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
           strcmp(r->ops[0].s, "A") == 0 && r->ops[1].t == JOP_MEM) {
         uint32_t addr = 0;
         if (!memop_addr_u32(syms, &regs, &r->ops[1], &addr)) {
-          fprintf(stderr,
-                  "zem: LD A,(addr) unresolved/invalid (line %d)\n",
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "LD A,(addr) unresolved/invalid");
+          goto done;
         }
         if (!mem_check_span(mem, addr, 1)) {
-          fprintf(stderr, "zem: LD A,(mem) out of bounds (line %d)\n",
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "LD A,(mem) out of bounds");
+          goto done;
         }
         regs.A = (uint64_t)(uint32_t)mem->bytes[addr];
+        zem_regprov_note(&regprov, ZEM_REG_A, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -417,22 +822,25 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (r->nops == 2 && r->ops[0].t == JOP_MEM) {
         uint32_t addr = 0;
         if (!memop_addr_u32(syms, &regs, &r->ops[0], &addr)) {
-          fprintf(stderr,
-                  "zem: LD (addr),x unresolved/invalid (line %d)\n",
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "LD (addr),x unresolved/invalid");
+          goto done;
         }
         if (!mem_check_span(mem, addr, 1)) {
-          fprintf(stderr, "zem: LD (mem),x out of bounds (line %d)\n",
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "LD (mem),x out of bounds");
+          goto done;
         }
         uint32_t v = 0;
         if (!op_to_u32(syms, &regs, &r->ops[1], &v)) {
-          fprintf(stderr, "zem: unresolved LD store rhs (line %d)\n", r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unresolved LD store rhs");
+          goto done;
         }
         mem->bytes[addr] = (uint8_t)(v & 0xffu);
+        zem_watchset_note_write(&watches, addr, 1u, (uint32_t)pc,
+                                cur_label,
+                                r->line);
         pc++;
         continue;
       }
@@ -441,71 +849,83 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (r->ops[0].t == JOP_SYM && r->ops[0].s) {
         uint64_t *dst = NULL;
         if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-          fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unknown register %s", r->ops[0].s);
+          goto done;
         }
         uint32_t v = 0;
         if (!op_to_u32(syms, &regs, &r->ops[1], &v)) {
-          fprintf(stderr, "zem: unresolved LD rhs (line %d)\n", r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unresolved LD rhs");
+          goto done;
         }
         *dst = (uint64_t)v;
+        note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                           r->line, r->m);
         pc++;
         continue;
       }
 
-      fprintf(stderr, "zem: unsupported LD form (line %d)\n", r->line);
-      return 2;
+      rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                            "unsupported LD form");
+      goto done;
     }
 
     if (op == ZEM_OP_INC) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: INC expects one register (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "INC expects one register");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       *dst = (uint64_t)(uint32_t)((uint32_t)(*dst) + 1u);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_DEC) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: DEC expects one register (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "DEC expects one register");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       *dst = (uint64_t)(uint32_t)((uint32_t)(*dst) - 1u);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_ADD || op == ZEM_OP_SUB) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t rhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       uint32_t a = (uint32_t)(*dst);
       if (op == ZEM_OP_ADD) {
@@ -514,99 +934,116 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         a = (uint32_t)(a - rhs);
       }
       *dst = (uint64_t)a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_ADD64 || op == ZEM_OP_SUB64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t rhs = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       if (op == ZEM_OP_ADD64) {
         *dst = (uint64_t)((uint64_t)(*dst) + (uint64_t)rhs);
       } else {
         *dst = (uint64_t)((uint64_t)(*dst) - (uint64_t)rhs);
       }
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_AND || op == ZEM_OP_OR || op == ZEM_OP_XOR) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t rhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       uint32_t a = (uint32_t)(*dst);
       if (op == ZEM_OP_AND) a = (uint32_t)(a & rhs);
       else if (op == ZEM_OP_OR) a = (uint32_t)(a | rhs);
       else a = (uint32_t)(a ^ rhs);
       *dst = (uint64_t)a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_AND64 || op == ZEM_OP_OR64 || op == ZEM_OP_XOR64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t rhs = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t a = (uint64_t)(*dst);
       if (op == ZEM_OP_AND64) a = (uint64_t)(a & rhs);
       else if (op == ZEM_OP_OR64) a = (uint64_t)(a | rhs);
       else a = (uint64_t)(a ^ rhs);
       *dst = a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_SLA || op == ZEM_OP_SRL || op == ZEM_OP_SRA) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t sh = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &sh)) {
-        fprintf(stderr, "zem: unresolved %s shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s shift", r->m ? r->m : "(null)");
+        goto done;
       }
       sh &= 31u;
       uint32_t a = (uint32_t)(*dst);
@@ -618,24 +1055,29 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         a = (uint32_t)(((int32_t)a) >> sh);
       }
       *dst = (uint64_t)a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_SLA64 || op == ZEM_OP_SRL64 || op == ZEM_OP_SRA64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t sh = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &sh)) {
-        fprintf(stderr, "zem: unresolved %s shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s shift", r->m ? r->m : "(null)");
+        goto done;
       }
       sh &= 63u;
       uint64_t a = (uint64_t)(*dst);
@@ -647,50 +1089,62 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         a = (uint64_t)(((int64_t)a) >> sh);
       }
       *dst = a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_ROL || op == ZEM_OP_ROR) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t sh = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &sh)) {
-        fprintf(stderr, "zem: unresolved %s shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint32_t a = (uint32_t)(*dst);
       a = (op == ZEM_OP_ROL) ? rotl32(a, sh) : rotr32(a, sh);
       *dst = (uint64_t)a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_ROL64 || op == ZEM_OP_ROR64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t sh = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &sh)) {
-        fprintf(stderr, "zem: unresolved %s shift (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s shift", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t a = (uint64_t)(*dst);
       a = (op == ZEM_OP_ROL64) ? rotl64(a, sh) : rotr64(a, sh);
       *dst = a;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
@@ -698,18 +1152,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     if (op == ZEM_OP_MUL || op == ZEM_OP_DIVS || op == ZEM_OP_DIVU ||
       op == ZEM_OP_REMS || op == ZEM_OP_REMU) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t rhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       if (op == ZEM_OP_MUL) {
         uint32_t a = (uint32_t)(*dst);
@@ -729,6 +1186,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         int32_t b = (int32_t)rhs;
         *dst = (uint64_t)(uint32_t)((b == 0) ? 0u : (uint32_t)(a % b));
       }
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
@@ -736,18 +1195,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     if (op == ZEM_OP_MUL64 || op == ZEM_OP_DIVS64 || op == ZEM_OP_DIVU64 ||
       op == ZEM_OP_REMS64 || op == ZEM_OP_REMU64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t rhs = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       if (op == ZEM_OP_MUL64) {
         *dst = (uint64_t)((uint64_t)(*dst) * (uint64_t)rhs);
@@ -766,6 +1228,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         int64_t b = (int64_t)rhs;
         *dst = (uint64_t)((b == 0) ? 0u : (uint64_t)(a % b));
       }
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
@@ -776,18 +1240,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       op == ZEM_OP_GTS || op == ZEM_OP_GTU ||
       op == ZEM_OP_GES || op == ZEM_OP_GEU) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t rhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       uint32_t a_u = (uint32_t)(*dst);
       uint32_t b_u = rhs;
@@ -805,6 +1272,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       else if (op == ZEM_OP_GTS) res = (a_s > b_s);
       else res = (a_s >= b_s);
       *dst = (uint64_t)(res ? 1u : 0u);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
@@ -815,18 +1284,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       op == ZEM_OP_GTS64 || op == ZEM_OP_GTU64 ||
       op == ZEM_OP_GES64 || op == ZEM_OP_GEU64) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg, x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg, x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t rhs = 0;
       if (!op_to_u64(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved %s rhs", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t a_u = (uint64_t)(*dst);
       uint64_t b_u = (uint64_t)rhs;
@@ -844,57 +1316,71 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       else if (op == ZEM_OP_GTS64) res = (a_s > b_s);
       else res = (a_s >= b_s);
       *dst = (uint64_t)(res ? 1u : 0u);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_CLZ || op == ZEM_OP_CTZ || op == ZEM_OP_POPC) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t a = (uint32_t)(*dst);
       if (op == ZEM_OP_CLZ) *dst = (uint64_t)clz32(a);
       else if (op == ZEM_OP_CTZ) *dst = (uint64_t)ctz32(a);
       else *dst = (uint64_t)popc32(a);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_CLZ64 || op == ZEM_OP_CTZ64 || op == ZEM_OP_POPC64) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: %s expects reg (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects reg", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint64_t a = (uint64_t)(*dst);
       if (op == ZEM_OP_CLZ64) *dst = (uint64_t)clz64(a);
       else if (op == ZEM_OP_CTZ64) *dst = (uint64_t)ctz64(a);
       else *dst = (uint64_t)popc64(a);
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_DROP) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: DROP expects reg (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "DROP expects reg");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       *dst = 0;
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label,
+                         r->line, r->m);
       pc++;
       continue;
     }
@@ -903,38 +1389,64 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         op == ZEM_OP_ST8_64 || op == ZEM_OP_ST16_64 || op == ZEM_OP_ST32_64 ||
         op == ZEM_OP_ST64) {
       if (r->nops != 2 || r->ops[0].t != JOP_MEM) {
-        fprintf(stderr, "zem: %s expects (addr), x (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects (addr), x", r->m ? r->m : "(null)");
+        goto done;
       }
       uint32_t addr = 0;
       if (!memop_addr_u32(syms, &regs, &r->ops[0], &addr)) {
-        fprintf(stderr, "zem: %s addr unresolved/invalid (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s addr unresolved/invalid", r->m ? r->m : "(null)");
+        goto done;
       }
       int ok = 0;
+      uint32_t store_len = 0;
       if (op == ZEM_OP_ST8 || op == ZEM_OP_ST16 || op == ZEM_OP_ST32) {
         uint32_t v = 0;
         if (!op_to_u32(syms, &regs, &r->ops[1], &v)) {
-          fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unresolved %s rhs", r->m ? r->m : "(null)");
+          goto done;
         }
-        if (op == ZEM_OP_ST8) ok = mem_store_u8(mem, addr, (uint8_t)(v & 0xffu));
-        else if (op == ZEM_OP_ST16) ok = mem_store_u16le(mem, addr, (uint16_t)(v & 0xffffu));
-        else ok = mem_store_u32le(mem, addr, v);
+        if (op == ZEM_OP_ST8) {
+          store_len = 1u;
+          ok = mem_store_u8(mem, addr, (uint8_t)(v & 0xffu));
+        } else if (op == ZEM_OP_ST16) {
+          store_len = 2u;
+          ok = mem_store_u16le(mem, addr, (uint16_t)(v & 0xffffu));
+        } else {
+          store_len = 4u;
+          ok = mem_store_u32le(mem, addr, v);
+        }
       } else {
         uint64_t v64 = 0;
         if (!op_to_u64(syms, &regs, &r->ops[1], &v64)) {
-          fprintf(stderr, "zem: unresolved %s rhs (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unresolved %s rhs", r->m ? r->m : "(null)");
+          goto done;
         }
-        if (op == ZEM_OP_ST8_64) ok = mem_store_u8(mem, addr, (uint8_t)(v64 & 0xffu));
-        else if (op == ZEM_OP_ST16_64) ok = mem_store_u16le(mem, addr, (uint16_t)(v64 & 0xffffu));
-        else if (op == ZEM_OP_ST32_64) ok = mem_store_u32le(mem, addr, (uint32_t)(v64 & 0xffffffffu));
-        else ok = mem_store_u64le(mem, addr, v64);
+        if (op == ZEM_OP_ST8_64) {
+          store_len = 1u;
+          ok = mem_store_u8(mem, addr, (uint8_t)(v64 & 0xffu));
+        } else if (op == ZEM_OP_ST16_64) {
+          store_len = 2u;
+          ok = mem_store_u16le(mem, addr, (uint16_t)(v64 & 0xffffu));
+        } else if (op == ZEM_OP_ST32_64) {
+          store_len = 4u;
+          ok = mem_store_u32le(mem, addr, (uint32_t)(v64 & 0xffffffffu));
+        } else {
+          store_len = 8u;
+          ok = mem_store_u64le(mem, addr, v64);
+        }
       }
       if (!ok) {
-        fprintf(stderr, "zem: %s out of bounds (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s out of bounds", r->m ? r->m : "(null)");
+        goto done;
+      }
+      if (store_len) {
+        zem_watchset_note_write(&watches, addr, store_len, (uint32_t)pc,
+                                cur_label, r->line);
       }
       pc++;
       continue;
@@ -953,13 +1465,15 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
           r->ops[1].t != JOP_MEM) {
         uint64_t *dst = NULL;
         if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-          fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unknown register %s", r->ops[0].s);
+          goto done;
         }
         uint64_t v = 0;
         if (!op_to_u64(syms, &regs, &r->ops[1], &v)) {
-          fprintf(stderr, "zem: unresolved LD64 rhs (line %d)\n", r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unresolved LD64 rhs");
+          goto done;
         }
         *dst = v;
         pc++;
@@ -967,25 +1481,29 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       }
 
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s || r->ops[1].t != JOP_MEM) {
-        fprintf(stderr, "zem: %s expects r, (addr) (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s expects r, (addr)", r->m ? r->m : "(null)");
+        goto done;
       }
       uint64_t *dst = NULL;
       if (!reg_ref(&regs, r->ops[0].s, &dst)) {
-        fprintf(stderr, "zem: unknown register %s (line %d)\n", r->ops[0].s, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown register %s", r->ops[0].s);
+        goto done;
       }
       uint32_t addr = 0;
       if (!memop_addr_u32(syms, &regs, &r->ops[1], &addr)) {
-        fprintf(stderr, "zem: %s addr unresolved/invalid (line %d)\n", r->m, r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "%s addr unresolved/invalid", r->m ? r->m : "(null)");
+        goto done;
       }
       if (op == ZEM_OP_LD8U || op == ZEM_OP_LD8S ||
           op == ZEM_OP_LD8U64 || op == ZEM_OP_LD8S64) {
         uint8_t b = 0;
         if (!mem_load_u8(mem, addr, &b)) {
-          fprintf(stderr, "zem: %s out of bounds (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "%s out of bounds", r->m ? r->m : "(null)");
+          goto done;
         }
         if (op == ZEM_OP_LD8S) {
           *dst = (uint64_t)(uint32_t)(int32_t)(int8_t)b;
@@ -1000,8 +1518,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                  op == ZEM_OP_LD16U64 || op == ZEM_OP_LD16S64) {
         uint16_t w = 0;
         if (!mem_load_u16le(mem, addr, &w)) {
-          fprintf(stderr, "zem: %s out of bounds (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "%s out of bounds", r->m ? r->m : "(null)");
+          goto done;
         }
         if (op == ZEM_OP_LD16S) {
           *dst = (uint64_t)(uint32_t)(int32_t)(int16_t)w;
@@ -1015,8 +1534,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       } else if (op == ZEM_OP_LD32 || op == ZEM_OP_LD32U64 || op == ZEM_OP_LD32S64) {
         uint32_t w = 0;
         if (!mem_load_u32le(mem, addr, &w)) {
-          fprintf(stderr, "zem: %s out of bounds (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "%s out of bounds", r->m ? r->m : "(null)");
+          goto done;
         }
         if (op == ZEM_OP_LD32) {
           *dst = (uint64_t)w;
@@ -1028,11 +1548,14 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       } else {
         uint64_t w = 0;
         if (!mem_load_u64le(mem, addr, &w)) {
-          fprintf(stderr, "zem: %s out of bounds (line %d)\n", r->m, r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "%s out of bounds", r->m ? r->m : "(null)");
+          goto done;
         }
         *dst = w;
       }
+      note_reg_write_ptr(&regprov, &regs, dst, (uint32_t)pc, cur_label, r->line,
+                         r->m);
       pc++;
       continue;
     }
@@ -1043,10 +1566,13 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       uint32_t len = (uint32_t)regs.BC;
       uint8_t val = (uint8_t)(regs.A & 0xffu);
       if (!mem_check_span(mem, dst, len)) {
-        fprintf(stderr, "zem: FILL out of bounds\n");
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "FILL out of bounds");
+        goto done;
       }
       memset(mem->bytes + dst, val, (size_t)len);
+      zem_watchset_note_write(&watches, dst, len, (uint32_t)pc, cur_label,
+                              r->line);
       pc++;
       continue;
     }
@@ -1057,31 +1583,41 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       uint32_t dst = (uint32_t)regs.DE;
       uint32_t len = (uint32_t)regs.BC;
       if (!mem_check_span(mem, src, len) || !mem_check_span(mem, dst, len)) {
-        fprintf(stderr, "zem: LDIR out of bounds\n");
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "LDIR out of bounds");
+        goto done;
       }
       memmove(mem->bytes + dst, mem->bytes + src, (size_t)len);
+      zem_watchset_note_write(&watches, dst, len, (uint32_t)pc, cur_label,
+                              r->line);
       pc++;
       continue;
     }
 
     if (op == ZEM_OP_CP) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: CP expects reg, x (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "CP expects reg, x");
+        goto done;
       }
       uint32_t lhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[0], &lhs)) {
-        fprintf(stderr, "zem: unresolved CP lhs (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved CP lhs");
+        goto done;
       }
       uint32_t rhs = 0;
       if (!op_to_u32(syms, &regs, &r->ops[1], &rhs)) {
-        fprintf(stderr, "zem: unresolved CP rhs (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unresolved CP rhs");
+        goto done;
       }
       regs.last_cmp_lhs = (uint64_t)lhs;
       regs.last_cmp_rhs = (uint64_t)rhs;
+      zem_regprov_note(&regprov, ZEM_REG_CMP_LHS, (uint32_t)pc, cur_label,
+                       r->line, r->m);
+      zem_regprov_note(&regprov, ZEM_REG_CMP_RHS, (uint32_t)pc, cur_label,
+                       r->line, r->m);
       pc++;
       continue;
     }
@@ -1089,9 +1625,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     if (op == ZEM_OP_JR) {
       if (r->nops == 1 && r->ops[0].t == JOP_SYM && r->ops[0].s) {
         if (!jump_to_label(labels, r->ops[0].s, &pc)) {
-          fprintf(stderr, "zem: unknown label %s (line %d)\n", r->ops[0].s,
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unknown label %s", r->ops[0].s);
+          goto done;
         }
         continue;
       }
@@ -1115,30 +1651,31 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         else if (str_ieq(cond, "gtu")) take = (a_u > b_u);
         else if (str_ieq(cond, "geu")) take = (a_u >= b_u);
         else {
-          fprintf(stderr, "zem: unknown JR condition %s (line %d)\n", cond,
-                  r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "unknown JR condition %s", cond);
+          goto done;
         }
         if (take) {
           if (!jump_to_label(labels, label, &pc)) {
-            fprintf(stderr, "zem: unknown label %s (line %d)\n", label,
-                    r->line);
-            return 2;
+            rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                  "unknown label %s", label);
+            goto done;
           }
           continue;
         }
         pc++;
         continue;
       }
-      fprintf(stderr, "zem: JR expects label or cond,label (line %d)\n",
-              r->line);
-      return 2;
+            rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                "JR expects label or cond,label");
+            goto done;
     }
 
     if (op == ZEM_OP_CALL) {
       if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
-        fprintf(stderr, "zem: CALL expects one symbol (line %d)\n", r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "CALL expects one symbol");
+        goto done;
       }
       const char *callee = r->ops[0].s;
 
@@ -1147,8 +1684,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         uint32_t ptr = (uint32_t)regs.HL;
         uint32_t len = (uint32_t)regs.DE;
         if (ptr > mem->len || (size_t)ptr + (size_t)len > mem->len) {
-          fprintf(stderr, "zem: _out slice out of bounds (line %d)\n", r->line);
-          return 2;
+          rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                "_out slice out of bounds");
+          goto done;
         }
         (void)res_write(1, mem->bytes + ptr, (size_t)len);
         pc++;
@@ -1172,6 +1710,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         }
         int32_t rc = res_write(handle, mem->bytes + ptr, (size_t)len);
         regs.HL = (uint64_t)(uint32_t)rc;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1215,8 +1755,12 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
           continue;
         }
         memcpy(mem->bytes + buf_ptr, tmp, (size_t)n);
+        zem_watchset_note_write(&watches, buf_ptr, (uint32_t)n, (uint32_t)pc,
+                                cur_label, r->line);
         int32_t rc = res_write(handle, mem->bytes + buf_ptr, (size_t)n);
         regs.HL = (uint64_t)(uint32_t)rc;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1258,10 +1802,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
         (void)mem_store_u32le(mem, obj_ptr + 0, 3u);
         (void)mem_store_u32le(mem, obj_ptr + 4, total);
+        const char *wlabel = cur_label;
+        zem_watchset_note_write(&watches, obj_ptr + 0, 4u, (uint32_t)pc, wlabel,
+              r->line);
+        zem_watchset_note_write(&watches, obj_ptr + 4, 4u, (uint32_t)pc, wlabel,
+              r->line);
         memcpy(mem->bytes + obj_ptr + 8, mem->bytes + a_ptr, (size_t)a_len);
         memcpy(mem->bytes + obj_ptr + 8 + a_len, mem->bytes + b_ptr, (size_t)b_len);
+        zem_watchset_note_write(&watches, obj_ptr + 8, a_len, (uint32_t)pc, wlabel,
+              r->line);
+        zem_watchset_note_write(&watches, obj_ptr + 8 + a_len, b_len, (uint32_t)pc,
+              wlabel, r->line);
 
         regs.HL = (uint64_t)obj_ptr;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1277,7 +1832,15 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
           continue;
         }
         int32_t n = req_read(handle, mem->bytes + ptr, (size_t)cap);
+        if (n > 0) {
+          uint32_t wlen = (uint32_t)n;
+          if (wlen > cap) wlen = cap;
+          zem_watchset_note_write(&watches, ptr, wlen, (uint32_t)pc, cur_label,
+                                  r->line);
+        }
         regs.HL = (uint64_t)(uint32_t)n;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1311,7 +1874,15 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
           continue;
         }
         int32_t n = req_read(0, mem->bytes + ptr, (size_t)cap);
+        if (n > 0) {
+          uint32_t wlen = (uint32_t)n;
+          if (wlen > cap) wlen = cap;
+          zem_watchset_note_write(&watches, ptr, wlen, (uint32_t)pc, cur_label,
+                                  r->line);
+        }
         regs.HL = (uint64_t)(uint32_t)n;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1355,6 +1926,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         }
         heap_top = (uint32_t)new_top_aligned;
         regs.HL = (uint64_t)ptr;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1380,7 +1953,15 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         }
         int32_t n = _ctl(mem->bytes + req_ptr, (size_t)req_len,
                          mem->bytes + resp_ptr, (size_t)resp_cap);
+        if (n > 0) {
+          uint32_t wlen = (uint32_t)n;
+          if (wlen > resp_cap) wlen = resp_cap;
+          zem_watchset_note_write(&watches, resp_ptr, wlen, (uint32_t)pc,
+                                  cur_label, r->line);
+        }
         regs.HL = (uint64_t)(uint32_t)n;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1390,6 +1971,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         int32_t idx = (int32_t)(uint32_t)regs.HL;
         int32_t v = _cap(idx);
         regs.HL = (uint64_t)(uint32_t)v;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
         pc++;
         continue;
       }
@@ -1404,15 +1987,14 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
       size_t target_pc = 0;
       if (!jump_to_label(labels, callee, &target_pc)) {
-        fprintf(stderr, "zem: unknown CALL target %s (line %d)\n", callee,
-                r->line);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "unknown CALL target %s", callee);
+        goto done;
       }
       if (sp >= MAX_STACK) {
-        fprintf(stderr, "zem: call stack overflow\n");
-        if (pc_labels) free(pc_labels);
-        free(ops);
-        return 2;
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "call stack overflow");
+        goto done;
       }
       if (trace_enabled && trace_pending) {
         trace_meta.call_has_target_pc = 1;
@@ -1431,9 +2013,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                               &trace_meta, sp);
           trace_pending = 0;
         }
-        free(ops);
-        if (pc_labels) free(pc_labels);
-        return 0; // return from top-level => program exit
+        rc = 0; // return from top-level => program exit
+        goto done;
       }
       if (trace_enabled && trace_pending) {
         trace_meta.ret_has_target_pc = 1;
@@ -1443,12 +2024,16 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       continue;
     }
 
-    fprintf(stderr, "zem: unsupported instruction %s (line %d)\n", r->m,
-            r->line);
-        free(ops);
-        if (pc_labels) free(pc_labels);
-    return 2;
+    rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                          "unsupported instruction %s", r->m ? r->m : "(null)");
+    goto done;
   }
+
+done:
+  zem_bpcondset_clear(&bpconds);
+  if (ops) free(ops);
+  if (pc_labels) free(pc_labels);
+  return rc;
 
   if (trace_enabled && trace_pending) {
     zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,

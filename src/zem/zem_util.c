@@ -4,7 +4,81 @@
 #include "zem_util.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
+#include <stdlib.h>
 #include <string.h>
+
+int zem_failf(const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  fputs("zem: error: ", stderr);
+  vfprintf(stderr, fmt, ap);
+  fputc('\n', stderr);
+  va_end(ap);
+  return 2;
+}
+
+void zem_bpcondset_clear(zem_bpcondset_t *s) {
+  if (!s) return;
+  for (size_t i = 0; i < s->n; i++) {
+    free(s->v[i].expr);
+    s->v[i].expr = NULL;
+  }
+  s->n = 0;
+}
+
+const char *zem_bpcondset_get(const zem_bpcondset_t *s, uint32_t pc) {
+  if (!s) return NULL;
+  for (size_t i = 0; i < s->n; i++) {
+    if (s->v[i].pc == pc) return s->v[i].expr;
+  }
+  return NULL;
+}
+
+static char *xstrdup0(const char *s) {
+  if (!s) return NULL;
+  size_t n = strlen(s);
+  char *r = (char *)malloc(n + 1);
+  if (!r) return NULL;
+  memcpy(r, s, n + 1);
+  return r;
+}
+
+int zem_bpcondset_set(zem_bpcondset_t *s, uint32_t pc, const char *expr) {
+  if (!s) return 0;
+  if (!expr || *expr == 0) return zem_bpcondset_remove(s, pc);
+
+  for (size_t i = 0; i < s->n; i++) {
+    if (s->v[i].pc == pc) {
+      char *copy = xstrdup0(expr);
+      if (!copy) return 0;
+      free(s->v[i].expr);
+      s->v[i].expr = copy;
+      return 1;
+    }
+  }
+
+  if (s->n >= (sizeof(s->v) / sizeof(s->v[0]))) return 0;
+  char *copy = xstrdup0(expr);
+  if (!copy) return 0;
+  s->v[s->n].pc = pc;
+  s->v[s->n].expr = copy;
+  s->n++;
+  return 1;
+}
+
+int zem_bpcondset_remove(zem_bpcondset_t *s, uint32_t pc) {
+  if (!s) return 0;
+  for (size_t i = 0; i < s->n; i++) {
+    if (s->v[i].pc == pc) {
+      free(s->v[i].expr);
+      s->v[i] = s->v[s->n - 1];
+      s->n--;
+      return 1;
+    }
+  }
+  return 0;
+}
 
 void zem_json_escape(FILE *out, const char *s) {
   if (!out) return;
@@ -96,6 +170,10 @@ int zem_watchset_add(zem_watchset_t *ws, uint32_t addr, uint32_t size) {
   ws->v[ws->n].size = size;
   ws->v[ws->n].last = 0;
   ws->v[ws->n].has_last = 0;
+  ws->v[ws->n].last_write_pc = 0;
+  ws->v[ws->n].last_write_label = NULL;
+  ws->v[ws->n].last_write_line = 0;
+  ws->v[ws->n].has_last_write = 0;
   ws->n++;
   return 1;
 }
@@ -110,6 +188,72 @@ int zem_watchset_remove(zem_watchset_t *ws, uint32_t addr, uint32_t size) {
     }
   }
   return 0;
+}
+
+void zem_watchset_note_write(zem_watchset_t *ws, uint32_t addr, uint32_t len,
+                             uint32_t pc, const char *label, int line) {
+  if (!ws) return;
+  if (ws->n == 0) return;
+  if (len == 0) return;
+
+  const uint64_t w_lo = (uint64_t)addr;
+  const uint64_t w_hi = w_lo + (uint64_t)len; // exclusive
+
+  for (size_t i = 0; i < ws->n; i++) {
+    zem_watch_t *w = &ws->v[i];
+    const uint64_t a_lo = (uint64_t)w->addr;
+    const uint64_t a_hi = a_lo + (uint64_t)w->size;
+    // overlap if ranges intersect.
+    if (w_hi <= a_lo) continue;
+    if (a_hi <= w_lo) continue;
+    w->last_write_pc = pc;
+    w->last_write_label = label;
+    w->last_write_line = line;
+    w->has_last_write = 1;
+  }
+}
+
+const char *zem_regid_name(zem_regid_t id) {
+  switch (id) {
+    case ZEM_REG_HL:
+      return "HL";
+    case ZEM_REG_DE:
+      return "DE";
+    case ZEM_REG_BC:
+      return "BC";
+    case ZEM_REG_IX:
+      return "IX";
+    case ZEM_REG_A:
+      return "A";
+    case ZEM_REG_CMP_LHS:
+      return "CMP_LHS";
+    case ZEM_REG_CMP_RHS:
+      return "CMP_RHS";
+    default:
+      return "?";
+  }
+}
+
+void zem_regprov_clear(zem_regprov_t *p) {
+  if (!p) return;
+  for (size_t i = 0; i < (size_t)ZEM_REG__COUNT; i++) {
+    p->v[i].pc = 0;
+    p->v[i].label = NULL;
+    p->v[i].line = -1;
+    p->v[i].mnemonic = NULL;
+    p->v[i].has = 0;
+  }
+}
+
+void zem_regprov_note(zem_regprov_t *p, zem_regid_t id, uint32_t pc,
+                      const char *label, int line, const char *mnemonic) {
+  if (!p) return;
+  if ((int)id < 0 || id >= ZEM_REG__COUNT) return;
+  p->v[id].pc = pc;
+  p->v[id].label = label;
+  p->v[id].line = line;
+  p->v[id].mnemonic = mnemonic;
+  p->v[id].has = 1;
 }
 
 int zem_str_ieq(const char *a, const char *b) {

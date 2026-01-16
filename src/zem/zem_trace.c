@@ -13,6 +13,60 @@ static int g_trace_mem_enabled = 0;
 static size_t g_trace_mem_pc = 0;
 static int g_trace_mem_line = -1;
 
+// Step filtering (single-threaded).
+static int g_step_pc_range = 0;
+static uint32_t g_step_pc_lo = 0;
+static uint32_t g_step_pc_hi = 0;
+
+static char g_step_mnemonics[32][16];
+static size_t g_step_nmnemonics = 0;
+
+static char g_step_call_targets[32][64];
+static size_t g_step_ncall_targets = 0;
+
+static uint32_t g_step_sample_n = 0;
+static uint64_t g_step_counter = 0;
+
+void zem_trace_clear_step_filters(void) {
+  g_step_pc_range = 0;
+  g_step_pc_lo = 0;
+  g_step_pc_hi = 0;
+  g_step_nmnemonics = 0;
+  g_step_ncall_targets = 0;
+  g_step_sample_n = 0;
+  g_step_counter = 0;
+  memset(g_step_mnemonics, 0, sizeof(g_step_mnemonics));
+  memset(g_step_call_targets, 0, sizeof(g_step_call_targets));
+}
+
+void zem_trace_set_step_filter_pc_range(int enabled, uint32_t lo, uint32_t hi) {
+  g_step_pc_range = enabled ? 1 : 0;
+  g_step_pc_lo = lo;
+  g_step_pc_hi = hi;
+}
+
+void zem_trace_add_step_filter_mnemonic(const char *m) {
+  if (!m || !*m) return;
+  if (g_step_nmnemonics >= (sizeof(g_step_mnemonics) / sizeof(g_step_mnemonics[0]))) return;
+  // Dedup.
+  for (size_t i = 0; i < g_step_nmnemonics; i++) {
+    if (strcmp(g_step_mnemonics[i], m) == 0) return;
+  }
+  strncpy(g_step_mnemonics[g_step_nmnemonics++], m, sizeof(g_step_mnemonics[0]) - 1);
+}
+
+void zem_trace_add_step_filter_call_target(const char *t) {
+  if (!t || !*t) return;
+  if (g_step_ncall_targets >= (sizeof(g_step_call_targets) / sizeof(g_step_call_targets[0]))) return;
+  for (size_t i = 0; i < g_step_ncall_targets; i++) {
+    if (strcmp(g_step_call_targets[i], t) == 0) return;
+  }
+  strncpy(g_step_call_targets[g_step_ncall_targets++], t,
+          sizeof(g_step_call_targets[0]) - 1);
+}
+
+void zem_trace_set_step_sample_n(uint32_t n) { g_step_sample_n = n; }
+
 void zem_trace_set_mem_enabled(int enabled) { g_trace_mem_enabled = enabled ? 1 : 0; }
 
 void zem_trace_set_mem_context(size_t pc, int line) {
@@ -44,6 +98,43 @@ void zem_trace_emit_step(FILE *out, size_t pc, const record_t *r,
                          const zem_regs_t *before, const zem_regs_t *after,
                          const zem_trace_meta_t *meta, size_t sp_after) {
   if (!out || !r || !before || !after) return;
+
+  if (g_step_pc_range) {
+    if (pc < (size_t)g_step_pc_lo || pc > (size_t)g_step_pc_hi) return;
+  }
+
+  if (g_step_nmnemonics > 0) {
+    const char *m = r->m ? r->m : "";
+    int ok = 0;
+    for (size_t i = 0; i < g_step_nmnemonics; i++) {
+      if (strcmp(g_step_mnemonics[i], m) == 0) {
+        ok = 1;
+        break;
+      }
+    }
+    if (!ok) return;
+  }
+
+  if (g_step_ncall_targets > 0) {
+    const int is_call = (r->m && strcmp(r->m, "CALL") == 0);
+    const char *t = (meta && meta->call_target) ? meta->call_target : "";
+    int ok = 0;
+    if (is_call && t && *t) {
+      for (size_t i = 0; i < g_step_ncall_targets; i++) {
+        if (strcmp(g_step_call_targets[i], t) == 0) {
+          ok = 1;
+          break;
+        }
+      }
+    }
+    if (!ok) return;
+  }
+
+  if (g_step_sample_n > 1) {
+    uint64_t k = g_step_counter++;
+    if ((k % (uint64_t)g_step_sample_n) != 0) return;
+  }
+
   fputs("{\"k\":\"step\",\"pc\":", out);
   fprintf(out, "%zu", pc);
   fputs(",\"line\":", out);

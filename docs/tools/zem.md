@@ -19,6 +19,18 @@ Inputs are one or more IR JSONL files:
 bin/zem file1.jsonl file2.jsonl
 ```
 
+Or stdin (useful for pipes):
+
+```sh
+compiler | bin/zem --source-name program.jsonl -
+```
+
+Notes:
+
+- `-` means “read program IR JSONL from stdin”.
+- `--source-name` controls the `source.name` reported in `dbg_stop` events for stdin inputs.
+- `--debug-script -` reads debugger commands from stdin, so it cannot be combined with program input `-`.
+
 ## Common flags
 
 ### Tracing
@@ -32,6 +44,13 @@ bin/zem file1.jsonl file2.jsonl
 - `--break-pc N` breaks when `pc == N` (where `pc` is the IR record index).
 - `--break-label L` breaks at label `L`.
 - `--debug-script PATH` runs debugger commands from PATH (no prompt; exit on EOF). Use `-` for stdin.
+
+If you want to run a piped program _and_ drive the debugger with a script, put the script in a file:
+
+```sh
+printf 'blabel main\nc\nquit\n' > /tmp/zem.script
+compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-script /tmp/zem.script -
+```
 
 ### Debugger stop events (JSONL)
 
@@ -73,17 +92,39 @@ When `--debug-events` (or `--debug-events-only`) is enabled, `zem` writes one JS
 Stop events have `k == "dbg_stop"` and include:
 
 - `k`: always `"dbg_stop"`
+- `v`: schema version number (currently `1`)
 - `reason`: stop reason string (e.g. `"paused"`, `"breakpoint"`, `"step"`, `"next"`, `"finish"`)
 - `frame`: stable frame object
   - `pc`: IR record index (0-based)
+  - `id`: frame id (0 is the current frame)
   - `label`: label at `pc` (or `null`)
   - `line`: source line (or `null` if unavailable)
+  - `col`: source column (currently always `1`)
   - `kind`: record kind (`"instr"`, `"dir"`, `"label"`, ...)
   - plus one of: `m` (mnemonic), `d` (directive), `name` (label/dir name) when applicable
-- `bps`: array of active breakpoint PCs (numbers)
+  - `source`: source identity object
+    - `name`: display name (filename or `"<stdin>"`)
+    - `path`: path if known (null for stdin)
 - `sp`: call stack depth
+- `bp`: matched breakpoint metadata (or `null`)
+  - `pc`: breakpoint pc
+  - `cond`: breakpoint condition expression (or `null`)
+  - `cond_ok`: condition parsed/evaluated successfully
+  - `result`: condition result (true/false)
+- `bps`: array of active breakpoint PCs (numbers)
+- `frames`: call stack frames, for DAP/tooling
+  - `id`: frame id (stable within a stop event)
+  - `pc`: frame pc (current frame first)
+  - `name`: nearest label at-or-before `pc` (or `null`)
+  - `label`: label exactly at `pc` (or `null`)
+  - `line`: source line (or `null`)
+  - `col`: source column (currently always `1`)
+  - `m`: mnemonic at `pc` if `pc` points to an instruction (or `null`)
+  - `source`: `{name,path}` as above
 - `regs`: register snapshot (`HL`, `DE`, `BC`, `IX`, `A`)
+- `regprov`: register provenance map (register -> provenance object or `null`)
 - `watches`: watch values (empty unless watches are configured)
+  - each watch may include `written_by` with `{pc,label,line,op}`
 
 Notes:
 
@@ -95,13 +136,17 @@ Example (pretty-printed; actual output is one line):
 ```json
 {
   "k": "dbg_stop",
+  "v": 1,
   "reason": "paused",
-  "frame": {"pc": 0, "label": null, "line": null, "kind": "dir", "d": "EXTERN"},
+  "frame": {"pc": 0, "id": 0, "label": null, "line": null, "col": 1, "kind": "dir", "d": "EXTERN"},
   "pc": 0,
   "label": null,
   "sp": 0,
+  "bp": null,
   "bps": [0],
+  "frames": [{"id": 0, "pc": 0, "name": null, "label": null, "line": null, "col": 1, "m": null}],
   "regs": {"HL": 0, "DE": 0, "BC": 0, "IX": 0, "A": 0},
+  "regprov": {"HL": null, "DE": null, "BC": null, "IX": null, "A": null},
   "watches": []
 }
 ```

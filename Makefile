@@ -587,6 +587,10 @@ zem: zem-host $(ZEM_OBJ) | dirs
 	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER) -o $(BIN)/zem $(LDFLAGS)
 	ln -sf $(PLATFORM)/zem $(BIN_ROOT)/zem
 
+# Allow explicit file target builds, e.g. `make bin/$(PLATFORM)/zem`.
+$(BIN)/zem: zem
+	@true
+
 .PHONY: zem zem-host
 
 # ---- zop (opcode JSONL -> raw bytes) ----

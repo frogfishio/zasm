@@ -8,41 +8,30 @@ This document tracks ideas to take `zem` from “working emulator” to “prime
 ## Debugger (CLI-first, then VS Code)
 
 - Breakpoints
-  - Break by label/function symbol
-  - Break by PC (record index)
-  - Conditional breakpoints (simple expression over regs/symbols)
-  - Watchpoints (break on write to an address range or symbol-backed region)
+  - Conditional breakpoints (implemented: `bpcif`/`blabelif`, simple expr over regs/symbols)
 - Stepping
-  - Step instruction
-  - Next / step-over CALL
-  - Finish / step-out
 - Inspection
   - Registers
   - Call stack (return addresses + nearest label)
-  - Current record + surrounding window
-  - Memory dump (`x/` style), plus “decoded” views (str/bytes/structs)
+  - Current record + surrounding window (implemented: `win [N]`)
+  - Memory dump (`x`/`mem`), plus “decoded” views (bytes/str)
+  - Extend decoded views (structs)
 
 ## Structured Trace / Event Stream
 
-- JSONL event stream suitable for tooling
-  - Per-instruction events: pc, mnemonic, operands, regs-before/after
-  - Optional: decoded memory reads/writes for load/store-style instructions
-  - Optional: CALL/RET events with stack depth
 - Output control
-  - Enable/disable, sampling, and filtering (by mnemonic / address range / call target)
+  - Sampling and filtering (implemented: `--trace-mnemonic`, `--trace-pc`, `--trace-call-target`, `--trace-sample`)
 
 See also: `dbg_stop` JSONL stop events are documented in `docs/ir_build_run.md`.
 
 ## Better Diagnostics (compiled-language friendly)
 
-- Crash/exit diagnostics
-  - Call stack + current IR record context
-  - “unknown CALL target” + register dump + call site
 - Source correlation
-  - Prefer `loc`/span info when present
-  - Surface “best effort” record index + label when not present
+  - Use `loc.line` when present (v0)
+  - Extend to richer `loc`/span info when present (file/col/range)
 - Value decoding helpers
-  - Common Zing runtime shapes (e.g. inline `str`, slice/bytes)
+  - Crash-time bytes/str preview for common Zing runtime shapes (v0)
+  - Extend decoding + surface via debugger inspection
 
 ## Performance / Execution Efficiency
 
@@ -79,7 +68,8 @@ Everything the developer asks is answered by data, not vibes:
 “What changed memory X?”
 “Which call chain led to this host interaction?”
 “Show me the minimal replay.”
-1) Time as a First-Class Dimension (Time-Travel Debugging)
+
+## 1) Time as a First-Class Dimension (Time-Travel Debugging)
 This is the “GOD MODE” differentiator most tools can’t do well.
 
 What it looks like:
@@ -97,7 +87,8 @@ Why it’s special for zasm:
 
 The machine state is small and structured.
 IR is deterministic: time-travel can be reliable, not “best effort.”
-2) Causality & Provenance (Answer “Why”, Not Just “What”)
+
+## 2) Causality & Provenance (Answer “Why”, Not Just “What”)
 You already have dbg_stop and tracing. GOD MODE is adding causal links.
 
 Add the concept of “provenance”:
@@ -108,12 +99,13 @@ Every observable value can be traced:
 “This string slice flowed from symbol msg then appended by routine X.”
 Concrete features:
 
-Last-writer tracking (cheap, high value):
+Last-writer tracking (cheap, high value) (implemented v0 for watches):
 Maintain a shadow map: for each memory region/page/word, store last write pc (+ line/label).
 When watch changes, emit “written by frame …”.
 Register provenance (optional, but huge):
 Track for each reg: last instruction that set it; include operand sources.
-3) Queryable Execution (The “Flight Recorder” You Can Ask Questions Of)
+
+## 3) Queryable Execution (The “Flight Recorder” You Can Ask Questions Of)
 Instead of “emit a stream and grep it”, make execution a query target.
 
 Think: a tiny local “debug database”:
@@ -130,7 +122,8 @@ This unlocks:
 
 CI artifacts: attach run.zemtrace to failures.
 Postmortems: reproduce and inspect after the fact.
-4) Semantic Debugging (Map IR Reality to Developer Intent)
+
+## 4) Semantic Debugging (Map IR Reality to Developer Intent)
 If Zing is the upstream language, developers don’t actually want “pc=123”; they want “function Foo, local bar, message payload”.
 
 Two layers:
@@ -143,7 +136,8 @@ This is where you get:
 
 “Variables view” in DAP that isn’t fake.
 Memory view that decodes “string/slice/object header” instead of hex.
-5) Breakpoints That Feel Like Power Tools
+
+## 5) Breakpoints That Feel Like Power Tools
 GOD MODE breakpoints are expressive and safe.
 
 High-value breakpoint upgrades:
@@ -156,7 +150,8 @@ Data breakpoints:
 Temporal breakpoints:
 “break when this becomes true for the first time”
 “break when it changes from value A to B”
-6) Host-Call Observability as a First-Class Debug Surface
+
+## 6) Host-Call Observability as a First-Class Debug Surface
 In real programs, the “interesting” events are often _ctl, _out, _alloc, etc.
 
 Make host calls debug-native:
@@ -167,7 +162,8 @@ A “host-call stack view”:
 “show me the call chain that led to _ctl.”
 Optional strict modes that turn latent bugs into crisp diagnostics:
 pointer/len checks, handle lifecycle tracking (some of this already exists in sibling tools).
-7) The “Impossible” Developer Features (That Become Possible Here)
+
+## 7) The “Impossible” Developer Features (That Become Possible Here)
 These are the “category of its own” moves:
 
 Delta debugging built-in: given a failing run, automatically minimize the input or command sequence that triggers it.
