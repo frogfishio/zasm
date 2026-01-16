@@ -3,8 +3,8 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <stdarg.h>
 #include "emit_json.h"
+#include "diag.h"
 #include "version.h"
 
 int yyparse(void);
@@ -13,59 +13,6 @@ void yyrestart(FILE* input_file);
 
 static int g_verbose = 0;
 static int g_json = 0;
-
-static void json_print_str(FILE* out, const char* s) {
-  fputc('"', out);
-  for (const unsigned char* p = (const unsigned char*)s; p && *p; p++) {
-    switch (*p) {
-      case '\\': fputs("\\\\", out); break;
-      case '"': fputs("\\\"", out); break;
-      case '\n': fputs("\\n", out); break;
-      case '\r': fputs("\\r", out); break;
-      case '\t': fputs("\\t", out); break;
-      default:
-        if (*p < 0x20) {
-          fprintf(out, "\\u%04x", *p);
-        } else {
-          fputc(*p, out);
-        }
-        break;
-    }
-  }
-  fputc('"', out);
-}
-
-static void diag_emit(const char* level, const char* file, int line, const char* fmt, ...) {
-  if (!g_verbose && strcmp(level, "error") != 0 && strcmp(level, "warn") != 0) {
-    return;
-  }
-  va_list args;
-  va_start(args, fmt);
-  if (g_json) {
-    char msg[1024];
-    vsnprintf(msg, sizeof(msg), fmt, args);
-    fprintf(stderr, "{\"tool\":\"zas\",\"level\":\"%s\",\"message\":", level);
-    json_print_str(stderr, msg);
-    if (file) {
-      fprintf(stderr, ",\"file\":");
-      json_print_str(stderr, file);
-    }
-    if (line > 0) {
-      fprintf(stderr, ",\"line\":%d", line);
-    }
-    fprintf(stderr, "}\n");
-  } else {
-    fprintf(stderr, "zas: %s: ", level);
-    vfprintf(stderr, fmt, args);
-    if (file) {
-      fprintf(stderr, " (%s", file);
-      if (line > 0) fprintf(stderr, ":%d", line);
-      fprintf(stderr, ")");
-    }
-    fprintf(stderr, "\n");
-  }
-  va_end(args);
-}
 
 static void print_help(void) {
   fprintf(stdout,
@@ -156,9 +103,16 @@ int main(int argc, char** argv) {
   }
 
   if (lint && g_verbose) {
+    diag_set_tool("zas");
+    diag_set_verbose(g_verbose);
+    diag_set_json(g_json);
     diag_emit("error", NULL, 0, "--verbose is not supported with --lint");
     return 2;
   }
+
+  diag_set_tool("zas");
+  diag_set_verbose(g_verbose);
+  diag_set_json(g_json);
 
   if (tool_mode) {
     if (lint && out_path) {
@@ -208,6 +162,7 @@ int main(int argc, char** argv) {
         diag_emit("error", path, 0, "failed to open input");
         return 2;
       }
+      diag_set_source(path);
       yyin = f;
       yyrestart(f);
       diag_emit("info", path, 0, "parsing");
@@ -219,6 +174,7 @@ int main(int argc, char** argv) {
       }
     }
   } else {
+    diag_set_source(NULL);
     // streaming: parser prints JSONL as it goes
     rc = yyparse();
   }

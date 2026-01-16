@@ -1,0 +1,14 @@
+{"ir":"zasm-v1.1","k":"label","name":"main","loc":{"line":5}}
+{"ir":"zasm-v1.1","k":"label","name":"read_loop","loc":{"line":6}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"sym","v":"buf"}],"loc":{"line":7}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"DE"},{"t":"num","v":4096}],"loc":{"line":8}}
+{"ir":"zasm-v1.1","k":"instr","m":"CALL","ops":[{"t":"sym","v":"_in"}],"loc":{"line":9}}
+{"ir":"zasm-v1.1","k":"instr","m":"CP","ops":[{"t":"reg","v":"HL"},{"t":"num","v":0}],"loc":{"line":10}}
+{"ir":"zasm-v1.1","k":"instr","m":"JR","ops":[{"t":"sym","v":"le"},{"t":"lbl","v":"done"}],"loc":{"line":11}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"DE"},{"t":"reg","v":"HL"}],"loc":{"line":14}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"sym","v":"buf"}],"loc":{"line":15}}
+{"ir":"zasm-v1.1","k":"instr","m":"CALL","ops":[{"t":"sym","v":"_out"}],"loc":{"line":16}}
+{"ir":"zasm-v1.1","k":"instr","m":"JR","ops":[{"t":"lbl","v":"read_loop"}],"loc":{"line":18}}
+{"ir":"zasm-v1.1","k":"label","name":"done","loc":{"line":20}}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[],"loc":{"line":21}}
+{"ir":"zasm-v1.1","k":"dir","d":"RESB","name":"buf","args":[{"t":"num","v":4096}],"loc":{"line":23}}

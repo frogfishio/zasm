@@ -8,21 +8,16 @@ This document tracks ideas to take `zem` from “working emulator” to “prime
 ## Debugger (CLI-first, then VS Code)
 
 - Breakpoints
-  - Conditional breakpoints (implemented: `bpcif`/`blabelif`, simple expr over regs/symbols)
+  - Conditional breakpoints (commands: `bpcif`/`blabelif`, simple expr over regs/symbols)
 - Stepping
 - Inspection
   - Registers
-  - Call stack (return addresses + nearest label)
-  - Current record + surrounding window (implemented: `win [N]`)
   - Memory dump (`x`/`mem`), plus “decoded” views (bytes/str)
   - Extend decoded views (structs)
 
 ## Structured Trace / Event Stream
 
-- Output control
-  - Sampling and filtering (implemented: `--trace-mnemonic`, `--trace-pc`, `--trace-call-target`, `--trace-sample`)
-
-See also: `dbg_stop` JSONL stop events are documented in `docs/ir_build_run.md`.
+See also: `dbg_stop` JSONL stop events are documented in `docs/tools/zem.md`.
 
 ## Better Diagnostics (compiled-language friendly)
 
@@ -99,11 +94,10 @@ Every observable value can be traced:
 “This string slice flowed from symbol msg then appended by routine X.”
 Concrete features:
 
-Last-writer tracking (cheap, high value) (implemented v0 for watches):
+Last-writer tracking (cheap, high value):
 Maintain a shadow map: for each memory region/page/word, store last write pc (+ line/label).
-When watch changes, emit “written by frame …”.
-Register provenance (optional, but huge):
-Track for each reg: last instruction that set it; include operand sources.
+
+(Implemented v0: watch `written_by` and register provenance in `dbg_stop`; remaining work is full memory last-writer coverage.)
 
 ## 3) Queryable Execution (The “Flight Recorder” You Can Ask Questions Of)
 Instead of “emit a stream and grep it”, make execution a query target.

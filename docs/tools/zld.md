@@ -104,7 +104,7 @@ wat2wasm out.wat -o out.wasm
 - `zld --tool` enables filelist + `-o` output mode (non-stream).
 - `zld -o <path>` writes WAT/manifest output to a file (tool mode only).
 - `zld --verbose` emits debug-friendly diagnostics to stderr.
-- `zld --json` emits diagnostics as JSON lines (stderr).
+- `zld --json` emits diagnostics as JSON lines (stderr). See [docs/diagnostics.md](../diagnostics.md).
 
 ## Tool mode
 

@@ -15,6 +15,12 @@
 
 static int g_verbose = 0;
 static int g_json = 0;
+
+static const char* path_basename(const char* path) {
+  if (!path) return NULL;
+  const char* slash = strrchr(path, '/');
+  return slash ? (slash + 1) : path;
+}
 static int g_allow_prim_extern = 0;
 
 typedef struct {
@@ -87,13 +93,24 @@ static void diag_emit(const char* level, const char* file, int line, const char*
   if (g_json) {
     char msg[1024];
     vsnprintf(msg, sizeof(msg), fmt, args);
-    fprintf(stderr, "{\"tool\":\"zir\",\"level\":\"%s\",\"message\":", level);
+    fprintf(stderr, "{\"k\":\"diag\",\"v\":1,\"tool\":\"zir\",\"level\":\"%s\",\"message\":", level);
     json_print_str(stderr, msg);
     if (file) {
+      const char* name = path_basename(file);
+      fprintf(stderr, ",\"source\":{\"name\":");
+      json_print_str(stderr, name ? name : file);
+      fprintf(stderr, ",\"path\":");
+      json_print_str(stderr, file);
+      fprintf(stderr, "}");
+
+      /* Back-compat fields (older tooling) */
       fprintf(stderr, ",\"file\":");
       json_print_str(stderr, file);
     }
     if (line > 0) {
+      fprintf(stderr, ",\"range\":{\"start\":{\"line\":%d,\"col\":1},\"end\":{\"line\":%d,\"col\":1}}", line, line);
+
+      /* Back-compat fields (older tooling) */
       fprintf(stderr, ",\"line\":%d", line);
     }
     fprintf(stderr, "}\n");

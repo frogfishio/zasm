@@ -20,7 +20,7 @@ bin/zrun --mem 512MB build/hello.wat
 - `--strict` trap on invalid host-call arguments and track alloc/free misuse.
 - `--mem <size>` cap max linear memory (bytes/kb/mb/gb). Default `256MB`. Floor `2MB`, ceiling `2GB`.
 - `--verbose` emit debug-friendly diagnostics to stderr.
-- `--json` emit diagnostics as JSON lines (stderr).
+- `--json` emit diagnostics as JSON lines (stderr). See [docs/diagnostics.md](../diagnostics.md).
 
 `ZRUN_MEM` may also be set to override the default cap (same syntax as `--mem`).
 

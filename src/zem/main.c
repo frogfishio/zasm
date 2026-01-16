@@ -34,7 +34,11 @@ static void print_help(FILE *out) {
           "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n"
           "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n"
           "      [--source-name NAME]\n"
-          "      [--break-pc N] [--break-label L] <input.jsonl|->...\n"
+          "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n"
+          "\n"
+          "Stream mode:\n"
+          "  If no input files are provided, zem reads the program IR JSONL from stdin\n"
+          "  (equivalent to specifying a single '-' input).\n"
           "\n"
           "Supported (subset):\n"
           "  - Directives: DB, DW, RESB, STR\n"
@@ -61,18 +65,14 @@ static void print_help(FILE *out) {
           "  --debug             Interactive CLI debugger (break/step/regs/bt)\n"
           "  --debug-script PATH Run debugger commands from PATH (no prompt; exit on EOF).\n"
           "                    Note: --debug-script - reads debugger commands from stdin;\n"
-          "                    this cannot be combined with reading program input from stdin ('-').\n"
+          "                    this cannot be combined with reading program IR JSONL from stdin\n"
+          "                    (either via '-' or via stream mode with no inputs).\n"
           "  --debug-events      Emit JSONL dbg_stop events to stderr on each stop\n"
           "  --debug-events-only Like --debug-events but suppress debugger text output\n"
           "  --source-name NAME  Source name to report when reading program JSONL from stdin ('-')\n");
 }
 
 int main(int argc, char **argv) {
-  if (argc <= 1) {
-    print_help(stderr);
-    return 2;
-  }
-
   const char *inputs[256];
   int ninputs = 0;
 
@@ -82,6 +82,7 @@ int main(int argc, char **argv) {
   const char *stdin_source_name = NULL;
   const char *break_labels[256];
   size_t nbreak_labels = 0;
+  int program_uses_stdin = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -257,6 +258,7 @@ int main(int argc, char **argv) {
         return zem_failf("too many input files");
       }
       inputs[ninputs++] = argv[i];
+      program_uses_stdin = 1;
       continue;
     }
     if (argv[i][0] == '-') {
@@ -266,6 +268,23 @@ int main(int argc, char **argv) {
       return zem_failf("too many input files");
     }
     inputs[ninputs++] = argv[i];
+  }
+
+  // Stream mode: if no inputs are provided, read the program IR JSONL from stdin.
+  if (ninputs == 0) {
+    program_uses_stdin = 1;
+    if (isatty(STDIN_FILENO)) {
+      print_help(stderr);
+      return zem_failf("no input files (pipe IR JSONL into stdin, or pass input paths)");
+    }
+    if (dbg_script == stdin) {
+      return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
+    }
+    inputs[ninputs++] = "-";
+  }
+
+  if (program_uses_stdin && dbg_script == stdin) {
+    return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
   }
 
   if (!dbg.debug_events_only) {

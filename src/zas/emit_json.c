@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "emit_json.h"
+#include "diag.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -46,11 +47,7 @@ static void emit_loc(int line) {
 }
 
 static void emit_error(const char* msg, int line) {
-  if (line > 0) {
-    fprintf(stderr, "zas: error: %s (line %d)\n", msg, line);
-  } else {
-    fprintf(stderr, "zas: error: %s\n", msg);
-  }
+  diag_emitf("error", NULL, line, 1, "%s", msg);
   g_error = 1;
 }
 

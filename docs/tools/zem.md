@@ -22,14 +22,68 @@ bin/zem file1.jsonl file2.jsonl
 Or stdin (useful for pipes):
 
 ```sh
-compiler | bin/zem --source-name program.jsonl -
+compiler | bin/zem --source-name program.jsonl
 ```
 
 Notes:
 
-- `-` means “read program IR JSONL from stdin”.
+- If you omit input files, `zem` reads program IR JSONL from stdin (stream mode).
+- `-` explicitly means “read program IR JSONL from stdin” (same as stream mode).
 - `--source-name` controls the `source.name` reported in `dbg_stop` events for stdin inputs.
-- `--debug-script -` reads debugger commands from stdin, so it cannot be combined with program input `-`.
+- `--debug-script -` reads debugger commands from stdin, so it cannot be combined with reading program IR from stdin (either stream mode or `-`).
+
+## Integration
+
+`zem` is designed to be easy to embed in pipelines. The key is to keep the streams straight:
+
+- **stdout**: the guest program’s stdout (what the emulated program writes via `_out` and similar).
+- **stderr**: `zem` diagnostics and (optionally) JSONL event streams like `dbg_stop`, `trace`, `mem_read`, `mem_write`.
+
+If you want to consume machine-readable events, use `--debug-events-only` so stderr is clean JSONL.
+
+### Recipe 1: file input (program from file)
+
+Use this when you want the guest program to read runtime stdin (e.g. echo/cat programs):
+
+```sh
+printf 'hello\n' | bin/zem examples/echo.jsonl > /tmp/program.out
+```
+
+- Read the emulated program’s output from stdout (`/tmp/program.out` above).
+- Unless you enable tracing/debug events, stderr is just `zem` diagnostics.
+
+### Recipe 2: pipe input (program IR from stdin)
+
+Use this when another tool produces IR JSONL and you want to run it immediately:
+
+```sh
+compiler | bin/zem --source-name program.jsonl
+```
+
+Notes:
+
+- When you use stream mode (or `-`), `zem` consumes stdin to read the program IR JSONL. That means the guest program effectively has no runtime stdin available.
+- If the guest needs runtime stdin, prefer Recipe 1 (program from a file) so stdin can be used for program input.
+
+### Recipe 3: pipe + breakpoints + events-only (tooling mode)
+
+Use this when you want a pipeline-friendly run that produces only JSONL debugger stop events on stderr.
+Because stdin is used for the program IR (`-`), drive the debugger from a script file:
+
+```sh
+cat > /tmp/zem.script <<'EOF'
+blabel main
+c
+quit
+EOF
+
+compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-script /tmp/zem.script - \
+  2> /tmp/zem.events.jsonl \
+  > /tmp/program.out
+```
+
+- Read debugger events from stderr (`/tmp/zem.events.jsonl`).
+- Read the guest program output from stdout (`/tmp/program.out`).
 
 ## Common flags
 

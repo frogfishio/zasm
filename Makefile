@@ -95,6 +95,7 @@ ZAS_GEN := \
 ZAS_OBJ := \
   $(ZAS_BUILD)/main.o \
   $(ZAS_BUILD)/emit_json.o \
+	$(ZAS_BUILD)/diag.o \
   $(ZAS_BUILD)/zasm.tab.o \
   $(ZAS_BUILD)/lex.yy.o
 
@@ -114,7 +115,8 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
   test-strict test-trap test-zrun-log \
   test-unknownsym test-badcond test-badlabel test-badmem \
 	test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl test-conform-zld \
-  test-fuzz-zas test-fuzz-zld test-zxc-arm64 test-zxc-x86 test-zxc-cli test-zir
+	test-fuzz-zas test-fuzz-zld test-zxc-arm64 test-zxc-x86 test-zxc-cli test-zir \
+	test-diagnostics-jsonl test-zem-stdin-program
 
 all: zas zld
 
@@ -190,6 +192,9 @@ $(ZAS_BUILD)/lex.yy.c: src/zas/zasm.l $(ZAS_BUILD)/zasm.tab.h | dirs
 $(ZAS_BUILD)/%.o: src/zas/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(ZAS_BUILD)/diag.o: src/common/diag.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(ZAS_BUILD)/zasm.tab.o: $(ZAS_BUILD)/zasm.tab.c $(ZAS_BUILD)/zasm.tab.h | dirs
 	$(CC) $(CPPFLAGS) $(ZAS_GEN_CFLAGS) -c $(ZAS_BUILD)/zasm.tab.c -o $@
 
@@ -221,11 +226,19 @@ test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
 test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
+test-validation: test-diagnostics-jsonl
+test-validation: test-zem-stdin-program
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
 test-zop-bytes: zop
 	sh test/zop_bytes.sh
+
+test-diagnostics-jsonl: zas
+	sh test/diagnostics_jsonl.sh
+
+test-zem-stdin-program: zas zem
+	sh test/zem_stdin_program.sh
 
 test-zas-opcodes-directives: zas zop
 	sh test/zas_opcodes_directives.sh

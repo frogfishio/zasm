@@ -20,6 +20,8 @@ cat examples/hello.asm | bin/zas > build/hello.jsonl
 - `--verbose` emit debug-friendly diagnostics to stderr (disabled with `--lint`).
 - `--json` emit diagnostics as JSON lines (stderr).
 
+See [docs/diagnostics.md](../diagnostics.md) for the JSONL schema and VS Code Problems integration.
+
 ## Tool mode
 
 ```sh

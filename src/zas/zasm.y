@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "diag.h"
 #include "emit_json.h"
 #include "zasm_types.h"
 int yylex(void);
@@ -669,6 +670,11 @@ operand
 %%
 
 void yyerror(const char* s) {
+  if (diag_is_json()) {
+    diag_emitf("error", NULL, yylineno, zasm_tok_col, "parse error: %s", s);
+    return;
+  }
+
   fprintf(stderr, "zas: parse error at line %d:%d: %s\n", yylineno, zasm_tok_col, s);
   if (zasm_linebuf && zasm_linebuf[0]) {
     fprintf(stderr, "%s\n", zasm_linebuf);
