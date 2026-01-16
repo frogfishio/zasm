@@ -117,6 +117,9 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 	test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl test-conform-zld \
 	test-fuzz-zas test-fuzz-zld test-zxc-arm64 test-zxc-x86 test-zxc-cli test-zir \
 	test-diagnostics-jsonl test-zem-stdin-program
+	  test-zem-zi-write
+	  test-zem-zi-read test-zem-zi-abi-version
+	  test-zem-caps
 
 all: zas zld
 
@@ -228,6 +231,10 @@ test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden te
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
+test-validation: test-zem-zi-write
+test-validation: test-zem-zi-read
+test-validation: test-zem-zi-abi-version
+test-validation: test-zem-caps
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -239,6 +246,18 @@ test-diagnostics-jsonl: zas
 
 test-zem-stdin-program: zas zem
 	sh test/zem_stdin_program.sh
+
+test-zem-zi-write: zas zem
+	sh test/zem_zi_write.sh
+
+test-zem-zi-read: zas zem
+	sh test/zem_zi_read.sh
+
+test-zem-zi-abi-version: zas zem
+	sh test/zem_zi_abi_version.sh
+
+test-zem-caps: zem
+	sh test/zem_caps.sh
 
 test-zas-opcodes-directives: zas zop
 	sh test/zas_opcodes_directives.sh
@@ -565,6 +584,8 @@ zld: $(ZLD_OBJ) | dirs
 ZEM_HOST_BUILD := $(BUILD)/zem_host
 ZEM_HOST_LIBZING := $(ZEM_HOST_BUILD)/libzingcore.a
 ZEM_HOST_LIBHOPPER := $(ZEM_HOST_BUILD)/libhopper.a
+ZEM_HOST_LIBCAP_ASYNC := $(ZEM_HOST_BUILD)/libzingcap_async.a
+ZEM_HOST_LIBCAP_EXEC := $(ZEM_HOST_BUILD)/libzingcap_exec.a
 
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
@@ -585,19 +606,26 @@ $(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
 $(ZEM_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
 
-zem-host: $(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER)
-
-$(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER): | dirs
+zem-host: | dirs
 	$(MAKE) -C src/zem/host \
 	  BUILD="$(abspath $(ZEM_HOST_BUILD))" \
 	  CC="$(CC)" \
 	  CFLAGS="$(CFLAGS)" \
 	  AR="$(AR)" \
 	  ARFLAGS="$(ARFLAGS)" \
-	  $(abspath $(ZEM_HOST_LIBZING)) $(abspath $(ZEM_HOST_LIBHOPPER))
+	  $(abspath $(ZEM_HOST_LIBZING)) $(abspath $(ZEM_HOST_LIBHOPPER)) \
+	  $(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC))
 
 zem: zem-host $(ZEM_OBJ) | dirs
-	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_HOST_LIBZING) $(ZEM_HOST_LIBHOPPER) -o $(BIN)/zem $(LDFLAGS)
+	@cap_link_flags=""; \
+	if [ "$(UNAME_S)" = "Darwin" ]; then \
+	  cap_link_flags="-Wl,-force_load,$(abspath $(ZEM_HOST_LIBCAP_ASYNC)) -Wl,-force_load,$(abspath $(ZEM_HOST_LIBCAP_EXEC))"; \
+	elif [ "$(UNAME_S)" = "Linux" ]; then \
+	  cap_link_flags="-Wl,--whole-archive $(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC)) -Wl,--no-whole-archive"; \
+	else \
+	  cap_link_flags="$(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC))"; \
+	fi; \
+	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_HOST_LIBZING) $$cap_link_flags $(ZEM_HOST_LIBHOPPER) -o $(BIN)/zem $(LDFLAGS)
 	ln -sf $(PLATFORM)/zem $(BIN_ROOT)/zem
 
 # Allow explicit file target builds, e.g. `make bin/$(PLATFORM)/zem`.

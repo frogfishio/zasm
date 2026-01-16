@@ -25,16 +25,69 @@
 #include "zem_host.h"
 #include "zem_util.h"
 
+// Optional: query the host-side capability registry (if linked).
+#include "zingcore/include/zi_caps.h"
+#include "zingcore/include/zi_async.h"
+
+// Allow zem to link even if a different host runtime omits caps.
+#if defined(__APPLE__)
+__attribute__((weak_import))
+#elif defined(__GNUC__) || defined(__clang__)
+__attribute__((weak))
+#endif
+const zi_cap_registry_v1 *zi_cap_registry(void);
+
+static void print_caps(FILE *out) {
+  if (!zi_cap_registry) {
+    fprintf(out, "caps: (unavailable)\n");
+    return;
+  }
+  const zi_cap_registry_v1 *reg = zi_cap_registry();
+  size_t n = (reg && reg->caps) ? reg->cap_count : 0;
+  fprintf(out, "caps: %zu\n", n);
+  for (size_t i = 0; i < n; i++) {
+    const zi_cap_v1 *c = reg->caps[i];
+    if (!c || !c->kind || !c->name) continue;
+    // Keep this stable and human-scan-friendly.
+    fprintf(out, "- %s/%s v%u flags=0x%08x\n", c->kind, c->name, c->version,
+            c->cap_flags);
+  }
+
+  // Also surface async selectors (this is where exec lives today).
+  const zi_async_registry_v1 *areg = zi_async_registry();
+  size_t total = (areg && areg->selectors) ? areg->selector_count : 0;
+
+  // Collect exec selectors for a compact view.
+  const zi_async_selector *exec_sel[64];
+  size_t exec_n = 0;
+  for (size_t i = 0; i < total && exec_n < (sizeof(exec_sel) / sizeof(exec_sel[0])); i++) {
+    const zi_async_selector *s = areg->selectors[i];
+    if (!s || !s->cap_kind || !s->cap_name || !s->selector) continue;
+    if (strcmp(s->cap_kind, "exec") == 0) {
+      exec_sel[exec_n++] = s;
+    }
+  }
+
+  fprintf(out, "exec.selectors: %zu\n", exec_n);
+  for (size_t i = 0; i < exec_n; i++) {
+    const zi_async_selector *s = exec_sel[i];
+    fprintf(out, "- %s/%s %s\n", s->cap_kind, s->cap_name, s->selector);
+  }
+}
+
 static void print_help(FILE *out) {
   fprintf(out,
           "zem — zasm IR v1.1 emulator (minimal)\n"
           "\n"
           "Usage:\n"
-          "  zem [--help] [--version] [--trace] [--trace-mem]\n"
+          "  zem [--help] [--version] [--caps] [--trace] [--trace-mem]\n"
           "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n"
           "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n"
           "      [--source-name NAME]\n"
           "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n"
+          "\n"
+          "Info:\n"
+          "  --caps            Print loaded host capabilities and registered selectors\n"
           "\n"
           "Stream mode:\n"
           "  If no input files are provided, zem reads the program IR JSONL from stdin\n"
@@ -44,7 +97,17 @@ static void print_help(FILE *out) {
           "  - Directives: DB, DW, RESB, STR\n"
           "  - Instructions: LD, ADD, SUB, AND, OR, XOR, INC, DEC, CP, JR,\n"
           "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n"
-          "  - Primitives: CALL _out (HL=ptr, DE=len)\n"
+          "  - Primitives (Zingcore ABI v2, preferred):\n"
+          "               CALL zi_abi_version   (HL=0x00020000)\n"
+          "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n"
+          "               CALL zi_free          (HL=ptr, HL=rc)\n"
+          "               CALL zi_read          (HL=h, DE=dst_ptr, BC=cap, HL=n_or_err)\n"
+          "               CALL zi_write         (HL=h, DE=src_ptr, BC=len, HL=n_or_err)\n"
+          "               CALL zi_end           (HL=h, HL=rc)\n"
+          "               CALL zi_telemetry     (HL=topic_ptr, DE=topic_len, BC=msg_ptr, IX=msg_len, HL=rc)\n"
+          "\n"
+          "  - Legacy primitives (supported for older IR):\n"
+          "               CALL _out (HL=ptr, DE=len)\n"
           "               CALL _in  (HL=ptr, DE=cap, HL=nread)\n"
           "               CALL _log (HL=topic_ptr, DE=topic_len, BC=msg_ptr, IX=msg_len)\n"
           "               CALL _alloc (HL=size, HL=ptr)\n"
@@ -90,7 +153,13 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (strcmp(argv[i], "--version") == 0) {
-      printf("zem %s\n", ZASM_VERSION);
+      // Zingcore ABI v2.0 (syscall-style, zi_*) compatibility tag.
+      const uint32_t abi_ver = 0x00020000u;
+      printf("zem %s (ABI 0x%08x)\n", ZASM_VERSION, abi_ver);
+      return 0;
+    }
+    if (strcmp(argv[i], "--caps") == 0) {
+      print_caps(stdout);
       return 0;
     }
     if (strcmp(argv[i], "--trace") == 0) {
