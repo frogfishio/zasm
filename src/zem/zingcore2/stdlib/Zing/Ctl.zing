@@ -1,0 +1,104 @@
+module Zing·Ctl.
+
+use Zing·Buffer.
+use Zing·Error.
+use Zing·Result.
+use Zing·Str.
+
+;; ABI v2 capability syscalls (copy-out, no framed control protocol).
+extern zi_cap_count() -> i32.
+extern zi_cap_get_size(i32) -> i32.
+extern zi_cap_get(i32, u64, i32) -> i32.  ;; (index, out_ptr, out_cap) -> bytes_written
+
+ctlFail trace: trace msg: msg[
+  ret (Fail e: (Err kind: #CtlError trace: trace msg: msg span: nil stage: #ctl code: trace))
+].
+
+readU32le buf: buf off: off[
+  (buf byteAt: off) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b0 |
+    (buf byteAt: off + 1) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b1 |
+      (buf byteAt: off + 2) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b2 |
+        (buf byteAt: off + 3) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b3 |
+          v := b0 + (b1 * 256u32) + (b2 * 65536u32) + (b3 * 16777216u32).
+          ret (Ok v: v)
+        ]
+      ]
+    ]
+  ].
+].
+
+bufferBytesEqAt buf: buf off: off bytes: bytes[
+  bufLenU := ((buf len) + 0u32).
+  bytesLenU := ((bytes len) + 0u32).
+  (off + bytesLenU > bufLenU) ifTrue: [ ret false ].
+  i := 0u32.
+  [ i < bytesLenU ] whileTrue: [
+    (buf byteAt: off + i) ifOk: [ :bb |
+      eb := (bytes at: i).
+      (bb != eb) ifTrue: [ ret false ].
+      unit
+    ] ifFail: [ :e | ret false ].
+    i := i + 1u32
+  ].
+  ret true
+].
+
+;; Parse one `zi_cap_get` record and check if it matches (kind,name).
+capRecordMatches buf: buf kind: kind name: name[
+  bufLenU := ((buf len) + 0u32).
+  (bufLenU < 12u32) ifTrue: [ ret false ].
+
+  (readU32le buf: buf off: 0u32) ifFail: [ :e | ret false ] ifOk: [ :kindLen |
+    off := 4u32.
+    (off + kindLen > bufLenU) ifTrue: [ ret false ].
+    isKind := false.
+    (kindLen = ((kind len) + 0u32)) ifTrue: [
+      (bufferBytesEqAt buf: buf off: off bytes: kind) ifTrue: [ isKind := true ].
+    ].
+    off := off + kindLen.
+
+    (off + 4u32 > bufLenU) ifTrue: [ ret false ].
+    (readU32le buf: buf off: off) ifFail: [ :e | ret false ] ifOk: [ :nameLen |
+      off := off + 4u32.
+      (off + nameLen > bufLenU) ifTrue: [ ret false ].
+      isName := false.
+      (nameLen = ((name len) + 0u32)) ifTrue: [
+        (bufferBytesEqAt buf: buf off: off bytes: name) ifTrue: [ isName := true ].
+      ].
+      isKind ifTrue: [
+        isName ifTrue: [ ret true ].
+        unit
+      ].
+      ret false
+    ]
+  ]
+].
+
+export ctlCapsHas kind: kind name: name[
+  n := zi_cap_count.
+  (n < 0) ifTrue: [ ret (ctlFail trace: #t_ctl_caps_count msg: "ctl:caps count") ].
+
+  i := 0.
+  [ i < n ] whileTrue: [
+    sz := zi_cap_get_size(i).
+    (sz < 0) ifTrue: [ i := i + 1. unit ].
+    (sz = 0) ifTrue: [ i := i + 1. unit ].
+    buf := (Buffer bytes: sz).
+    buf clear.
+    got := zi_cap_get(i, (buf ptr), (buf cap)).
+    (got <= 0) ifTrue: [ ret (ctlFail trace: #t_ctl_caps_get msg: "ctl:caps get") ].
+    _ := (buf sliceLen: got).
+    (capRecordMatches buf: buf kind: kind name: name) ifTrue: [ ret (Ok v: true) ].
+    i := i + 1
+  ].
+  ret (Ok v: false)
+].
+
+export ctlRequireCap kind: kind name: name trace: trace[
+  (ctlCapsHas kind: kind name: name) ifFail: [ :e |
+    ret (Fail e: e)
+  ] ifOk: [ :has |
+    has ifTrue: [ ret (Ok v: unit) ].
+    ret (ctlFail trace: trace msg: "ctl:missing cap")
+  ].
+].

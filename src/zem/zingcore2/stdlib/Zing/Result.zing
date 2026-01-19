@@ -1,0 +1,87 @@
+;; SPDX-FileCopyrightText: 2025 Frogfish
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
+;; core/result.zing — Result[T] (v0)
+
+module Zing·Result.
+
+use Zing·Error.
+
+;; Combinator quick reference (implemented as helpers below, backed by compiler built-ins):
+;;   map:        Ok(f(x)), Fail unchanged
+;;   andThen:    Ok(run f(x) -> Result), Fail short-circuits
+;;   mapFail:    transform Err, Ok unchanged
+;;   ifOk:ifFail:execute exactly one branch
+;;   orDefault:/default: return value or fallback
+;;   orElse:     on Fail, run f(err) -> Result
+;;   tapOk/tapFail: side-effects only, original Result returned
+;;   unwrapOr:   unsafe unwrap with fallback (no trap on Fail)
+
+export enum Result[T] [
+  Ok(v: T).
+  Fail(e: Err).
+].
+
+export Ok v: [
+  ret (Ok { v: v })
+].
+
+export Fail e: [
+  ret (Fail { e: e })
+].
+
+export Fail trace: msg: [
+  ret (Fail e: (Err code: trace msg: msg))
+].
+
+export Fail trace: msg: cause: [
+  ret (Fail e: (Err code: trace msg: msg cause: cause))
+].
+
+;; ----------------------------
+;; Combinators (stdlib helpers)
+;; ----------------------------
+
+export resultMap res: r block: f[
+  ret (r ifOk: [ :v | Ok v: (f call: v) ]
+           ifFail: [ :e | Fail e: e ])
+].
+
+export resultAndThen res: r block: f[
+  ret (r ifOk: [ :v | f call: v ]
+           ifFail: [ :e | Fail e: e ])
+].
+
+export resultMapFail res: r block: f[
+  ret (r ifOk: [ :v | Ok v: v ]
+           ifFail: [ :e | Fail e: (f call: e) ])
+].
+
+export resultIfOk res: r ok: okBlock fail: failBlock[
+  ret (r ifOk: okBlock ifFail: failBlock)
+].
+
+export resultDefault res: r value: fallback[
+  ret (r ifOk: [ :v | v ]
+           ifFail: [ :△ | fallback ])
+].
+
+export resultOrElse res: r block: f[
+  ret (r ifOk: [ :v | Ok v: v ]
+           ifFail: [ :e | f call: e ])
+].
+
+export resultTapOk res: r block: f[
+  ret (r ifOk: [ :v | △ := (f call: v). Ok v: v ]
+           ifFail: [ :e | Fail e: e ])
+].
+
+export resultTapFail res: r block: f[
+  ret (r ifOk: [ :v | Ok v: v ]
+           ifFail: [ :e | △ := (f call: e). Fail e: e ])
+].
+
+export resultUnwrapOr res: r value: fallback[
+  ret (r ifOk: [ :v | v ]
+           ifFail: [ :△ | fallback ])
+].

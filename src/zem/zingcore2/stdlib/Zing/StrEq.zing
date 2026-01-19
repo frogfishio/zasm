@@ -1,0 +1,27 @@
+module Zing·StrEq.
+
+use Zing·Str.
+
+;; Optional helpers that depend on Result-style control flow (ifOk:/ifFail:).
+;; Keep these out of Zing·Str so Error-only manifests do not implicitly require Result.
+
+;; Byte-wise equality (no Unicode normalization; exact bytes).
+export bytesEq a: a b: b[
+  (a len != b len) ifTrue: [ ret false ].
+  cap := ((a len) + 0u32).
+  i := 0u32.
+  [ i < cap ] whileTrue: [
+    (a byteAt: i) ifOk: [ :ba |
+      (b byteAt: i) ifOk: [ :bb |
+        (ba != bb) ifTrue: [ ret false ].
+        unit
+      ] ifFail: [ :e | ret false ]
+    ] ifFail: [ :e | ret false ].
+    i := i + 1u32
+  ].
+  ret true
+].
+
+export strEq  a: a b: b[ ret (bytesEq a: a b: b) ].
+export symEq  a: a b: b[ ret (bytesEq a: a b: b) ].
+export jsonEq a: a b: b[ ret (bytesEq a: a b: b) ].

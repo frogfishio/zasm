@@ -253,6 +253,16 @@ static int bytes_view(const zem_buf_t *mem, uint32_t obj_ptr, uint32_t *out_ptr,
   return zem_bytes_view(mem, obj_ptr, out_ptr, out_len);
 }
 
+static uint64_t hash64_fnv1a(const void *data, size_t len) {
+  const uint8_t *p = (const uint8_t *)data;
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (uint64_t)p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
 static int mem_align4(zem_buf_t *mem) { return zem_mem_align4(mem); }
 
 static int mem_grow_zero(zem_buf_t *mem, size_t new_len) {
@@ -540,6 +550,18 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     goto done;
   }
   uint32_t heap_top = (uint32_t)mem->len;
+  // Deterministic clock (milliseconds since program start; wraps at 2^32).
+  uint32_t zi_time_ms = 0;
+
+  // Minimal managed-var store (key->value, set-once semantics).
+  // Keys are u64; values are opaque u64 (typically a guest pointer).
+  enum { ZI_MVAR_MAX = 256 };
+  struct {
+    uint64_t key;
+    uint64_t value;
+    int used;
+  } zi_mvar[ZI_MVAR_MAX];
+  memset(zi_mvar, 0, sizeof(zi_mvar));
 
   // crude call stack: return record index
   enum { MAX_STACK = 256 };
@@ -1594,6 +1616,48 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       continue;
     }
 
+    if (op == ZEM_OP_SXT32) {
+      if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "SXT32 expects reg");
+        goto done;
+      }
+      const char *dst = r->ops[0].s;
+      int32_t s = 0;
+      if (str_ieq(dst, "HL")) {
+        s = (int32_t)(uint32_t)regs.HL;
+        regs.HL = (uint64_t)(int64_t)s;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+      } else if (str_ieq(dst, "DE")) {
+        s = (int32_t)(uint32_t)regs.DE;
+        regs.DE = (uint64_t)(int64_t)s;
+        zem_regprov_note(&regprov, ZEM_REG_DE, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+      } else if (str_ieq(dst, "BC")) {
+        s = (int32_t)(uint32_t)regs.BC;
+        regs.BC = (uint64_t)(int64_t)s;
+        zem_regprov_note(&regprov, ZEM_REG_BC, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+      } else if (str_ieq(dst, "IX")) {
+        s = (int32_t)(uint32_t)regs.IX;
+        regs.IX = (uint64_t)(int64_t)s;
+        zem_regprov_note(&regprov, ZEM_REG_IX, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+      } else if (str_ieq(dst, "A")) {
+        s = (int32_t)(uint32_t)regs.A;
+        regs.A = (uint64_t)(int64_t)s;
+        zem_regprov_note(&regprov, ZEM_REG_A, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+      } else {
+        rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                              "SXT32 expects reg");
+        goto done;
+      }
+      pc++;
+      continue;
+    }
+
     if (op == ZEM_OP_CP) {
       if (r->nops != 2 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
         rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
@@ -1672,9 +1736,11 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (op == ZEM_OP_CALL) {
-      if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
+      // CALL may optionally include an explicit argument-register list after
+      // the target symbol (e.g. `CALL zi_write, HL, DE, BC`).
+      if (r->nops < 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
         rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
-                              "CALL expects one symbol");
+                              "CALL expects a target symbol");
         goto done;
       }
       const char *callee = r->ops[0].s;
@@ -1725,9 +1791,11 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
       if (strcmp(callee, "zi_abi_features") == 0) {
         if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
-        // No optional features exposed by zem's minimal host.
-        regs.HL = 0;
-        regs.DE = 0;
+        // Minimal feature bits exposed by zem.
+        // u64 return uses (DE:HL) as (hi32:lo32).
+        const uint64_t feats = (1ull << 2); // ZI_FEAT_TIME
+        regs.HL = (uint64_t)(uint32_t)(feats & 0xffffffffu);
+        regs.DE = (uint64_t)(uint32_t)(feats >> 32);
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                          r->m);
         zem_regprov_note(&regprov, ZEM_REG_DE, (uint32_t)pc, cur_label, r->line,
@@ -1889,13 +1957,29 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         continue;
       }
 
-      // Optional subsystems (not implemented in zem): FS + time.
+      // Optional subsystems (partially implemented in zem).
       if (strcmp(callee, "zi_fs_count") == 0 || strcmp(callee, "zi_fs_get_size") == 0 ||
           strcmp(callee, "zi_fs_get") == 0 || strcmp(callee, "zi_fs_open_id") == 0 ||
-          strcmp(callee, "zi_fs_open_path") == 0 || strcmp(callee, "zi_time_now_ms_u32") == 0 ||
-          strcmp(callee, "zi_time_sleep_ms") == 0) {
+          strcmp(callee, "zi_fs_open_path") == 0) {
         if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
         regs.HL = (uint64_t)(uint32_t)ZI_E_NOSYS;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_time_now_ms_u32") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        regs.HL = (uint64_t)zi_time_ms;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_time_sleep_ms") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        zi_time_ms += (uint32_t)regs.HL;
+        regs.HL = (uint64_t)(uint32_t)ZI_OK;
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                          r->m);
         pc++;
@@ -2018,6 +2102,149 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
               wlabel, r->line);
 
         regs.HL = (uint64_t)obj_ptr;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+
+      if (strcmp(callee, "zi_mvar_get_u64") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint64_t key = regs.HL;
+        if (r->nops >= 2) {
+          (void)op_to_u64(syms, &regs, &r->ops[1], &key);
+        }
+        uint64_t value = 0;
+        for (size_t i = 0; i < ZI_MVAR_MAX; i++) {
+          if (!zi_mvar[i].used) continue;
+          if (zi_mvar[i].key == key) {
+            value = zi_mvar[i].value;
+            break;
+          }
+        }
+        regs.HL = value;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+
+      if (strcmp(callee, "zi_mvar_set_default_u64") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint64_t key = regs.HL;
+        uint64_t value = regs.DE;
+        if (r->nops >= 3) {
+          (void)op_to_u64(syms, &regs, &r->ops[1], &key);
+          (void)op_to_u64(syms, &regs, &r->ops[2], &value);
+        }
+        size_t empty = (size_t)-1;
+        for (size_t i = 0; i < ZI_MVAR_MAX; i++) {
+          if (!zi_mvar[i].used) {
+            if (empty == (size_t)-1) empty = i;
+            continue;
+          }
+          if (zi_mvar[i].key == key) {
+            if (zi_mvar[i].value != 0) {
+              regs.HL = zi_mvar[i].value;
+            } else {
+              zi_mvar[i].value = value;
+              regs.HL = value;
+            }
+            zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                             r->line, r->m);
+            pc++;
+            continue;
+          }
+        }
+        if (empty == (size_t)-1) {
+          regs.HL = 0;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        zi_mvar[empty].used = 1;
+        zi_mvar[empty].key = key;
+        zi_mvar[empty].value = value;
+        regs.HL = value;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+
+      if (strcmp(callee, "zi_mvar_get") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint64_t key_obj64 = regs.HL;
+        if (r->nops >= 2) {
+          (void)op_to_u64(syms, &regs, &r->ops[1], &key_obj64);
+        }
+        uint32_t key_ptr = 0, key_len = 0;
+        uint64_t key = 0;
+        if (bytes_view(mem, (uint32_t)key_obj64, &key_ptr, &key_len) &&
+            mem_check_span(mem, key_ptr, key_len)) {
+          key = hash64_fnv1a(mem->bytes + key_ptr, (size_t)key_len);
+        }
+        uint64_t value = 0;
+        for (size_t i = 0; i < ZI_MVAR_MAX; i++) {
+          if (!zi_mvar[i].used) continue;
+          if (zi_mvar[i].key == key) {
+            value = zi_mvar[i].value;
+            break;
+          }
+        }
+        regs.HL = value;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+
+      if (strcmp(callee, "zi_mvar_set_default") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint64_t key_obj64 = regs.HL;
+        uint64_t value = regs.DE;
+        if (r->nops >= 3) {
+          (void)op_to_u64(syms, &regs, &r->ops[1], &key_obj64);
+          (void)op_to_u64(syms, &regs, &r->ops[2], &value);
+        }
+        uint32_t key_ptr = 0, key_len = 0;
+        uint64_t key = 0;
+        if (bytes_view(mem, (uint32_t)key_obj64, &key_ptr, &key_len) &&
+            mem_check_span(mem, key_ptr, key_len)) {
+          key = hash64_fnv1a(mem->bytes + key_ptr, (size_t)key_len);
+        }
+
+        size_t empty = (size_t)-1;
+        for (size_t i = 0; i < ZI_MVAR_MAX; i++) {
+          if (!zi_mvar[i].used) {
+            if (empty == (size_t)-1) empty = i;
+            continue;
+          }
+          if (zi_mvar[i].key == key) {
+            if (zi_mvar[i].value != 0) {
+              regs.HL = zi_mvar[i].value;
+            } else {
+              zi_mvar[i].value = value;
+              regs.HL = value;
+            }
+            zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                             r->line, r->m);
+            pc++;
+            continue;
+          }
+        }
+        if (empty == (size_t)-1) {
+          regs.HL = 0;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        zi_mvar[empty].used = 1;
+        zi_mvar[empty].key = key;
+        zi_mvar[empty].value = value;
+        regs.HL = value;
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                          r->m);
         pc++;

@@ -1,0 +1,244 @@
+module Zing·Buffer.
+
+use Zing·Result.
+use Zing·Error.
+use Zing·Str.
+
+;; SPDX-FileCopyrightText: 2026 Frogfish
+;; SPDX-License-Identifier: Apache-2.0
+;; Author: Alexander Croft <alex@frogfish.io>
+
+;; core/buffer.zing — byte buffer builder (v1)
+;;
+;; Buffer is an owned, growless (for now) byte builder: (ptr,len,cap).
+;; Allocation is UNINITIALIZED by default for speed.
+;;
+;; Normative semantics:
+;; - Buffer bytes: cap allocates cap bytes, leaves contents undefined.
+;; - len is the number of committed bytes (0..cap).
+;; - writeByte/writeBytes append at the end (at index len) and advance len.
+;; - byteAt reads within [0,len); out of bounds -> Fail (#t_buf_bounds).
+;; - clear sets len := 0 (does NOT zero memory).
+;; - sliceLen sets len := n if 0<=n<=cap else Fail (#t_buf_bounds).
+;; - Deterministic memory is explicit: bufferZeroAll zero-fills [0,cap) then sets len := 0.
+;;
+;; Error tags (suggested stable set):
+;;   #t_buf_oom       allocation failed
+;;   #t_buf_bounds    index/len out of bounds
+;;   #t_buf_cap       capacity exceeded
+;;   #t_buf_badarg    invalid argument
+
+export struct Buffer { ptr: i64, len: i32, cap: i32 }.
+
+;; -------------------------
+;; Runtime/compiler intrinsics
+;; -------------------------
+
+;; Allocate a buffer of capacity cap bytes.
+;; Contents are UNINITIALIZED.
+export Buffer bytes: cap[
+  ;; compiler/runtime intrinsic
+].
+
+;; Reset length to zero. Contents unchanged.
+export Buffer clear[
+  ;; compiler/runtime intrinsic
+].
+
+;; Set logical length to n (0..cap), returns same buffer.
+export Buffer sliceLen: n[
+  ;; compiler/runtime intrinsic
+].
+
+;; Append one byte, fails if cap exceeded.
+export Buffer writeByte: b[
+  ;; compiler/runtime intrinsic
+].
+
+;; Read byte at idx (0..len-1), returns Result[u32, Err].
+export Buffer byteAt: idx[
+  ;; compiler/runtime intrinsic
+].
+
+;; Overwrite byte at idx (0..len-1), returns Result[unit, Err].
+export Buffer putByteAt: idx byte: b[
+  ;; compiler/runtime intrinsic
+].
+
+;; -------------
+;; Error helpers
+;; -------------
+
+export bufferFail trace: trace msg: msg[
+  ;; trace MUST be unique per call site (see UNIFIED_SPEC_v1/errors).
+  ret (Fail e: (Err kind: #BufferError trace: trace msg: msg span: nil stage: #buffer code: trace))
+].
+
+;; -----------------
+;; Basic query helpers
+;; -----------------
+
+export bufferLen buf[
+  ret (buf len)
+].
+
+export bufferPtr buf[
+  ret (buf ptr)
+].
+
+export bufferCap buf[
+  ret (buf cap)
+].
+
+export bufferRemaining buf[
+  ret ((buf cap) - (buf len))
+].
+
+;; View of committed bytes [0,len)
+export bufferAsBytes buf[
+  ret (Slice { ptr: (buf ptr), len: (buf len) })
+].
+
+;; View of full capacity [0,cap) (use with care; includes uninitialized bytes)
+export bufferAsCapBytes buf[
+  ret (Slice { ptr: (buf ptr), len: (buf cap) })
+].
+
+;; -----------------
+;; Length management
+;; -----------------
+
+export bufferClear buf[
+  buf clear.
+  ret (Ok v: unit)
+].
+
+export bufferSliceLen buf: buf len: n[
+  ;; Prefer explicit bounds check for consistent errors even if intrinsic varies.
+  (n < 0) ifTrue: [ ret (bufferFail trace: #t_buf_bounds_slice_neg msg: "buf:sliceLen<0") ].
+  (n > (buf cap)) ifTrue: [ ret (bufferFail trace: #t_buf_bounds_slice_cap msg: "buf:sliceLen>cap") ].
+  △ := (buf sliceLen: n).
+  ret (Ok v: buf)
+].
+
+export bufferEnsureCap buf: buf add: add[
+  (add < 0) ifTrue: [ ret (bufferFail trace: #t_buf_badarg_add msg: "buf:ensureCap:add<0") ].
+  need := (buf len) + add.
+  (need > (buf cap)) ifTrue: [ ret (bufferFail trace: #t_buf_cap_need msg: "buf:cap") ].
+  ret (Ok v: unit)
+].
+
+;; -------------------------
+;; Deterministic initialization
+;; -------------------------
+
+;; Zero-fill the entire allocation [0,cap) then set len := 0.
+;; This is explicit opt-in determinism for encoding/logging when needed.
+export bufferZeroAll buf[
+  cap := (buf cap).
+  buf clear.
+  i := 0.
+  [ i < cap ] whileTrue: [
+    (buf writeByte: 0u32) ifFail: [ :e |
+      ;; If this fails, cap/len invariants are broken; surface as #t_buf_cap.
+      ret (bufferFail trace: #t_buf_cap_zero msg: "buf:zeroAll")
+    ] ifOk: [ :△ | unit ].
+    i := i + 1
+  ].
+  ;; reset len back to 0 without changing bytes
+  △ := (buf sliceLen: 0).
+  ret (Ok v: unit)
+].
+
+;; -----------------
+;; Append operations
+;; -----------------
+
+export bufferWriteByte buf: buf byte: b[
+  (bufferEnsureCap buf: buf add: 1) orRet.
+  ret (buf writeByte: b)
+].
+
+export bufferWriteBytes buf: buf bytes: src[
+  srcLen := src len.
+  (srcLen < 0) ifTrue: [ ret (bufferFail trace: #t_buf_badarg_write_len msg: "buf:writeBytes:len<0") ].
+  (bufferEnsureCap buf: buf add: srcLen) orRet.
+
+  i := 0.
+  [ i < srcLen ] whileTrue: [
+    b := (src at: i).
+    (buf writeByte: b) ifFail: [ :e |
+      ;; Should be impossible after ensureCap, but keep a stable error.
+      ret (bufferFail trace: #t_buf_cap_write_cap msg: "buf:writeBytes:cap")
+    ] ifOk: [ :△ | unit ].
+    i := i + 1
+  ].
+  ret (Ok v: unit)
+].
+
+;; Convenience: treat Str/Bytes the same (your Str := Slice[u8])
+export bufferWriteStr buf str: s[
+  ret (bufferWriteBytes buf: buf bytes: s)
+].
+
+export bufferWriteU16le buf: buf value: v[
+  ;; v is u32 in your codebase; low 16 bits are written.
+  (bufferEnsureCap buf: buf add: 2) orRet.
+  q1 := v / 256u32.
+  b0 := v - (q1 * 256u32).
+  b1 := q1.
+  (buf writeByte: b0) orRet.
+  (buf writeByte: b1) orRet.
+  ret (Ok v: unit)
+].
+
+export bufferWriteU32le buf: buf value: v[
+  (bufferEnsureCap buf: buf add: 4) orRet.
+  q1 := v / 256u32.
+  b0 := v - (q1 * 256u32).
+  q2 := q1 / 256u32.
+  b1 := q1 - (q2 * 256u32).
+  q3 := q2 / 256u32.
+  b2 := q2 - (q3 * 256u32).
+  b3 := q3.
+  (buf writeByte: b0) orRet.
+  (buf writeByte: b1) orRet.
+  (buf writeByte: b2) orRet.
+  (buf writeByte: b3) orRet.
+  ret (Ok v: unit)
+].
+
+export bufferWriteU64le buf: buf value: v[
+  (bufferEnsureCap buf: buf add: 8) orRet.
+  q1 := v / 256u64.
+  b0 := (v - (q1 * 256u64)) asU32.
+  q2 := q1 / 256u64.
+  b1 := (q1 - (q2 * 256u64)) asU32.
+  q3 := q2 / 256u64.
+  b2 := (q2 - (q3 * 256u64)) asU32.
+  q4 := q3 / 256u64.
+  b3 := (q3 - (q4 * 256u64)) asU32.
+  q5 := q4 / 256u64.
+  b4 := (q4 - (q5 * 256u64)) asU32.
+  q6 := q5 / 256u64.
+  b5 := (q5 - (q6 * 256u64)) asU32.
+  q7 := q6 / 256u64.
+  b6 := (q6 - (q7 * 256u64)) asU32.
+  b7 := q7 asU32.
+  (buf writeByte: b0) orRet.
+  (buf writeByte: b1) orRet.
+  (buf writeByte: b2) orRet.
+  (buf writeByte: b3) orRet.
+  (buf writeByte: b4) orRet.
+  (buf writeByte: b5) orRet.
+  (buf writeByte: b6) orRet.
+  (buf writeByte: b7) orRet.
+  ret (Ok v: unit)
+].
+
+;; Optional: length-prefixed bytes (u32 little-endian length + payload)
+export bufferWriteHbytes buf: buf bytes: src[
+  lenU := (src len) + 0u32.
+  (bufferWriteU32le buf: buf value: lenU) orRet.
+  ret (bufferWriteBytes buf: buf bytes: src)
+].

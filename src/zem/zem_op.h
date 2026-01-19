@@ -98,6 +98,7 @@ typedef enum {
 
   ZEM_OP_FILL,
   ZEM_OP_LDIR,
+  ZEM_OP_SXT32,
   ZEM_OP_CP,
   ZEM_OP_JR,
   ZEM_OP_CALL,

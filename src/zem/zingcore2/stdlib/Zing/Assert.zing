@@ -1,0 +1,31 @@
+module Zing·Assert.
+use Zing·Result.
+use Zing·Error.
+
+;; assert.zing — assertions and invariants (namespaced)
+
+assert? cond: trace: msg: [
+  cond ifTrue: [ ret (Ok v: unit) ] ifFalse: [ ret (Fail e: (Err trace: trace msg: msg)) ].
+].
+
+assertVal value: cond: trace: msg: [
+  cond ifTrue: [ ret (Ok v: value) ] ifFalse: [ ret (Fail e: (Err trace: trace msg: msg)) ].
+].
+
+assert cond: msg: [
+  cond ifTrue: [ ret (Ok v: unit) ] ifFalse: [ ret (Fail e: (Err kind: #AssertError trace: #t_assert_failed_3p7s9w1k4v2c msg: msg span: nil stage: #assert code: #t_assert_failed_3p7s9w1k4v2c)) ].
+].
+
+trap trace: msg: [
+  _ := trace.
+  _ := msg.
+  1 / 0
+].
+
+invariant! cond: trace: msg: [
+  cond ifTrue: [ ret unit ] ifFalse: [ trap trace: trace msg: msg ].
+].
+
+invariant cond: msg: [
+  cond ifTrue: [ ret (Ok v: unit) ] ifFalse: [ ret (Fail e: (Err kind: #AssertError trace: #t_invariant_failed_c8z1r6m0h4q9 msg: msg span: nil stage: #assert code: #t_invariant_failed_c8z1r6m0h4q9)) ].
+].

@@ -1,0 +1,57 @@
+module Zing·Hopper.
+
+use Zing·Buffer.
+use Zing·Result.
+use Zing·Error.
+
+;; Scope-owned arena allocation (Hopper v0).
+;;
+;; This is a deliberately tiny surface:
+;; - the arena is created when a Future scope is created
+;; - allocations are bump-only
+;; - you can reset/release at explicit points
+
+extern zi_hop_alloc(u32, u32, u32) -> i64.
+extern zi_hop_alloc_buf(u32, u32) -> Buffer.
+extern zi_hop_mark(u32) -> u32.
+extern zi_hop_release(u32, u32, u32) -> i32.
+extern zi_hop_reset(u32, u32) -> i32.
+extern zi_hop_used(u32) -> u32.
+extern zi_hop_cap(u32) -> u32.
+
+hopperFail trace: trace msg: msg[
+  ret (Fail e: (Err kind: #HopperError trace: trace msg: msg span: nil stage: #hopper code: trace))
+].
+
+export cap scope: scope[
+  ret (zi_hop_cap(scope))
+].
+
+export used scope: scope[
+  ret (zi_hop_used(scope))
+].
+
+export mark scope: scope[
+  ret (zi_hop_mark(scope))
+].
+
+export reset scope: scope wipe: wipe[
+  rc := zi_hop_reset(scope, wipe).
+  (rc < 0) ifTrue: [ ret (hopperFail trace: #t_hopper_reset msg: "hopper:reset") ].
+  ret (Ok v: unit)
+].
+
+export release scope: scope mark: mark wipe: wipe[
+  rc := zi_hop_release(scope, mark, wipe).
+  (rc < 0) ifTrue: [ ret (hopperFail trace: #t_hopper_release msg: "hopper:release") ].
+  ret (Ok v: unit)
+].
+
+;; Allocate a Buffer backed by the scope arena.
+export allocBuf scope: scope cap: cap[
+  (cap < 0) ifTrue: [ ret (hopperFail trace: #t_hopper_alloc_badcap msg: "hopper:cap") ].
+  capU := (cap asU32).
+  buf := zi_hop_alloc_buf(scope, capU).
+  (buf = nil) ifTrue: [ ret (hopperFail trace: #t_hopper_oom msg: "hopper:oom") ].
+  ret (Ok v: buf)
+].

@@ -108,6 +108,7 @@ zem_op_t zem_decode_mnemonic(const char *m) {
       if (strcmp(m, "SLA64") == 0) return ZEM_OP_SLA64;
       if (strcmp(m, "SRL64") == 0) return ZEM_OP_SRL64;
       if (strcmp(m, "SRA64") == 0) return ZEM_OP_SRA64;
+      if (strcmp(m, "SXT32") == 0) return ZEM_OP_SXT32;
       if (strcmp(m, "ST8") == 0) return ZEM_OP_ST8;
       if (strcmp(m, "ST16") == 0) return ZEM_OP_ST16;
       if (strcmp(m, "ST32") == 0) return ZEM_OP_ST32;

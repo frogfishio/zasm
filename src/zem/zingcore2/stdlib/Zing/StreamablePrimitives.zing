@@ -1,0 +1,94 @@
+module Zing·Streamable·Primitives.
+
+use Zing·Error.
+use Zing·Result.
+use Zing·Streamable.
+use Zing·IO.
+
+;; Minimal builtin Streamable instances for primitives that should never
+;; require user-defined protocol instances.
+;;
+;; - unit  streams as empty output
+;; - bool  streams as "true"/"false"
+;; - integers stream as base-10 text
+
+export instance Streamable[unit] name: #default do: [
+  streamTo value: △ out: out trace: trace[
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[bool] name: #default do: [
+  streamTo value: b out: out trace: trace[
+    n := 0.
+    b ifTrue:  [ n := (out writeBytes: "true"#utf8) ] ifFalse: [ n := (out writeBytes: "false"#utf8) ].
+    (n < 0) ifTrue: [
+      ret (Fail e: (Err kind: #IOError trace: trace msg: "writeBytes failed"))
+    ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[i8] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeI32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeI32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[i16] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeI32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeI32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[i32] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeI32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeI32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[u8] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeU32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeU32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[u16] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeU32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeU32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[u32] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeU32: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeU32 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[i64] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeI64: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeI64 failed")) ].
+    ret (Ok v: unit).
+  ].
+].
+
+export instance Streamable[u64] name: #default do: [
+  streamTo value: n out: out trace: trace[
+    w := (out writeU64: n).
+    (w < 0) ifTrue: [ ret (Fail e: (Err kind: #IOError trace: trace msg: "writeU64 failed")) ].
+    ret (Ok v: unit).
+  ].
+].

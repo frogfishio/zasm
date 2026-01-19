@@ -1,0 +1,32 @@
+module Zing·Control.
+
+;; SPDX-FileCopyrightText: 2025 Frogfish
+;; SPDX-License-Identifier: GPL-3.0-or-later
+;;
+;; control.zing — control combinator helpers (namespaced)
+;;
+;; Note: the core message forms below compile to compiler intrinsics:
+;; - ifTrue:/ifFalse:/ifTrue:ifFalse:
+;; - whileTrue:
+;; - to:do:
+;; These helpers provide optional functional-style entry points.
+
+ifTrue cond then: [
+  cond ifTrue: then
+].
+
+ifFalse cond then: [
+  cond ifFalse: then
+].
+
+ifTrue cond then: ifFalse: else: [
+  cond ifTrue: then ifFalse: else
+].
+
+whileTrue pred do: [
+  pred whileTrue: do
+].
+
+to start end: do: [
+  start to: end do: do
+].

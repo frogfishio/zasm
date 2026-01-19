@@ -1,0 +1,263 @@
+module Zing·IO.
+
+use Zing·Result.
+use Zing·Error.
+use Zing·Future.
+use Zing·Buffer.
+
+;; Fallback write syscall (ABI v2).
+extern zi_write(i32, i64, i32) -> i32.
+extern res_write_i32(i32, i32) -> i32.
+extern res_write_u32(i32, u32) -> i32.
+extern res_write_i64(i32, i64) -> i32.
+extern res_write_u64(i32, u64) -> i32.
+
+;; core/io.zing — checked stdin/stdout/telemetry helpers (v0)
+;;
+;; This module does NOT change the primitive ABI.
+;; It provides stdlib wrappers that turn primitive i32 statuses into Result/Err.
+;;
+;; Notes:
+;; - `stdout writeBytes:` returns i32 (bytes written) or -1 on failure.
+;; - `stdin readInto:` returns i32 (bytes read), 0 on EOF, or -1 on failure.
+;; - `telemetry emit: bytes:` is currently best-effort; it returns no status.
+;;
+;; Trace rule (normative, per Error.zing): callers should pass a unique trace tag.
+
+export stdoutWriteBytes trace: trace bytes: bytes[
+  stdout_closed ifTrue: [
+    ret (Fail e: (Err kind: #IOError trace: trace msg: "stdout closed" span: nil stage: #io code: #stdout_closed))
+  ].
+
+  n := (stdout writeBytes: bytes).
+
+  (n < 0) ifTrue: [
+    ret (Fail e: (Err kind: #IOError trace: trace msg: "stdout write failed" span: nil stage: #io code: #stdout_write hostCode: n))
+  ].
+
+  ;; Treat short write as failure (deterministic, caller can retry later if desired).
+  (n != (bytes len)) ifTrue: [
+    ret (Fail e: (Err kind: #IOError trace: trace msg: "stdout short write" span: nil stage: #io code: #stdout_short_write hostCode: n))
+  ].
+
+  ret (Ok v: unit).
+].
+
+export stdinReadInto trace: trace buf: buf[
+  n := (stdin readInto: buf).
+  (n < 0) ifTrue: [
+    ret (Fail e: (Err kind: #IOError trace: trace msg: "stdin read failed" span: nil stage: #io code: #stdin_read hostCode: n))
+  ].
+  ret (Ok v: n).
+].
+
+export telemetryEmit trace: △ topic: topic bytes: bytes[
+  ;; Best-effort / fire-and-forget.
+  ;;
+  ;; Ok means: the program successfully issued the telemetry call.
+  ;; It does NOT mean the host accepted, delivered, persisted, or displayed it.
+  telemetry emit: topic bytes: bytes.
+  ret (Ok v: unit).
+].
+
+;; ---------------------------------------------------------------------------
+;; Async-backed sink writes (v1)
+;; ---------------------------------------------------------------------------
+;;
+;; Exposed as a plain function so the compiler can lower:
+;;   `out writeBytes: bytes`
+;; into:
+;;   `writeBytes(out, bytes)`
+;; via open-import resolution.
+
+export writeBytes out: out bytes: bytes[
+  (out != 1) ifTrue: [
+    ret zi_write(out, (bytes ptr), (bytes len))
+  ].
+
+  ;; NOTE: scope is currently created per call (no caching) to avoid exposing
+  ;; managed-var ABI surface area here. We can add deterministic caching once
+  ;; the mvar ABI is locked down.
+  scope := Future new.
+  (scope = nil) ifTrue: [
+    ;; No async scope available (cap missing) -> fall back to direct write.
+    ret zi_write(out, (bytes ptr), (bytes len))
+  ].
+
+  params := Buffer bytes: (4 + (bytes len)).
+  params clear.
+  (bufferWriteHbytes buf: params bytes: bytes)
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+
+  f := (spawnBuf_capName_selector_params
+    scope: scope
+    capKind: "io"#utf8
+    capName: "stdout"#utf8
+    selector: "io.write_bytes.v1"#utf8
+    paramsBuf: params
+  ).
+  (f = nil) ifTrue: [
+    ;; io/stdout cap missing: fall back to direct write.
+    ret zi_write(out, (bytes ptr), (bytes len))
+  ].
+
+  ack := Buffer bytes: 64.
+  (f awaitInto: ack)
+    ifFail: [ :_ | ret zi_write(out, (bytes ptr), (bytes len)) ]
+    ifOk:   [ :_ | ret (bytes len) ].
+].
+
+readU32le buf: buf off: off[
+  (buf byteAt: off) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b0 |
+    (buf byteAt: off + 1) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b1 |
+      (buf byteAt: off + 2) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b2 |
+        (buf byteAt: off + 3) ifFail: [ :e | ret (Fail e: e) ] ifOk: [ :b3 |
+          v := b0 + (b1 * 256u32) + (b2 * 65536u32) + (b3 * 16777216u32).
+          ret (Ok v: v)
+        ]
+      ]
+    ]
+  ].
+].
+
+export writeI32 out: out value: v[
+  (out != 1) ifTrue: [ ret res_write_i32(out, v) ].
+
+  scope := Future new.
+  (scope = nil) ifTrue: [ ret res_write_i32(out, v) ].
+
+  params := Buffer bytes: 4.
+  params clear.
+  (bufferWriteU32le buf: params value: (v asU32))
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+
+  f := (spawnBuf_capName_selector_params
+    scope: scope
+    capKind: "io"#utf8
+    capName: "stdout"#utf8
+    selector: "io.write_i32.v1"#utf8
+    paramsBuf: params
+  ).
+  (f = nil) ifTrue: [ ret res_write_i32(out, v) ].
+
+  ack := Buffer bytes: 16.
+  (f awaitInto: ack)
+    ifFail: [ :_ | ret res_write_i32(out, v) ]
+    ifOk:   [ :_ |
+      (readU32le buf: ack off: 0u32)
+        ifFail: [ :_ | ret -1 ]
+        ifOk:   [ :n | ret (n asI32) ]
+    ].
+].
+
+export writeU32 out: out value: v[
+  (out != 1) ifTrue: [ ret res_write_u32(out, v) ].
+
+  scope := Future new.
+  (scope = nil) ifTrue: [ ret res_write_u32(out, v) ].
+
+  params := Buffer bytes: 4.
+  params clear.
+  (bufferWriteU32le buf: params value: v)
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+
+  f := (spawnBuf_capName_selector_params
+    scope: scope
+    capKind: "io"#utf8
+    capName: "stdout"#utf8
+    selector: "io.write_u32.v1"#utf8
+    paramsBuf: params
+  ).
+  (f = nil) ifTrue: [ ret res_write_u32(out, v) ].
+
+  ack := Buffer bytes: 16.
+  (f awaitInto: ack)
+    ifFail: [ :_ | ret res_write_u32(out, v) ]
+    ifOk:   [ :_ |
+      (readU32le buf: ack off: 0u32)
+        ifFail: [ :_ | ret -1 ]
+        ifOk:   [ :n | ret (n asI32) ]
+    ].
+].
+
+export writeI64 out: out value: v[
+  (out != 1) ifTrue: [ ret res_write_i64(out, v) ].
+
+  scope := Future new.
+  (scope = nil) ifTrue: [ ret res_write_i64(out, v) ].
+
+  params := Buffer bytes: 8.
+  params clear.
+  ;; Encode signed i64 as 8 bytes little-endian (two's complement) without a
+  ;; bitcast operator by splitting into hi/lo u32 words.
+  pow := 4294967296i64. ;; 2^32
+  q := v / pow.
+  r := v - (q * pow).
+  (r < 0i64) ifTrue: [
+    r := r + pow.
+    q := q - 1i64.
+  ].
+  lo := r asU32.
+  hi := q.
+  (hi < 0i64) ifTrue: [ hi := hi + pow ].
+  hiU := hi asU32.
+
+  (bufferWriteU32le buf: params value: lo)
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+  (bufferWriteU32le buf: params value: hiU)
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+
+  f := (spawnBuf_capName_selector_params
+    scope: scope
+    capKind: "io"#utf8
+    capName: "stdout"#utf8
+    selector: "io.write_i64.v1"#utf8
+    paramsBuf: params
+  ).
+  (f = nil) ifTrue: [ ret res_write_i64(out, v) ].
+
+  ack := Buffer bytes: 16.
+  (f awaitInto: ack)
+    ifFail: [ :_ | ret res_write_i64(out, v) ]
+    ifOk:   [ :_ |
+      (readU32le buf: ack off: 0u32)
+        ifFail: [ :_ | ret -1 ]
+        ifOk:   [ :n | ret (n asI32) ]
+    ].
+].
+
+export writeU64 out: out value: v[
+  (out != 1) ifTrue: [ ret res_write_u64(out, v) ].
+
+  scope := Future new.
+  (scope = nil) ifTrue: [ ret res_write_u64(out, v) ].
+
+  params := Buffer bytes: 8.
+  params clear.
+  (bufferWriteU64le buf: params value: v)
+    ifFail: [ :_ | ret -1 ]
+    ifOk:   [ :_ | unit ].
+
+  f := (spawnBuf_capName_selector_params
+    scope: scope
+    capKind: "io"#utf8
+    capName: "stdout"#utf8
+    selector: "io.write_u64.v1"#utf8
+    paramsBuf: params
+  ).
+  (f = nil) ifTrue: [ ret res_write_u64(out, v) ].
+
+  ack := Buffer bytes: 16.
+  (f awaitInto: ack)
+    ifFail: [ :_ | ret res_write_u64(out, v) ]
+    ifOk:   [ :_ |
+      (readU32le buf: ack off: 0u32)
+        ifFail: [ :_ | ret -1 ]
+        ifOk:   [ :n | ret (n asI32) ]
+    ].
+].

@@ -1,0 +1,63 @@
+module Zing·Option.
+use Zing·Result.
+use Zing·Error.
+
+;; Option[T] — absence without failure.
+;;
+;; Deterministic, message-based helpers only; no traps.
+
+enum Option[T] [
+  Some(value: T).
+  None.
+].
+
+Some v: [
+  ret (Some { value: v })
+].
+
+None[
+  ret None
+].
+
+isSome opt: o[
+  ret (match o [
+    Some -> true.
+    None -> false.
+  ])
+].
+
+isNone opt: o[
+  ret (match o [
+    Some -> false.
+    None -> true.
+  ])
+].
+
+unwrapOr opt: o default: d[
+  ret (match o [
+    Some { value: v } -> v.
+    None -> d.
+  ])
+].
+
+map opt: o block: f[
+  ret (match o [
+    Some { value: v } -> (Some v: (f call: v)).
+    None -> None.
+  ])
+].
+
+andThen opt: o block: f[
+  ;; f: T -> Option[U]
+  ret (match o [
+    Some { value: v } -> (f call: v).
+    None -> None.
+  ])
+].
+
+toResult opt: o err: e[
+  ret (match o [
+    Some { value: v } -> (Ok v: v).
+    None -> (Fail e: e).
+  ])
+].
