@@ -39,6 +39,7 @@ ZOP_BUILD := $(BUILD)/zop
 ZXC_BUILD := $(BUILD)/zxc
 ZIR_BUILD := $(BUILD)/zir
 ZRUN_BUILD := $(BUILD)/zrun
+LOWER_BUILD := $(BUILD)/lower
 CLOAK_BUILD := $(BUILD)/cloak
 CLOAK_TEST_BUILD := $(BUILD)/cloak_tests
 ZEM_BUILD := $(BUILD)/zem
@@ -102,7 +103,7 @@ ZAS_OBJ := \
 ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded-internal-declaration
 
 .PHONY: \
-	all clean zas zld zrun zlnt zop zxc zxc-lib zir dirs install \
+	all clean zas zld zrun zlnt zop zxc zxc-lib zir lower dirs install \
 	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
   zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
@@ -123,12 +124,12 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld zrun zlnt zop zxc zir zem zasm-bin-wrap
+build: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
 
 pipeline: build
 	./scripts/pipeline.sh --skip-build
 
-install: zas zld zrun zlnt zop zxc zir zem zasm-bin-wrap
+install: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@cp tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
@@ -139,15 +140,16 @@ install: zas zld zrun zlnt zop zxc zir zem zasm-bin-wrap
 	@install -m 0755 $(BIN)/zxc $(DESTDIR)$(BINDIR)/zxc
 	@install -m 0755 $(BIN)/zir $(DESTDIR)$(BINDIR)/zir
 	@install -m 0755 $(BIN)/zem $(DESTDIR)$(BINDIR)/zem
+	@install -m 0755 $(BIN)/lower $(DESTDIR)$(BINDIR)/lower
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
 	printf "/* Auto-generated. */\n#ifndef ZASM_VERSION_H\n#define ZASM_VERSION_H\n#define ZASM_VERSION \"%s\"\n#endif\n" "$$ver" > $(VERSION_HEADER)
 
-zas zld zrun zlnt: $(VERSION_HEADER)
+zas zld zrun zlnt lower: $(VERSION_HEADER)
 
 dist: build
 	$(MAKE) clean
@@ -157,6 +159,7 @@ DIST_TOOLS := zas zld zlnt zop zxc zir
 ifneq ($(NO_ZRUN),1)
   DIST_TOOLS += zrun
 endif
+DIST_TOOLS += lower
 DIST_LIBS := libzxc.a
 
 dist-$(PLATFORM): $(DIST_TOOLS) zxc-lib $(VERSION_HEADER)
@@ -578,6 +581,31 @@ zld: $(ZLD_OBJ) | dirs
 	ln -sf $(PLATFORM)/zld $(BIN_ROOT)/zld
 
 .PHONY: zld
+
+# ---- lower (IR -> Mach-O arm64) ----
+
+LOWER_SRC := \
+  src/lower/arm64/ir.c \
+  src/lower/arm64/json_ir.c \
+  src/lower/arm64/codegen.c \
+  src/lower/arm64/mach_o.c \
+  src/lower/arm64/main.c
+
+LOWER_OBJ := \
+  $(LOWER_BUILD)/ir.o \
+  $(LOWER_BUILD)/json_ir.o \
+  $(LOWER_BUILD)/codegen.o \
+  $(LOWER_BUILD)/mach_o.o \
+  $(LOWER_BUILD)/main.o
+
+$(LOWER_BUILD)/%.o: src/lower/arm64/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/lower/arm64 -c $< -o $@
+
+lower: $(LOWER_OBJ) | dirs
+	$(CC) $(CFLAGS) $(LOWER_OBJ) -o $(BIN)/lower $(LDFLAGS)
+	ln -sf $(PLATFORM)/lower $(BIN_ROOT)/lower
+
+.PHONY: lower
 
 # ---- zem (IR v1.1 emulator) ----
 

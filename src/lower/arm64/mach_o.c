@@ -4,6 +4,9 @@
 #include <mach-o/reloc.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
+#if defined(__GNUC__) || defined(__clang__)
+#include <alloca.h>
+#endif
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

@@ -20,7 +20,7 @@
 - Native translation (opcode JIT to host ISA): `bin/zxc /tmp/hello.zasm.bin > /tmp/hello.native.bin`
 - Native runner (if built): `build/native_runner /tmp/hello.zasm.bin`
 - Cloak JIT host (separate build): `__cloak__/bin/<platform>/zcloak-jit /tmp/hello.zasm.bin`
-- Cloak shared-object host (for lembeh_handle .so/.dylib): `__cloak__/bin/<platform>/zcloak guest.dylib`
+- Cloak shared-object host (legacy `.so/.dylib` entrypoint): `__cloak__/bin/<platform>/zcloak guest.dylib`
 
 ### zem debugging + events
 

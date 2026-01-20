@@ -304,6 +304,19 @@ static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_o
     out->kind = IR_OP_SYM;
     out->sym = tok_strdup(js, &toks[v_idx]);
     if (!out->sym) return -1;
+  } else if (tok_streq(js, &toks[t_idx], "reg")) {
+    int v_idx = find_key(js, toks, op_idx, "v");
+    if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
+    // Lowerer represents regs/labels as symbols internally; codegen maps known names.
+    out->kind = IR_OP_SYM;
+    out->sym = tok_strdup(js, &toks[v_idx]);
+    if (!out->sym) return -1;
+  } else if (tok_streq(js, &toks[t_idx], "lbl")) {
+    int v_idx = find_key(js, toks, op_idx, "v");
+    if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
+    out->kind = IR_OP_SYM;
+    out->sym = tok_strdup(js, &toks[v_idx]);
+    if (!out->sym) return -1;
   } else if (tok_streq(js, &toks[t_idx], "num")) {
     int v_idx = find_key(js, toks, op_idx, "v");
     int ok = 0;
@@ -321,10 +334,31 @@ static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_o
     if (!out->str) return -1;
   } else if (tok_streq(js, &toks[t_idx], "mem")) {
     int b_idx = find_key(js, toks, op_idx, "base");
-    if (b_idx < 0 || toks[b_idx].type != JSMN_STRING) return -1;
     out->kind = IR_OP_MEM;
-    out->mem_base = tok_strdup(js, &toks[b_idx]);
+    if (b_idx < 0) return -1;
+    if (toks[b_idx].type == JSMN_STRING) {
+      // zasm-v1.0 encoding: base is a bare string.
+      out->mem_base = tok_strdup(js, &toks[b_idx]);
+    } else if (toks[b_idx].type == JSMN_OBJECT) {
+      // zasm-v1.1 encoding: base is a nested {t:"reg"|"sym", v:"..."} object.
+      int bt_idx = find_key(js, toks, b_idx, "t");
+      int bv_idx = find_key(js, toks, b_idx, "v");
+      if (bt_idx < 0 || bv_idx < 0 || toks[bt_idx].type != JSMN_STRING || toks[bv_idx].type != JSMN_STRING) return -1;
+      if (!tok_streq(js, &toks[bt_idx], "reg") && !tok_streq(js, &toks[bt_idx], "sym")) return -1;
+      out->mem_base = tok_strdup(js, &toks[bv_idx]);
+    } else {
+      return -1;
+    }
     if (!out->mem_base) return -1;
+
+    int disp_idx = find_key(js, toks, op_idx, "disp");
+    if (disp_idx >= 0) {
+      int ok = 0;
+      long long v = tok_to_int(js, &toks[disp_idx], &ok);
+      if (!ok) return -1;
+      out->has_mem_disp = 1;
+      out->mem_disp = v;
+    }
   } else {
     return -1;
   }
@@ -338,7 +372,8 @@ static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_o
   int idx = op_idx + 1;
   for (int i = 0; i < pairs; i++) {
     if (!tok_streq(js, &toks[idx], "t") && !tok_streq(js, &toks[idx], "v") &&
-        !tok_streq(js, &toks[idx], "base") && !tok_streq(js, &toks[idx], "loc")) {
+        !tok_streq(js, &toks[idx], "base") && !tok_streq(js, &toks[idx], "disp") &&
+        !tok_streq(js, &toks[idx], "size") && !tok_streq(js, &toks[idx], "loc")) {
       return -1;
     }
     idx = tok_skip(toks, idx + 1);
@@ -461,7 +496,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     }
     /* ir version */
     int ir_idx = find_key(line, toks, 0, "ir");
-    if (ir_idx < 0 || !tok_streq(line, &toks[ir_idx], "zasm-v1.0")) {
+    if (ir_idx < 0 || !(tok_streq(line, &toks[ir_idx], "zasm-v1.0") || tok_streq(line, &toks[ir_idx], "zasm-v1.1"))) {
       print_line_err(line_no, line, "missing or invalid ir version");
       free(toks);
       rc = -1;
@@ -491,6 +526,15 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       long long v = tok_to_int(line, &toks[sr_idx], &ok);
       if (ok && v >= 0) src_ref = (size_t)v;
     }
+
+    // v1.1 metadata/source/diagnostic records are not needed for codegen; ignore them.
+    if (tok_streq(line, &toks[k_idx], "meta") ||
+        tok_streq(line, &toks[k_idx], "src") ||
+        tok_streq(line, &toks[k_idx], "diag")) {
+      free(toks);
+      continue;
+    }
+
     if (tok_streq(line, &toks[k_idx], "label")) {
       int name_idx = find_key(line, toks, 0, "name");
       if (name_idx < 0 || toks[name_idx].type != JSMN_STRING) {
@@ -516,7 +560,8 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       int idx = 1;
       for (int i = 0; i < pairs; i++) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
-            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc")) {
+            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc") &&
+            !tok_streq(line, &toks[idx], "id")) {
           print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
@@ -551,7 +596,8 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       for (int i = 0; i < pairs; i++) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
             !tok_streq(line, &toks[idx], "m") && !tok_streq(line, &toks[idx], "ops") &&
-            !tok_streq(line, &toks[idx], "loc")) {
+            !tok_streq(line, &toks[idx], "loc") &&
+            !tok_streq(line, &toks[idx], "id") && !tok_streq(line, &toks[idx], "src_ref")) {
           print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }
@@ -671,7 +717,8 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       for (int i = 0; i < pairs; i++) {
         if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
             !tok_streq(line, &toks[idx], "d") && !tok_streq(line, &toks[idx], "args") &&
-            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc")) {
+            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc") &&
+            !tok_streq(line, &toks[idx], "id") && !tok_streq(line, &toks[idx], "src_ref")) {
           print_line_err(line_no, line, "unknown field");
           ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
         }

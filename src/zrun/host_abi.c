@@ -6,9 +6,9 @@
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <inttypes.h>
 
 static int bounds_ok(size_t ptr, size_t len, size_t size) {
-  // Host-side guardrails: this local harness should never read/write past guest memory.
   if (ptr > size) return 0;
   if (len > size - ptr) return 0;
   return 1;
@@ -28,46 +28,15 @@ static wasm_trap_t* trap_msg(const char* msg) {
   return wasmtime_trap_new(msg, strlen(msg));
 }
 
-static wasm_trap_t* trapf(const char* fmt, ...) {
-  char buf[256];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(buf, sizeof(buf), fmt, ap);
-  va_end(ap);
-  return wasmtime_trap_new(buf, strlen(buf));
-}
-
-static void format_bytes(char* out, size_t out_len, uint64_t bytes) {
-  if (bytes % (1024ull * 1024ull * 1024ull) == 0) {
-    snprintf(out, out_len, "%lluGB", (unsigned long long)(bytes / (1024ull * 1024ull * 1024ull)));
-  } else if (bytes % (1024ull * 1024ull) == 0) {
-    snprintf(out, out_len, "%lluMB", (unsigned long long)(bytes / (1024ull * 1024ull)));
-  } else if (bytes % 1024ull == 0) {
-    snprintf(out, out_len, "%lluKB", (unsigned long long)(bytes / 1024ull));
-  } else {
-    snprintf(out, out_len, "%lluB", (unsigned long long)bytes);
-  }
-}
-
-static void write_u16_le(uint8_t* p, uint16_t v) {
-  p[0] = (uint8_t)(v & 0xff);
-  p[1] = (uint8_t)((v >> 8) & 0xff);
-}
-
-static void write_u32_le(uint8_t* p, uint32_t v) {
-  p[0] = (uint8_t)(v & 0xff);
-  p[1] = (uint8_t)((v >> 8) & 0xff);
-  p[2] = (uint8_t)((v >> 16) & 0xff);
-  p[3] = (uint8_t)((v >> 24) & 0xff);
-}
-
-static uint16_t read_u16_le(const uint8_t* p) {
-  return (uint16_t)(p[0] | ((uint16_t)p[1] << 8));
-}
-
-static uint32_t read_u32_le(const uint8_t* p) {
-  return (uint32_t)(p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
-}
+enum {
+  ZI_OK = 0,
+  ZI_E_INVALID  = -1,
+  ZI_E_BOUNDS   = -2,
+  ZI_E_NOENT    = -3,
+  ZI_E_NOSYS    = -7,
+  ZI_E_OOM      = -8,
+  ZI_E_IO       = -9,
+};
 
 static void allocs_add(zrun_abi_env_t* e, size_t ptr) {
   if (e->allocs_n == e->allocs_cap) {
@@ -117,349 +86,559 @@ uint8_t* mem_data(wasmtime_caller_t* caller, wasmtime_memory_t* mem, size_t* out
   return data;
 }
 
-wasm_trap_t* zrun_req_read(void* env, wasmtime_caller_t* caller,
+static int mem_span(wasmtime_caller_t* caller, int32_t ptr_i32, int32_t len_i32,
+                    uint8_t** out_ptr, size_t* out_len) {
+  if (ptr_i32 < 0 || len_i32 < 0) return 0;
+  wasmtime_memory_t mem;
+  if (!get_memory_from_caller(caller, &mem)) return 0;
+  size_t mem_size = 0;
+  uint8_t* data = mem_data(caller, &mem, &mem_size);
+  size_t u_ptr = (size_t)(uint32_t)ptr_i32;
+  size_t u_len = (size_t)len_i32;
+  if (!bounds_ok(u_ptr, u_len, mem_size)) return 0;
+  if (out_ptr) *out_ptr = data + u_ptr;
+  if (out_len) *out_len = u_len;
+  return 1;
+}
+
+static int mem_span64(wasmtime_caller_t* caller, int64_t ptr_i64, int32_t len_i32,
+                      uint8_t** out_ptr, size_t* out_len) {
+  if (ptr_i64 < 0 || len_i32 < 0) return 0;
+  // zABI passes guest pointers as i64 even on wasm32; require they fit in u32 offsets.
+  if (ptr_i64 > (int64_t)UINT32_MAX) return 0;
+  wasmtime_memory_t mem;
+  if (!get_memory_from_caller(caller, &mem)) return 0;
+  size_t mem_size = 0;
+  uint8_t* data = mem_data(caller, &mem, &mem_size);
+  size_t u_ptr = (size_t)(uint32_t)ptr_i64;
+  size_t u_len = (size_t)len_i32;
+  if (!bounds_ok(u_ptr, u_len, mem_size)) return 0;
+  if (out_ptr) *out_ptr = data + u_ptr;
+  if (out_len) *out_len = u_len;
+  return 1;
+}
+
+static uint64_t hash64_fnv1a(const void* data, size_t len) {
+  const uint8_t* p = (const uint8_t*)data;
+  uint64_t h = 1469598103934665603ull;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (uint64_t)p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static int zi_str_view(wasmtime_caller_t* caller, int32_t obj_ptr, int32_t* out_ptr, int32_t* out_len) {
+  enum { TAG_STR = 3, STR_HEADER = 8 };
+  if (!out_ptr || !out_len) return 0;
+  uint8_t* hdr = NULL;
+  size_t hdr_len = 0;
+  if (!mem_span(caller, obj_ptr, STR_HEADER, &hdr, &hdr_len)) return 0;
+  uint32_t tag = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
+  uint32_t len = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
+  if (tag != TAG_STR) return 0;
+  if (len > (uint32_t)INT32_MAX) return 0;
+  if (!mem_span(caller, obj_ptr + STR_HEADER, (int32_t)len, NULL, NULL)) return 0;
+  *out_ptr = obj_ptr + STR_HEADER;
+  *out_len = (int32_t)len;
+  return 1;
+}
+
+static int64_t mvar_get(zrun_abi_env_t* e, uint64_t key) {
+  for (size_t i = 0; i < (sizeof(e->mvars) / sizeof(e->mvars[0])); i++) {
+    if (!e->mvars[i].used) continue;
+    if (e->mvars[i].key == key) return e->mvars[i].value;
+  }
+  return 0;
+}
+
+static int64_t mvar_set_default(zrun_abi_env_t* e, uint64_t key, int64_t value) {
+  size_t empty = (size_t)-1;
+  for (size_t i = 0; i < (sizeof(e->mvars) / sizeof(e->mvars[0])); i++) {
+    if (!e->mvars[i].used) {
+      if (empty == (size_t)-1) empty = i;
+      continue;
+    }
+    if (e->mvars[i].key == key) {
+      if (e->mvars[i].value != 0) return e->mvars[i].value;
+      e->mvars[i].value = value;
+      return value;
+    }
+  }
+  if (empty == (size_t)-1) return 0;
+  e->mvars[empty].used = 1;
+  e->mvars[empty].key = key;
+  e->mvars[empty].value = value;
+  return value;
+}
+
+wasm_trap_t* zrun_zi_abi_version(void* env, wasmtime_caller_t* caller,
+                                const wasmtime_val_t* args, size_t nargs,
+                                wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = 0x00020000;
+  tracef((zrun_abi_env_t*)env, "zi_abi_version -> 0x00020000");
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_abi_features(void* env, wasmtime_caller_t* caller,
+                                 const wasmtime_val_t* args, size_t nargs,
+                                 wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I64;
+  results[0].of.i64 = 0;
+  tracef((zrun_abi_env_t*)env, "zi_abi_features -> 0");
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_read(void* env, wasmtime_caller_t* caller,
                           const wasmtime_val_t* args, size_t nargs,
                           wasmtime_val_t* results, size_t nresults) {
   zrun_abi_env_t* e = (zrun_abi_env_t*)env;
   if (nargs < 3 || nresults < 1) return NULL;
-
-  int32_t ptr = args[1].of.i32;
+  int32_t h = args[0].of.i32;
+  int64_t ptr = args[1].of.i64;
   int32_t cap = args[2].of.i32;
   results[0].kind = WASMTIME_I32;
-  tracef(e, "req_read(req=%d, ptr=%d, cap=%d)", args[0].of.i32, ptr, cap);
-
-  if (ptr < 0 || cap < 0) {
-    if (e->strict) return trap_msg("zrun: req_read invalid args");
-    results[0].of.i32 = -1; return NULL;
+  tracef(e, "zi_read(h=%d, ptr=%" PRId64 ", cap=%d)", h, ptr, cap);
+  if (h != 0) { results[0].of.i32 = ZI_E_NOSYS; return NULL; }
+  uint8_t* dst = NULL;
+  size_t dst_n = 0;
+  if (!mem_span64(caller, ptr, cap, &dst, &dst_n)) {
+    if (e->strict) return trap_msg("zrun: zi_read OOB");
+    results[0].of.i32 = ZI_E_BOUNDS;
+    return NULL;
   }
-
-  wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) {
-    if (e->strict) return trap_msg("zrun: req_read missing memory export");
-    results[0].of.i32 = -1; return NULL;
-  }
-
-  size_t mem_size = 0;
-  uint8_t* data = mem_data(caller, &mem, &mem_size);
-  size_t u_ptr = (size_t)ptr;
-  size_t u_cap = (size_t)cap;
-  if (!bounds_ok(u_ptr, u_cap, mem_size)) {
-    if (e->strict) return trap_msg("zrun: req_read OOB");
-    results[0].of.i32 = -1; return NULL;
-  }
-
-  size_t nread = fread(data + u_ptr, 1, u_cap, stdin);
+  size_t nread = fread(dst, 1, dst_n, stdin);
   if (ferror(stdin)) {
     clearerr(stdin);
-    if (e->strict) return trap_msg("zrun: req_read I/O error");
-    results[0].of.i32 = -1; return NULL;
+    if (e->strict) return trap_msg("zrun: zi_read I/O error");
+    results[0].of.i32 = ZI_E_IO;
+    return NULL;
   }
-
   results[0].of.i32 = (int32_t)nread;
-  tracef(e, "req_read -> %d", results[0].of.i32);
   return NULL;
 }
 
-wasm_trap_t* zrun_res_write(void* env, wasmtime_caller_t* caller,
+wasm_trap_t* zrun_zi_write(void* env, wasmtime_caller_t* caller,
                            const wasmtime_val_t* args, size_t nargs,
                            wasmtime_val_t* results, size_t nresults) {
   zrun_abi_env_t* e = (zrun_abi_env_t*)env;
   if (nargs < 3 || nresults < 1) return NULL;
-
-  int32_t ptr = args[1].of.i32;
+  int32_t h = args[0].of.i32;
+  int64_t ptr = args[1].of.i64;
   int32_t len = args[2].of.i32;
   results[0].kind = WASMTIME_I32;
-  tracef(e, "res_write(res=%d, ptr=%d, len=%d)", args[0].of.i32, ptr, len);
+  tracef(e, "zi_write(h=%d, ptr=%" PRId64 ", len=%d)", h, ptr, len);
+  FILE* out = NULL;
+  if (h == 1) out = stdout;
+  else if (h == 2) out = stderr;
+  else { results[0].of.i32 = ZI_E_NOSYS; return NULL; }
 
-  if (getenv("ZRUN_FORCE_OUT_ERROR")) {
+  if (getenv("ZRUN_FORCE_OUT_ERROR") && (h == 1 || h == 2)) {
     if (e->strict) return trap_msg("zrun: res_write forced error");
-    results[0].of.i32 = -1;
+    results[0].of.i32 = ZI_E_IO;
     return NULL;
   }
 
-  if (ptr < 0 || len < 0) {
-    if (e->strict) return trap_msg("zrun: res_write invalid args");
-    results[0].of.i32 = -1; return NULL;
+  uint8_t* src = NULL;
+  size_t src_n = 0;
+  if (!mem_span64(caller, ptr, len, &src, &src_n)) {
+    if (e && e->trace) {
+      wasmtime_memory_t mem;
+      size_t mem_size = 0;
+      if (get_memory_from_caller(caller, &mem)) {
+        (void)mem_data(caller, &mem, &mem_size);
+      }
+      tracef(e, "zi_write OOB (ptr=%" PRId64 " len=%d mem=%zu)", ptr, len, mem_size);
+    }
+    if (e->strict) return trap_msg("zrun: zi_write OOB");
+    results[0].of.i32 = ZI_E_BOUNDS;
+    return NULL;
   }
-
-  wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) {
-    if (e->strict) return trap_msg("zrun: res_write missing memory export");
-    results[0].of.i32 = -1; return NULL;
+  size_t nw = fwrite(src, 1, src_n, out);
+  fflush(out);
+  if (nw != src_n) {
+    if (e->strict) return trap_msg("zrun: zi_write I/O error");
+    results[0].of.i32 = ZI_E_IO;
+    return NULL;
   }
-
-  size_t mem_size = 0;
-  uint8_t* data = mem_data(caller, &mem, &mem_size);
-  size_t u_ptr = (size_t)ptr;
-  size_t u_len = (size_t)len;
-  if (!bounds_ok(u_ptr, u_len, mem_size)) {
-    if (e->strict) return trap_msg("zrun: res_write OOB");
-    results[0].of.i32 = -1; return NULL;
-  }
-
-  size_t nw = fwrite(data + u_ptr, 1, u_len, stdout);
-  fflush(stdout);
-  if (nw != u_len) {
-    if (e->strict) return trap_msg("zrun: res_write I/O error");
-    results[0].of.i32 = -1; return NULL;
-  }
-
-  results[0].of.i32 = (int32_t)u_len;
-  tracef(e, "res_write -> %d", results[0].of.i32);
+  results[0].of.i32 = (int32_t)src_n;
   return NULL;
 }
 
-wasm_trap_t* zrun_res_end(void* env, wasmtime_caller_t* caller,
+wasm_trap_t* zrun_zi_end(void* env, wasmtime_caller_t* caller,
                          const wasmtime_val_t* args, size_t nargs,
                          wasmtime_val_t* results, size_t nresults) {
-  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
   (void)caller;
-  (void)args;
-  (void)nargs;
-  (void)results;
-  (void)nresults;
-  if (args && nargs >= 1) {
-    tracef(e, "res_end(res=%d)", args[0].of.i32);
-  } else {
-    tracef(e, "res_end");
-  }
-  fflush(stdout);
-  return NULL;
-}
-
-wasm_trap_t* zrun_log(void* env, wasmtime_caller_t* caller,
-                     const wasmtime_val_t* args, size_t nargs,
-                     wasmtime_val_t* results, size_t nresults) {
   zrun_abi_env_t* e = (zrun_abi_env_t*)env;
-  (void)results;
-  (void)nresults;
-  if (nargs < 4) return NULL;
-
-  int32_t topic_ptr = args[0].of.i32;
-  int32_t topic_len = args[1].of.i32;
-  int32_t msg_ptr = args[2].of.i32;
-  int32_t msg_len = args[3].of.i32;
-  tracef(e, "log(topic_ptr=%d, topic_len=%d, msg_ptr=%d, msg_len=%d)",
-         topic_ptr, topic_len, msg_ptr, msg_len);
-  if (topic_ptr < 0 || topic_len < 0 || msg_ptr < 0 || msg_len < 0) {
-    return NULL;
+  int32_t h = (nargs >= 1) ? args[0].of.i32 : 0;
+  if (nresults >= 1) {
+    results[0].kind = WASMTIME_I32;
+    results[0].of.i32 = ZI_OK;
   }
-
-  wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) return NULL;
-
-  size_t mem_size = 0;
-  uint8_t* data = mem_data(caller, &mem, &mem_size);
-  size_t u_topic_ptr = (size_t)topic_ptr;
-  size_t u_topic_len = (size_t)topic_len;
-  size_t u_msg_ptr = (size_t)msg_ptr;
-  size_t u_msg_len = (size_t)msg_len;
-  if (!bounds_ok(u_topic_ptr, u_topic_len, mem_size)) return NULL;
-  if (!bounds_ok(u_msg_ptr, u_msg_len, mem_size)) return NULL;
-
-  fwrite("[", 1, 1, stderr);
-  fwrite(data + u_topic_ptr, 1, u_topic_len, stderr);
-  fwrite("] ", 1, 2, stderr);
-  fwrite(data + u_msg_ptr, 1, u_msg_len, stderr);
-  fwrite("\n", 1, 1, stderr);
+  tracef(e, "zi_end(h=%d)", h);
+  if (h == 1) fflush(stdout);
+  if (h == 2) fflush(stderr);
   return NULL;
 }
 
-wasm_trap_t* zrun_alloc(void* env, wasmtime_caller_t* caller,
-                       const wasmtime_val_t* args, size_t nargs,
-                       wasmtime_val_t* results, size_t nresults) {
+wasm_trap_t* zrun_zi_alloc(void* env, wasmtime_caller_t* caller,
+                           const wasmtime_val_t* args, size_t nargs,
+                           wasmtime_val_t* results, size_t nresults) {
   zrun_abi_env_t* e = (zrun_abi_env_t*)env;
   if (nargs < 1 || nresults < 1) return NULL;
-  results[0].kind = WASMTIME_I32;
-
+  results[0].kind = WASMTIME_I64;
   int32_t size = args[0].of.i32;
-  tracef(e, "alloc(size=%d)", size);
-  if (size < 0) {
-    if (e->strict) return trap_msg("zrun: alloc invalid size");
-    results[0].of.i32 = -1; return NULL;
-  }
+  tracef(e, "zi_alloc(size=%d)", size);
+  if (size <= 0) { results[0].of.i64 = (int64_t)ZI_E_INVALID; return NULL; }
 
   wasmtime_memory_t mem;
   if (!get_memory_from_caller(caller, &mem)) {
-    if (e->strict) return trap_msg("zrun: alloc missing memory export");
-    results[0].of.i32 = -1; return NULL;
+    if (e->strict) return trap_msg("zrun: zi_alloc missing memory export");
+    results[0].of.i64 = (int64_t)ZI_E_OOM;
+    return NULL;
   }
+  wasmtime_context_t* ctx = wasmtime_caller_context(caller);
 
-  size_t mem_size = 0;
-  (void)mem_data(caller, &mem, &mem_size);
-
-  // Simple bump allocator for local testing; relies on __heap_base from zld.
   if (!e->heap_init) {
     int32_t base = 0;
-    if (!get_global_i32(caller, "__heap_base", &base)) {
-      return trap_msg("zrun: missing __heap_base");
+    if (!get_global_i32(caller, "__heap_base", &base) || base < 0) {
+      if (e->strict) return trap_msg("zrun: zi_alloc missing __heap_base");
+      results[0].of.i64 = (int64_t)ZI_E_OOM;
+      return NULL;
     }
-    if (base < 0) base = 0;
     e->heap_ptr = (size_t)base;
     e->heap_init = 1;
   }
 
   size_t n = (size_t)size;
-  size_t aligned = (n + 3u) & ~3u;
-  if (e->heap_ptr + aligned > mem_size) {
-    wasmtime_context_t* ctx = wasmtime_caller_context(caller);
-    uint64_t page_size = 65536;
-    uint64_t needed = (uint64_t)e->heap_ptr + (uint64_t)aligned;
-    uint64_t current_pages = mem_size / page_size;
-    uint64_t needed_pages = (needed + page_size - 1) / page_size;
-    uint64_t cap_bytes = e->mem_cap_bytes;
-    uint64_t cap_pages = 0;
-    if (cap_bytes > 0 && page_size > 0) {
-      cap_pages = cap_bytes / page_size;
-      if (needed_pages > cap_pages) {
-        char cap_buf[32];
-        format_bytes(cap_buf, sizeof(cap_buf), cap_bytes);
-        return trapf("OOM: exceeded runner cap (cap=%s, requested grow beyond %llu pages)",
-                     cap_buf, (unsigned long long)cap_pages);
-      }
-    }
-    if (needed_pages > current_pages) {
-      uint64_t prev = 0;
-      wasmtime_error_t* err = wasmtime_memory_grow(ctx, &mem, needed_pages - current_pages, &prev);
-      if (err) {
-        wasmtime_error_delete(err);
-        if (e->strict) return trap_msg("zrun: alloc memory grow failed");
-        results[0].of.i32 = -1; return NULL;
-      }
-      mem_size = wasmtime_memory_data_size(ctx, &mem);
-    }
-    if (e->heap_ptr + aligned > mem_size) {
-      if (e->strict) return trap_msg("zrun: alloc OOB");
-      results[0].of.i32 = -1; return NULL;
-    }
-  }
-
+  size_t aligned = (n + 7u) & ~((size_t)7);
   size_t out = e->heap_ptr;
-  e->heap_ptr += aligned;
-  results[0].of.i32 = (int32_t)out;
-  if (e->strict) allocs_add(e, out);
-  tracef(e, "alloc -> %d", results[0].of.i32);
-  return NULL;
-}
+  size_t want_end = out + aligned;
+  if (want_end > e->mem_cap_bytes) { results[0].of.i64 = (int64_t)ZI_E_OOM; return NULL; }
 
-wasm_trap_t* zrun_free(void* env, wasmtime_caller_t* caller,
-                      const wasmtime_val_t* args, size_t nargs,
-                      wasmtime_val_t* results, size_t nresults) {
-  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
-  (void)caller;
-  (void)results;
-  (void)nresults;
-  if (args && nargs >= 1) {
-    int32_t ptr = args[0].of.i32;
-    tracef(e, "free(ptr=%d)", ptr);
-    if (ptr < 0) return e->strict ? trap_msg("zrun: free invalid ptr") : NULL;
-    if (e->strict && !allocs_remove(e, (size_t)ptr)) {
-      return trap_msg("zrun: free of unknown pointer");
+  size_t current_pages = wasmtime_memory_size(ctx, &mem);
+  size_t current_bytes = current_pages * 65536ull;
+  if (want_end > current_bytes) {
+    size_t needed_pages = (want_end + 65535ull) / 65536ull;
+    uint64_t prev = 0;
+    wasmtime_error_t* err = wasmtime_memory_grow(ctx, &mem, needed_pages - current_pages, &prev);
+    if (err) {
+      wasmtime_error_delete(err);
+      results[0].of.i64 = (int64_t)ZI_E_OOM;
+      return NULL;
     }
-  } else {
-    tracef(e, "free");
+  }
+
+  e->heap_ptr += aligned;
+  allocs_add(e, out);
+  results[0].of.i64 = (int64_t)out;
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_free(void* env, wasmtime_caller_t* caller,
+                          const wasmtime_val_t* args, size_t nargs,
+                          wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_OK;
+  if (nargs < 1) return NULL;
+  int64_t ptr = args[0].of.i64;
+  tracef(e, "zi_free(ptr=%" PRId64 ")", ptr);
+  if (ptr <= 0 || ptr > (int64_t)SIZE_MAX) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  if (!allocs_remove(e, (size_t)ptr)) {
+    if (e->strict) return trap_msg("zrun: zi_free unknown pointer");
+    results[0].of.i32 = ZI_E_INVALID;
+    return NULL;
   }
   return NULL;
 }
 
-static int ctl_write_error(uint8_t* out, size_t cap, uint16_t op, uint32_t rid,
-                           const char* trace, const char* msg) {
-  const uint32_t trace_len = (uint32_t)strlen(trace);
-  const uint32_t msg_len = (uint32_t)strlen(msg);
-  const uint32_t cause_len = 0;
-  const uint32_t payload_len = 4 + 4 + trace_len + 4 + msg_len + 4 + cause_len;
-  const uint32_t frame_len = 20 + payload_len;
-  if (cap < frame_len) return -1;
-  memcpy(out + 0, "ZCL1", 4);
-  write_u16_le(out + 4, 1);
-  write_u16_le(out + 6, op);
-  write_u32_le(out + 8, rid);
-  write_u32_le(out + 12, 0);
-  write_u32_le(out + 16, payload_len);
-  out[20] = 0;
-  out[21] = 0;
-  out[22] = 0;
-  out[23] = 0;
-  write_u32_le(out + 24, trace_len);
-  memcpy(out + 28, trace, trace_len);
-  write_u32_le(out + 28 + trace_len, msg_len);
-  memcpy(out + 32 + trace_len, msg, msg_len);
-  write_u32_le(out + 32 + trace_len + msg_len, cause_len);
-  return (int)frame_len;
+wasm_trap_t* zrun_zi_telemetry(void* env, wasmtime_caller_t* caller,
+                               const wasmtime_val_t* args, size_t nargs,
+                               wasmtime_val_t* results, size_t nresults) {
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_OK;
+  if (nargs < 4) return NULL;
+  int32_t topic_ptr = args[0].of.i32;
+  int32_t topic_len = args[1].of.i32;
+  int32_t msg_ptr = args[2].of.i32;
+  int32_t msg_len = args[3].of.i32;
+  tracef(e, "zi_telemetry(topic_ptr=%d, topic_len=%d, msg_ptr=%d, msg_len=%d)",
+         topic_ptr, topic_len, msg_ptr, msg_len);
+  uint8_t* topic = NULL;
+  uint8_t* msg = NULL;
+  size_t topic_n = 0, msg_n = 0;
+  if (!mem_span(caller, topic_ptr, topic_len, &topic, &topic_n) ||
+      !mem_span(caller, msg_ptr, msg_len, &msg, &msg_n)) {
+    if (e->strict) return trap_msg("zrun: zi_telemetry OOB");
+    results[0].of.i32 = ZI_E_BOUNDS;
+    return NULL;
+  }
+  fwrite(topic, 1, topic_n, stderr);
+  fputs(": ", stderr);
+  fwrite(msg, 1, msg_n, stderr);
+  fputc('\n', stderr);
+  fflush(stderr);
+  return NULL;
 }
 
-wasm_trap_t* zrun_ctl(void* env, wasmtime_caller_t* caller,
-                      const wasmtime_val_t* args, size_t nargs,
-                      wasmtime_val_t* results, size_t nresults) {
-  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
-  if (nargs < 4 || nresults < 1) return NULL;
+wasm_trap_t* zrun_zi_cap_count(void* env, wasmtime_caller_t* caller,
+                              const wasmtime_val_t* args, size_t nargs,
+                              wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
   results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = 0;
+  return NULL;
+}
 
-  int32_t req_ptr = args[0].of.i32;
-  int32_t req_len = args[1].of.i32;
-  int32_t resp_ptr = args[2].of.i32;
-  int32_t resp_cap = args[3].of.i32;
+wasm_trap_t* zrun_zi_cap_get_size(void* env, wasmtime_caller_t* caller,
+                                 const wasmtime_val_t* args, size_t nargs,
+                                 wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_E_NOENT;
+  return NULL;
+}
 
-  if (req_ptr < 0 || req_len < 0 || resp_ptr < 0 || resp_cap < 0) {
-    if (e->strict) return trap_msg("zrun: ctl invalid args");
-    results[0].of.i32 = -1; return NULL;
-  }
+wasm_trap_t* zrun_zi_cap_get(void* env, wasmtime_caller_t* caller,
+                            const wasmtime_val_t* args, size_t nargs,
+                            wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_E_NOENT;
+  return NULL;
+}
 
-  wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) {
-    if (e->strict) return trap_msg("zrun: ctl missing memory export");
-    results[0].of.i32 = -1; return NULL;
-  }
-  size_t mem_size = 0;
-  uint8_t* data = mem_data(caller, &mem, &mem_size);
-  if (!bounds_ok((size_t)req_ptr, (size_t)req_len, mem_size) ||
-      !bounds_ok((size_t)resp_ptr, (size_t)resp_cap, mem_size)) {
-    if (e->strict) return trap_msg("zrun: ctl OOB");
-    results[0].of.i32 = -1; return NULL;
-  }
+wasm_trap_t* zrun_zi_cap_open(void* env, wasmtime_caller_t* caller,
+                              const wasmtime_val_t* args, size_t nargs,
+                              wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_E_NOENT;
+  tracef((zrun_abi_env_t*)env, "zi_cap_open -> %d", results[0].of.i32);
+  return NULL;
+}
 
-  if (req_len < 24) { results[0].of.i32 = -1; return NULL; }
-  const uint8_t* req = data + req_ptr;
-  uint16_t v = read_u16_le(req + 4);
-  uint16_t op = read_u16_le(req + 6);
-  uint32_t rid = read_u32_le(req + 8);
-  uint32_t payload_len = read_u32_le(req + 20);
+wasm_trap_t* zrun_zi_handle_hflags(void* env, wasmtime_caller_t* caller,
+                                  const wasmtime_val_t* args, size_t nargs,
+                                  wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = 0;
+  return NULL;
+}
 
-  uint8_t* out = data + resp_ptr;
-  if (memcmp(req, "ZCL1", 4) != 0) {
-    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_frame", "bad frame");
-    results[0].of.i32 = n;
-    return NULL;
-  }
-  if (24u + payload_len > (uint32_t)req_len) {
-    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_frame", "bad frame");
-    results[0].of.i32 = n;
-    return NULL;
-  }
-  if (v != 1) {
-    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_bad_version", "bad version");
-    results[0].of.i32 = n;
-    return NULL;
-  }
-  if (op != 1) {
-    int n = ctl_write_error(out, (size_t)resp_cap, op, rid, "t_ctl_unknown_op", "unknown op");
-    results[0].of.i32 = n;
-    return NULL;
-  }
-  if (payload_len != 0) { results[0].of.i32 = -1; return NULL; }
+wasm_trap_t* zrun_zi_time_now_ms_u32(void* env, wasmtime_caller_t* caller,
+                                    const wasmtime_val_t* args, size_t nargs,
+                                    wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = (int32_t)e->time_ms;
+  return NULL;
+}
 
-  if (resp_cap < 28) { results[0].of.i32 = -1; return NULL; }
-  memcpy(out + 0, "ZCL1", 4);
-  write_u16_le(out + 4, 1);
-  write_u16_le(out + 6, op);
-  write_u32_le(out + 8, rid);
-  write_u32_le(out + 12, 0);
-  write_u32_le(out + 16, 8);
-  out[20] = 1;
-  out[21] = 0;
-  out[22] = 0;
-  out[23] = 0;
-  write_u32_le(out + 24, 0);
-  results[0].of.i32 = 28;
+wasm_trap_t* zrun_zi_time_sleep_ms(void* env, wasmtime_caller_t* caller,
+                                   const wasmtime_val_t* args, size_t nargs,
+                                   wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  if (nresults < 1) return NULL;
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_OK;
+  if (nargs < 1) return NULL;
+  int32_t ms = args[0].of.i32;
+  if (ms < 0) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  e->time_ms += (uint32_t)ms;
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_mvar_get_u64(void* env, wasmtime_caller_t* caller,
+                                 const wasmtime_val_t* args, size_t nargs,
+                                 wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  if (nresults < 1) return NULL;
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  results[0].kind = WASMTIME_I64;
+  if (nargs < 1) { results[0].of.i64 = 0; return NULL; }
+  uint64_t key = (uint64_t)args[0].of.i64;
+  results[0].of.i64 = mvar_get(e, key);
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_mvar_set_default_u64(void* env, wasmtime_caller_t* caller,
+                                         const wasmtime_val_t* args, size_t nargs,
+                                         wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  if (nresults < 1) return NULL;
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  results[0].kind = WASMTIME_I64;
+  if (nargs < 2) { results[0].of.i64 = 0; return NULL; }
+  uint64_t key = (uint64_t)args[0].of.i64;
+  int64_t value = args[1].of.i64;
+  results[0].of.i64 = mvar_set_default(e, key, value);
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_mvar_get(void* env, wasmtime_caller_t* caller,
+                             const wasmtime_val_t* args, size_t nargs,
+                             wasmtime_val_t* results, size_t nresults) {
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I64;
+  // TODO(zABI): key string hashing depends on guest string layout; keep disabled in zrun.
+  results[0].of.i64 = 0;
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_mvar_set_default(void* env, wasmtime_caller_t* caller,
+                                     const wasmtime_val_t* args, size_t nargs,
+                                     wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  (void)args;
+  (void)nargs;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I64;
+  results[0].of.i64 = 0;
+  return NULL;
+}
+
+wasm_trap_t* zrun_zi_enum_alloc(void* env, wasmtime_caller_t* caller,
+                               const wasmtime_val_t* args, size_t nargs,
+                               wasmtime_val_t* results, size_t nresults) {
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I64;
+  if (nargs < 3) { results[0].of.i64 = 0; return NULL; }
+  (void)args[0];
+  (void)args[1];
+  int32_t slot_size = args[2].of.i32;
+  tracef(e, "zi_enum_alloc(slot_size=%d)", slot_size);
+  // Best-effort: allocate raw slot storage in guest memory.
+  wasmtime_val_t a[1];
+  wasmtime_val_t r[1];
+  a[0].kind = WASMTIME_I32;
+  a[0].of.i32 = slot_size;
+  r[0].kind = WASMTIME_I64;
+  wasm_trap_t* trap = zrun_zi_alloc(env, caller, a, 1, r, 1);
+  if (trap) return trap;
+  results[0].of.i64 = r[0].of.i64;
+  return NULL;
+}
+
+static int write_num(FILE* out, const char* fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vfprintf(out, fmt, ap);
+  va_end(ap);
+  fflush(out);
+  return n;
+}
+
+wasm_trap_t* zrun_res_end(void* env, wasmtime_caller_t* caller,
+                          const wasmtime_val_t* args, size_t nargs,
+                          wasmtime_val_t* results, size_t nresults) {
+  return zrun_zi_end(env, caller, args, nargs, results, nresults);
+}
+
+wasm_trap_t* zrun_res_write_i32(void* env, wasmtime_caller_t* caller,
+                                const wasmtime_val_t* args, size_t nargs,
+                                wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  if (nargs < 2) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  int32_t h = args[0].of.i32;
+  int32_t v = args[1].of.i32;
+  FILE* out = (h == 2) ? stderr : stdout;
+  int n = write_num(out, "%d", v);
+  results[0].of.i32 = (n < 0) ? ZI_E_IO : n;
+  return NULL;
+}
+
+wasm_trap_t* zrun_res_write_u32(void* env, wasmtime_caller_t* caller,
+                                const wasmtime_val_t* args, size_t nargs,
+                                wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  if (nargs < 2) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  int32_t h = args[0].of.i32;
+  uint32_t v = (uint32_t)args[1].of.i32;
+  FILE* out = (h == 2) ? stderr : stdout;
+  int n = write_num(out, "%u", (unsigned)v);
+  results[0].of.i32 = (n < 0) ? ZI_E_IO : n;
+  return NULL;
+}
+
+wasm_trap_t* zrun_res_write_i64(void* env, wasmtime_caller_t* caller,
+                                const wasmtime_val_t* args, size_t nargs,
+                                wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  if (nargs < 2) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  int32_t h = args[0].of.i32;
+  int64_t v = args[1].of.i64;
+  FILE* out = (h == 2) ? stderr : stdout;
+  int n = write_num(out, "%" PRId64, v);
+  results[0].of.i32 = (n < 0) ? ZI_E_IO : n;
+  return NULL;
+}
+
+wasm_trap_t* zrun_res_write_u64(void* env, wasmtime_caller_t* caller,
+                                const wasmtime_val_t* args, size_t nargs,
+                                wasmtime_val_t* results, size_t nresults) {
+  (void)env;
+  (void)caller;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  if (nargs < 2) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
+  int32_t h = args[0].of.i32;
+  uint64_t v = (uint64_t)args[1].of.i64;
+  FILE* out = (h == 2) ? stderr : stdout;
+  int n = write_num(out, "%" PRIu64, v);
+  results[0].of.i32 = (n < 0) ? ZI_E_IO : n;
   return NULL;
 }

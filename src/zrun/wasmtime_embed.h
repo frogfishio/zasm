@@ -10,8 +10,8 @@
 
 int zrun_load_module(wasm_engine_t* engine, const uint8_t* bytes, size_t len,
                      wasmtime_module_t** out_module);
-int zrun_link_lembeh_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
-                             zrun_abi_env_t* env);
+int zrun_link_zabi_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
+                           zrun_abi_env_t* env);
 int zrun_instantiate(wasmtime_store_t* store, wasmtime_linker_t* linker,
                      wasmtime_module_t* module, wasmtime_instance_t* out_instance);
 int zrun_get_export_func(wasmtime_store_t* store, wasmtime_instance_t* instance,

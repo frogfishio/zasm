@@ -5,16 +5,10 @@
 
 `zld` reads ZASM JSONL IR (streamed from `zas`) and emits WebAssembly Text (WAT).
 
-## MVP (v1) capabilities
+## MVP capabilities (current)
 
-- Imports stream ABI:
-  - `("lembeh","req_read")`
-  - `("lembeh","res_write")`
-  - `("lembeh","res_end")`
-  - `("lembeh","log")`
-  - `("lembeh","alloc")`
-  - `("lembeh","free")`
-- Exports `lembeh_handle(req, res)` and calls `$main`, then `res_end(res)`.
+- Imports zABI 2.0 syscalls under module `"env"` (e.g. `zi_read`, `zi_write`, `zi_end`, `zi_alloc`, `zi_free`, `zi_telemetry`).
+- Exports `lembeh_handle(req, res)` which calls `$main`, then `zi_end(res)`.
 - Emits a `__heap_base` global for the allocator to seed dynamic memory.
 - Supports Zilog-mode subset used by `examples/hello.asm`:
   - `LD HL, <sym|num>`
@@ -55,12 +49,11 @@ For debug visibility, each instruction emits a `;; line N: MNEMONIC` comment in 
 
 Leading-underscore symbols are reserved for host primitives.
 
-- `CALL _out` lowers to: `res_write(res, HL, DE)` (return value dropped)
-- `CALL _in` lowers to: `HL := req_read(req, HL, DE)`
-- `CALL _log` lowers to: `log(HL, DE, BC, IX)`
-- `CALL _alloc` lowers to: `HL := alloc(HL)`
-- `CALL _free` lowers to: `free(HL)`
-- `CALL _ctl` lowers to: `HL := ctl(HL /*req_ptr*/, DE /*req_len*/, BC /*resp_ptr*/, IX /*resp_cap*/)`
+- `CALL _out` lowers to: `zi_write(res, HL, DE)` (return value dropped)
+- `CALL _in` lowers to: `HL := zi_read(req, HL, DE)`
+- `CALL _log` lowers to: `zi_telemetry(HL, DE, BC, IX)`
+- `CALL _alloc` lowers to: `HL := zi_alloc(HL)`
+- `CALL _free` lowers to: `HL := zi_free(HL)`
 
 Other primitives (e.g. `_time`, `_crypto`) are rejected for now.
 
@@ -75,7 +68,7 @@ Other primitives (e.g. `_time`, `_crypto`) are rejected for now.
 - `PUBLIC name` emits a module export for `name`.
 - `EXTERN "mod","field",name` emits a function import as `$name`.
   - If `field` is a string, `name` is required.
-  - Imported functions use the `(param i32 i32)` signature to match `(req,res)`.
+  - Imported functions use zABI-specific signatures based on the imported name.
 
 ## Memory layout (v1)
 
@@ -114,7 +107,7 @@ bin/zld --tool -o build/app.wat build/app.jsonl
 
 ## IR versioning
 
-`zld` requires every JSONL record to include `ir: "zasm-v1.0"` and rejects missing or
+`zld` requires every JSONL record to include an `ir` version tag and rejects missing or
 unknown versions.
 
 ## Primitive allowlist

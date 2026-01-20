@@ -1,11 +1,10 @@
 <!-- SPDX-FileCopyrightText: 2025 Frogfish -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# Lembeh C Cloak (Normative Host Interface)
+# C Cloak (Legacy Host Interface)
 
-This is a minimal, normative C interface for hosts that integrate ZASM modules
-without WebAssembly. It defines the required host primitives, a flat guest memory
-model, and a stable entrypoint signature.
+This is a minimal C interface for hosts that integrate ZASM modules without WebAssembly.
+It targets the retired legacy stream ABI and is kept for reference only.
 
 ## Files
 
@@ -45,4 +44,4 @@ int main(void) {
 
 ## Contract
 
-The semantics of each callback follow `docs/spec/abi.md`.
+This interface documents the retired stream ABI; it is not the zABI 2.0 host surface.

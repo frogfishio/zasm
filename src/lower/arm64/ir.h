@@ -26,6 +26,8 @@ typedef struct {
   char *sym;       /* IR_OP_SYM */
   char *str;       /* IR_OP_STR */
   char *mem_base;  /* IR_OP_MEM */
+  long long mem_disp; /* optional displacement for IR_OP_MEM */
+  int has_mem_disp;
   long long num;   /* IR_OP_NUM */
   unsigned long long unum;
   int is_unsigned;

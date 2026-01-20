@@ -5,7 +5,7 @@
 
 This folder is a **single codepack** snapshot of the first-party JIT runtime.
 It compiles `.zasm.bin` opcode modules to native code via `libzxc` and runs them
-through the Lembeh cloak host interface.
+through the legacy cloak host interface.
 
 ## Files
 

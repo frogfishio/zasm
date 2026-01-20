@@ -17,7 +17,7 @@ without assuming a `zas` frontend.
 
 - **IR Schema:** `schema/ir/v1/record.schema.json`
 - **IR Conformance Tests:** `test/conform_zld.sh` and `test/conform_zld/*`
-- **ABI Tests:** `test/abi_*` (streaming, alloc/free, log, entrypoint, imports)
+- **ABI Tests:** `test/abi_*` (zABI syscall surface, alloc/free, entrypoint, imports)
 - **ABI Spec:** `docs/spec/abi.md`
 - **IR Spec:** `docs/spec/ir.md`
 - **ISA Spec:** `docs/spec/isa.md`
@@ -52,8 +52,8 @@ make dist-integrator-pack
 ## Required guarantees
 
 - **Schema compliance:** record shape, identifiers, operand kinds, directive enums.
-- **Version tag:** `ir: "zasm-v1.0"` is mandatory.
-- **ABI behavior:** entrypoint, streaming, primitives, and allocation contract must match `docs/spec/abi.md`.
+- **Version tag:** `ir: "zasm-v1.1"` is mandatory.
+- **ABI behavior:** entrypoint, syscall surface, and allocation contract must match `docs/spec/abi.md`.
 
 ## Recommended outputs
 
@@ -65,5 +65,5 @@ make dist-integrator-pack
 
 - Your compiler can emit all records described in `docs/spec/ir.md`.
 - You can pass `zld --conform=strict --verify`.
-- You can pass ABI tests for the current ABI (streaming, alloc/free, log, entrypoint).
+- You can pass ABI tests for the current ABI (syscalls, alloc/free, entrypoint).
 - You document your mapping from source language constructs to IR records.

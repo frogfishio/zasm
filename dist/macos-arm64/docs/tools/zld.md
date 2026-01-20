@@ -5,16 +5,10 @@
 
 `zld` reads ZASM JSONL IR (streamed from `zas`) and emits WebAssembly Text (WAT).
 
-## MVP (v1) capabilities
+## MVP capabilities (current)
 
-- Imports stream ABI:
-  - `("lembeh","req_read")`
-  - `("lembeh","res_write")`
-  - `("lembeh","res_end")`
-  - `("lembeh","log")`
-  - `("lembeh","alloc")`
-  - `("lembeh","free")`
-- Exports `lembeh_handle(req, res)` and calls `$main`, then `res_end(res)`.
+- Imports zABI 2.0 syscalls under module `"env"` (e.g. `zi_read`, `zi_write`, `zi_end`, `zi_alloc`, `zi_free`, `zi_telemetry`).
+- Exports `lembeh_handle(req, res)` which calls `$main`, then `zi_end(res)`.
 - Emits a `__heap_base` global for the allocator to seed dynamic memory.
 - Supports Zilog-mode subset used by `examples/hello.asm`:
   - `LD HL, <sym|num>`

@@ -202,7 +202,6 @@ enum {
   PRIM_LOG = 1u << 2,
   PRIM_ALLOC = 1u << 3,
   PRIM_FREE = 1u << 4,
-  PRIM_CTL = 1u << 5
 };
 
 static char* trim_ws(char* s) {
@@ -220,7 +219,7 @@ static unsigned prim_allow_mask(void) {
   static unsigned mask = 0;
   if (init) return mask;
   init = 1;
-  mask = PRIM_IN | PRIM_OUT | PRIM_LOG | PRIM_ALLOC | PRIM_FREE | PRIM_CTL;
+  mask = PRIM_IN | PRIM_OUT | PRIM_LOG | PRIM_ALLOC | PRIM_FREE;
 
   const char* env = getenv("ZLD_ALLOW_PRIMS");
   if (!env) return mask;
@@ -238,10 +237,19 @@ static unsigned prim_allow_mask(void) {
     else if (strcmp(t, "log") == 0) mask |= PRIM_LOG;
     else if (strcmp(t, "alloc") == 0) mask |= PRIM_ALLOC;
     else if (strcmp(t, "free") == 0) mask |= PRIM_FREE;
-    else if (strcmp(t, "ctl") == 0) mask |= PRIM_CTL;
   }
   free(tmp);
   return mask;
+}
+
+static int is_builtin_zabi_import(const char* field) {
+  if (!field) return 0;
+  // Treat the entire syscall-style zABI surface as builtin, even if only a subset
+  // is used by a given JSONL file. This prevents zABI calls from being treated as
+  // normal (req,res) user calls.
+  if (strncmp(field, "zi_", 3) == 0) return 1;
+  if (strncmp(field, "res_", 4) == 0) return 1;
+  return 0;
 }
 
 static int primitive_allowed(const char* name) {
@@ -252,7 +260,6 @@ static int primitive_allowed(const char* name) {
   if (strcmp(name, "_log") == 0) return (mask & PRIM_LOG) != 0;
   if (strcmp(name, "_alloc") == 0) return (mask & PRIM_ALLOC) != 0;
   if (strcmp(name, "_free") == 0) return (mask & PRIM_FREE) != 0;
-  if (strcmp(name, "_ctl") == 0) return (mask & PRIM_CTL) != 0;
   return 0;
 }
 
@@ -263,14 +270,13 @@ static void primitives_from_recs(const recvec_t* recs, unsigned* out_mask) {
     const record_t* r=&recs->v[i];
     if (r->k != JREC_INSTR || !r->m) continue;
     if (strcmp(r->m, "CALL") != 0) continue;
-    if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) continue;
+    if (r->nops < 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) continue;
     const char* callee = r->ops[0].s;
     if (strcmp(callee, "_in") == 0) mask |= PRIM_IN;
     else if (strcmp(callee, "_out") == 0) mask |= PRIM_OUT;
     else if (strcmp(callee, "_log") == 0) mask |= PRIM_LOG;
     else if (strcmp(callee, "_alloc") == 0) mask |= PRIM_ALLOC;
     else if (strcmp(callee, "_free") == 0) mask |= PRIM_FREE;
-    else if (strcmp(callee, "_ctl") == 0) mask |= PRIM_CTL;
   }
   *out_mask = mask;
 }
@@ -394,22 +400,58 @@ static void emit_name_section(const funcvec_t* funcs, const gsymtab_t* g) {
      running until the next function label OR first dir record.
 */
 static int build_function_slices(const recvec_t* recs, funcvec_t* out) {
-  // Treat CALL targets as function boundaries to keep WAT functions small and
-  // deterministic, while preserving streaming-style concatenation.
-  // collect call targets
-  // simplistic string set
-  char** calls = NULL; size_t nc=0, cap=0;
-  for (size_t i=0;i<recs->n;i++) {
+  // Determine function boundaries.
+  //
+  // Legacy mode (hand-written ZASM): code often starts at the top of the file and
+  // has no PUBLIC directives. In that case we synthesize a "main" slice from the
+  // file start to the first function label.
+  //
+  // Zing JSONL (real-world): functions are declared via PUBLIC and appear later
+  // in the file; the entrypoint is the PUBLIC "main" label. In that case we must
+  // treat PUBLIC labels as function starts and MUST NOT synthesize a top-of-file
+  // "main" (it would be empty and shadow the real entry).
+
+  char** starts = NULL;
+  size_t ns = 0, cap = 0;
+
+  // 1) PUBLIC directives explicitly mark function entry labels (Zing).
+  for (size_t i = 0; i < recs->n; i++) {
     const record_t* r = &recs->v[i];
-    if (r->k==JREC_INSTR && r->m && strcmp(r->m,"CALL")==0 && r->nops==1 && r->ops && r->ops[0].t==JOP_SYM) {
+    if (r->k != JREC_DIR || !r->d) continue;
+    if (strcmp(r->d, "PUBLIC") != 0) continue;
+    if (r->name) continue;
+    if (r->nargs != 1 || r->args[0].t != JOP_SYM || !r->args[0].s) continue;
+    const char* sym = r->args[0].s;
+    int exists = 0;
+    for (size_t j = 0; j < ns; j++) {
+      if (strcmp(starts[j], sym) == 0) { exists = 1; break; }
+    }
+    if (!exists) {
+      if (ns == cap) {
+        cap = cap ? cap * 2 : 16;
+        starts = (char**)xrealloc(starts, cap * sizeof(char*));
+      }
+      starts[ns++] = xstrdup(sym);
+    }
+  }
+
+  // 2) CALL targets become function boundaries (private helpers).
+  for (size_t i = 0; i < recs->n; i++) {
+    const record_t* r = &recs->v[i];
+    if (r->k == JREC_INSTR && r->m && strcmp(r->m, "CALL") == 0 &&
+        r->nops == 1 && r->ops && r->ops[0].t == JOP_SYM) {
       const char* target = r->ops[0].s;
       if (!target || is_primitive(target)) continue;
-      // add if not present
-      int exists=0;
-      for(size_t j=0;j<nc;j++) if(strcmp(calls[j],target)==0){ exists=1; break; }
+      int exists = 0;
+      for (size_t j = 0; j < ns; j++) {
+        if (strcmp(starts[j], target) == 0) { exists = 1; break; }
+      }
       if (!exists) {
-        if (nc==cap){ cap=cap?cap*2:8; calls=(char**)xrealloc(calls,cap*sizeof(char*)); }
-        calls[nc++] = xstrdup(target);
+        if (ns == cap) {
+          cap = cap ? cap * 2 : 16;
+          starts = (char**)xrealloc(starts, cap * sizeof(char*));
+        }
+        starts[ns++] = xstrdup(target);
       }
     }
   }
@@ -421,7 +463,7 @@ static int build_function_slices(const recvec_t* recs, funcvec_t* out) {
     if (r->k==JREC_LABEL && r->label) {
       // if label in calls list => function start
       int isfunc=0;
-      for(size_t j=0;j<nc;j++) if(strcmp(calls[j],r->label)==0){ isfunc=1; break; }
+      for (size_t j = 0; j < ns; j++) if (strcmp(starts[j], r->label) == 0) { isfunc=1; break; }
       if (isfunc) {
         // compute end = next function label or first dir
         size_t end = recs->n;
@@ -431,7 +473,7 @@ static int build_function_slices(const recvec_t* recs, funcvec_t* out) {
           if (rr->k==JREC_LABEL && rr->label) {
             // next label might be another function start
             int isnextfunc=0;
-            for(size_t j=0;j<nc;j++) if(strcmp(calls[j],rr->label)==0){ isnextfunc=1; break; }
+            for (size_t j = 0; j < ns; j++) if (strcmp(starts[j], rr->label) == 0) { isnextfunc=1; break; }
             if (isnextfunc) { end = k; break; }
           }
         }
@@ -444,30 +486,34 @@ static int build_function_slices(const recvec_t* recs, funcvec_t* out) {
     }
   }
 
-  // main slice: from start until first function label or dir
-  size_t main_end = recs->n;
-  for (size_t i=0;i<recs->n;i++) {
-    const record_t* r=&recs->v[i];
-    if (r->k==JREC_DIR) { main_end = i; break; }
-    if (r->k==JREC_LABEL && r->label) {
-      int isfunc=0;
-      for(size_t j=0;j<nc;j++) if(strcmp(calls[j],r->label)==0){ isfunc=1; break; }
-      if (isfunc) { main_end = i; break; }
-    }
+  // If there's no real "main" label, synthesize a top-of-file main slice.
+  int has_real_main = 0;
+  for (size_t j = 0; j < ns; j++) {
+    if (strcmp(starts[j], "main") == 0) { has_real_main = 1; break; }
   }
-  funcslice_t mainf;
-  mainf.name = xstrdup("main");
-  mainf.start_idx = 0;
-  mainf.end_idx = main_end;
-  // ensure main is first
-  // shift existing slices
-  if (out->n==out->cap){ out->cap=out->cap?out->cap*2:8; out->v=(funcslice_t*)xrealloc(out->v,out->cap*sizeof(funcslice_t)); }
-  memmove(out->v + 1, out->v, out->n * sizeof(funcslice_t));
-  out->v[0] = mainf;
-  out->n++;
+  if (!has_real_main) {
+    size_t main_end = recs->n;
+    for (size_t i=0;i<recs->n;i++) {
+      const record_t* r=&recs->v[i];
+      if (r->k==JREC_DIR) { main_end = i; break; }
+      if (r->k==JREC_LABEL && r->label) {
+        int isfunc=0;
+        for (size_t j = 0; j < ns; j++) if (strcmp(starts[j], r->label) == 0) { isfunc=1; break; }
+        if (isfunc) { main_end = i; break; }
+      }
+    }
+    funcslice_t mainf;
+    mainf.name = xstrdup("main");
+    mainf.start_idx = 0;
+    mainf.end_idx = main_end;
+    if (out->n==out->cap){ out->cap=out->cap?out->cap*2:8; out->v=(funcslice_t*)xrealloc(out->v,out->cap*sizeof(funcslice_t)); }
+    memmove(out->v + 1, out->v, out->n * sizeof(funcslice_t));
+    out->v[0] = mainf;
+    out->n++;
+  }
 
-  for(size_t j=0;j<nc;j++) free(calls[j]);
-  free(calls);
+  for (size_t j = 0; j < ns; j++) free(starts[j]);
+  free(starts);
   return 0;
 }
 
@@ -733,6 +779,7 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
   printf("    (local $A64  i64)\n");
   printf("    (local $BC64 i64)\n");
   printf("    (local $IX64 i64)\n");
+  printf("    (local $tmp64 i64)\n");
   printf("    (local $pc i32)\n");
   printf("    (local $cmp i32)\n");
 
@@ -769,6 +816,26 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
       if (strcmp(r->m, "RET") == 0) {
         printf("        br $exit\n");
         terminated = 1;
+        continue;
+      }
+
+      if (strcmp(r->m, "SXT32") == 0) {
+        if (r->nops != 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
+          fprintf(stderr, "zld: SXT32 expects reg at line %d\n", r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        const char* reg = r->ops[0].s;
+        const char* narrow = reg_local(reg);
+        const char* wide = reg_local64(reg);
+        if (!narrow || !wide) {
+          fprintf(stderr, "zld: unknown register %s at line %d\n", reg, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+        printf("        local.get $%s\n", narrow);
+        printf("        i64.extend_i32_s\n");
+        printf("        local.set $%s\n", wide);
         continue;
       }
 
@@ -1019,32 +1086,32 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
         continue;
       }
 
+      if (strcmp(r->m, "MUL64") == 0) {
+        if (emit_binary_i64_local_op("MUL64", r, g, "i64.mul") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "DIVS64") == 0) {
+        if (emit_binary_i64_local_op("DIVS64", r, g, "i64.div_s") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "DIVU64") == 0) {
+        if (emit_binary_i64_local_op("DIVU64", r, g, "i64.div_u") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "REMS64") == 0) {
+        if (emit_binary_i64_local_op("REMS64", r, g, "i64.rem_s") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
+      if (strcmp(r->m, "REMU64") == 0) {
+        if (emit_binary_i64_local_op("REMU64", r, g, "i64.rem_u") != 0) { rc = 1; goto cleanup; }
+        continue;
+      }
+
       if (strcmp(r->m, "CP") == 0) {
-
-        if (strcmp(r->m, "MUL64") == 0) {
-          if (emit_binary_i64_local_op("MUL64", r, g, "i64.mul") != 0) { rc = 1; goto cleanup; }
-          continue;
-        }
-
-        if (strcmp(r->m, "DIVS64") == 0) {
-          if (emit_binary_i64_local_op("DIVS64", r, g, "i64.div_s") != 0) { rc = 1; goto cleanup; }
-          continue;
-        }
-
-        if (strcmp(r->m, "DIVU64") == 0) {
-          if (emit_binary_i64_local_op("DIVU64", r, g, "i64.div_u") != 0) { rc = 1; goto cleanup; }
-          continue;
-        }
-
-        if (strcmp(r->m, "REMS64") == 0) {
-          if (emit_binary_i64_local_op("REMS64", r, g, "i64.rem_s") != 0) { rc = 1; goto cleanup; }
-          continue;
-        }
-
-        if (strcmp(r->m, "REMU64") == 0) {
-          if (emit_binary_i64_local_op("REMU64", r, g, "i64.rem_u") != 0) { rc = 1; goto cleanup; }
-          continue;
-        }
         if (r->nops != 2 || r->ops[0].t != JOP_SYM || strcmp(r->ops[0].s, "HL") != 0) {
           fprintf(stderr, "zld: CP supports only HL as lhs at line %d\n", r->line);
           rc = 1;
@@ -2133,12 +2200,407 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
       }
 
       if (strcmp(r->m, "CALL") == 0) {
-        if (r->nops != 1 || r->ops[0].t != JOP_SYM) {
-          fprintf(stderr, "zld: CALL expects 1 symbol at line %d\n", r->line);
+        if (r->nops < 1 || r->ops[0].t != JOP_SYM || !r->ops[0].s) {
+          fprintf(stderr, "zld: CALL expects symbol target at line %d\n", r->line);
           rc = 1;
           goto cleanup;
         }
         const char* callee = r->ops[0].s;
+
+        // zABI hostcalls (syscall-style).
+        if (strcmp(callee, "zi_abi_version") == 0) {
+          printf("        call $zi_abi_version\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_abi_features") == 0) {
+          // u64 return uses (DE:HL) as (hi32:lo32).
+          printf("        call $zi_abi_features\n");
+          printf("        local.set $tmp64\n");
+          printf("        local.get $tmp64\n");
+          printf("        i32.wrap_i64\n");
+          emit_store_reg32("HL", "HL");
+          printf("        local.get $tmp64\n");
+          printf("        i64.const 32\n");
+          printf("        i64.shr_u\n");
+          printf("        i32.wrap_i64\n");
+          emit_store_reg32("DE", "DE");
+          continue;
+        }
+        if (strcmp(callee, "zi_alloc") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_alloc\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_free") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        call $zi_free\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_read") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_read\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_write") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_write\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_end") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_end\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_telemetry") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        local.get $IX\n");
+          printf("        call $zi_telemetry\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_cap_count") == 0) {
+          printf("        call $zi_cap_count\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_cap_get_size") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_cap_get_size\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_cap_get") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_cap_get\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_cap_open") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        call $zi_cap_open\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_handle_hflags") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_handle_hflags\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_time_now_ms_u32") == 0) {
+          printf("        call $zi_time_now_ms_u32\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_time_sleep_ms") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_time_sleep_ms\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_mvar_get_u64") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        call $zi_mvar_get_u64\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_mvar_set_default_u64") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        local.get $DE64\n");
+          printf("        call $zi_mvar_set_default_u64\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_mvar_get") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        call $zi_mvar_get\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_mvar_set_default") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        local.get $DE64\n");
+          printf("        call $zi_mvar_set_default\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_enum_alloc") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_enum_alloc\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_hop_alloc") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_hop_alloc\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_alloc_buf") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        call $zi_hop_alloc_buf\n");
+          emit_store_reg64("HL", "HL64");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_mark") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_hop_mark\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_release") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_hop_release\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_reset") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        call $zi_hop_reset\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_used") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_hop_used\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_hop_cap") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_hop_cap\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_pump_bytes") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        call $zi_pump_bytes\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_pump_bytes_stage") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_pump_bytes_stage\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_pump_bytes_stages") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        local.get $IX\n");
+          printf("        call $zi_pump_bytes_stages\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_pump_bytes_stages3") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_pump_bytes_stages3\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_exec_run") == 0) {
+          printf("        local.get $HL64\n");
+          printf("        local.get $DE\n");
+          printf("        call $zi_exec_run\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_fs_open_path") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_fs_open_path\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_read_exact_timeout") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        local.get $IX\n");
+          printf("        call $zi_read_exact_timeout\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_zax_read_frame_timeout") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        local.get $IX\n");
+          printf("        call $zi_zax_read_frame_timeout\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_zax_q_push") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_zax_q_push\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_zax_q_pop") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_zax_q_pop\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_zax_q_pop_match") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        local.get $BC\n");
+          printf("        local.get $IX\n");
+          printf("        call $zi_zax_q_pop_match\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+
+        if (strcmp(callee, "zi_future_scope_new") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_future_scope_new\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_handle") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_handle\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_lo") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_lo\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_hi") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_hi\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_next_req") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_next_req\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_next_future") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_next_future\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope_free") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope_free\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_new") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        local.get $BC\n");
+          printf("        call $zi_future_new\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_scope") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_scope\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_handle") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_handle\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_id_lo") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_id_lo\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "zi_future_id_hi") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $zi_future_id_hi\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+
+        if (strcmp(callee, "res_end") == 0) {
+          printf("        local.get $HL\n");
+          printf("        call $res_end\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "res_write_i32") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        call $res_write_i32\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "res_write_u32") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE\n");
+          printf("        call $res_write_u32\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "res_write_i64") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        call $res_write_i64\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
+        if (strcmp(callee, "res_write_u64") == 0) {
+          printf("        local.get $HL\n");
+          printf("        local.get $DE64\n");
+          printf("        call $res_write_u64\n");
+          emit_store_reg32("HL", "HL");
+          continue;
+        }
 
         if (strcmp(callee, "_out") == 0) {
           if (!primitive_allowed(callee)) {
@@ -2146,11 +2608,11 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
             rc = 1;
             goto cleanup;
           }
-          // Lembeh ABI: (HL,DE) is the slice; res handle is explicit.
+          // (HL,DE) is the slice; res handle is explicit.
           printf("        local.get $res\n");
-          printf("        local.get $HL\n");
+          printf("        local.get $HL64\n");
           printf("        local.get $DE\n");
-          printf("        call $res_write\n");
+          printf("        call $zi_write\n");
           printf("        drop\n");
           continue;
         }
@@ -2161,12 +2623,12 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
             rc = 1;
             goto cleanup;
           }
-          // Lembeh ABI: HL=dst, DE=cap; return nread in HL to keep slice flow linear.
+          // HL=dst, DE=cap; return nread in HL to keep slice flow linear.
           printf("        local.get $req\n");
-          printf("        local.get $HL\n");
+          printf("        local.get $HL64\n");
           printf("        local.get $DE\n");
-          printf("        call $req_read\n");
-          printf("        local.set $HL\n");
+          printf("        call $zi_read\n");
+          emit_store_reg32("HL", "HL");
           continue;
         }
 
@@ -2177,11 +2639,13 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
             goto cleanup;
           }
           // Log ABI uses two slices: (HL,DE) topic and (BC,IX) message.
+          // Telemetry currently uses 32-bit ptrs; pass low 32 bits.
           printf("        local.get $HL\n");
           printf("        local.get $DE\n");
           printf("        local.get $BC\n");
           printf("        local.get $IX\n");
-          printf("        call $log\n");
+          printf("        call $zi_telemetry\n");
+          printf("        drop\n");
           continue;
         }
 
@@ -2193,8 +2657,8 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           }
           // Allocation uses HL as size-in; result pointer is placed back in HL.
           printf("        local.get $HL\n");
-          printf("        call $alloc\n");
-          printf("        local.set $HL\n");
+          printf("        call $zi_alloc\n");
+          emit_store_reg64("HL", "HL64");
           continue;
         }
 
@@ -2204,30 +2668,21 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
             rc = 1;
             goto cleanup;
           }
-          // Free uses HL as pointer; no return value.
-          printf("        local.get $HL\n");
-          printf("        call $free\n");
-          continue;
-        }
-
-        if (strcmp(callee, "_ctl") == 0) {
-          if (!primitive_allowed(callee)) {
-            fprintf(stderr, "zld: primitive %s disabled (line %d)\n", callee, r->line);
-            rc = 1;
-            goto cleanup;
-          }
-          // Control plane: HL=req_ptr, DE=req_len, BC=resp_ptr, IX=resp_cap; result -> HL.
-          printf("        local.get $HL\n");
-          printf("        local.get $DE\n");
-          printf("        local.get $BC\n");
-          printf("        local.get $IX\n");
-          printf("        call $ctl\n");
-          printf("        local.set $HL\n");
+          // Free uses HL as pointer; ignore return value to preserve legacy primitive shape.
+          printf("        local.get $HL64\n");
+          printf("        call $zi_free\n");
+          printf("        drop\n");
           continue;
         }
 
         if (is_primitive(callee)) {
           fprintf(stderr, "zld: unsupported primitive CALL %s at line %d\n", callee, r->line);
+          rc = 1;
+          goto cleanup;
+        }
+
+        if (strncmp(callee, "zi_", 3) == 0 || strncmp(callee, "res_", 4) == 0) {
+          fprintf(stderr, "zld: unsupported zABI CALL %s at line %d\n", callee, r->line);
           rc = 1;
           goto cleanup;
         }
@@ -2316,22 +2771,24 @@ static int build_linkage(const recvec_t* recs, exportvec_t* exports, importvec_t
         fprintf(stderr, "zld: EXTERN name must be a symbol (line %d)\n", r->line);
         return 1;
       }
-      if (is_primitive(name) && strcmp(name, "_ctl") != 0) {
+
+      // zABI imports are declared as EXTERN env, "zi_*", zi_* in JSONL outputs,
+      // but the WASM module header already declares the zABI surface.
+      if (strcmp(mod->s, "env") == 0 && is_builtin_zabi_import(field->s)) {
+        if (strcmp(name, field->s) != 0) {
+          fprintf(stderr, "zld: EXTERN zABI must use local name == field (line %d)\n", r->line);
+          return 1;
+        }
+        continue;
+      }
+
+      if (is_primitive(name)) {
         fprintf(stderr, "zld: EXTERN cannot define primitive %s (line %d)\n", name, r->line);
         return 1;
       }
-      const char* local_name = name;
-      if (strcmp(name, "_ctl") == 0) {
-        // Normalize primitive name; enforce expected signature: 4 params + result.
-        if (r->nargs != 3) {
-          fprintf(stderr, "zld: EXTERN _ctl requires explicit local name (line %d)\n", r->line);
-          return 1;
-        }
-        local_name = "ctl";
-      }
-      if (importvec_add(imports, mod->s, field->s, local_name)) {
-        fprintf(stderr, "zld: duplicate EXTERN %s (line %d)\n", name, r->line);
-        return 1;
+      if (importvec_add(imports, mod->s, field->s, name)) {
+        // Some real-world JSONL emitters repeat the same EXTERN lines; treat as idempotent.
+        continue;
       }
       continue;
     }
@@ -2531,7 +2988,9 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
     }
   }
 
-  // PUBLIC must reference a real symbol and cannot shadow imports.
+  // PUBLIC exports are best-effort: some real-world JSONL emitters include extra PUBLIC
+  // lines that are only meaningful for native link steps. For WASM emission, ignore
+  // exports that don't resolve within this module.
   for (size_t i=0;i<exports.n;i++) {
     if (strcmp(exports.v[i].name, "lembeh_handle") == 0) {
       fprintf(stderr, "zld: PUBLIC cannot export lembeh_handle\n");
@@ -2544,13 +3003,8 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
     }
     long tmp = 0;
     if (!gsymtab_get(&g, exports.v[i].name, &tmp) && !funcvec_has(&funcs, exports.v[i].name)) {
-      fprintf(stderr, "zld: PUBLIC %s has no matching symbol\n", exports.v[i].name);
-      funcvec_free(&funcs);
-      datavec_free(&data);
-      gsymtab_free(&g);
-      exportvec_free(&exports);
-      importvec_free(&imports);
-      return 1;
+      exports.v[i].name = NULL;
+      continue;
     }
     for (size_t j=0;j<imports.n;j++) {
       if (strcmp(imports.v[j].name, exports.v[i].name) == 0) {
@@ -2566,35 +3020,70 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   }
 
   // --- Emit module ---
-  int has_ctl_import = 0;
-  for (size_t i=0;i<imports.n;i++) {
-    if (strcmp(imports.v[i].name, "ctl") == 0 || strcmp(imports.v[i].name, "_ctl") == 0) {
-      has_ctl_import = 1;
-      break;
-    }
-  }
-
   printf("(module\n");
-  printf("  (import \"lembeh\" \"req_read\"  (func $req_read  (param i32 i32 i32) (result i32)))\n");
-  printf("  (import \"lembeh\" \"res_write\" (func $res_write (param i32 i32 i32) (result i32)))\n");
-  printf("  (import \"lembeh\" \"res_end\"   (func $res_end   (param i32)))\n\n");
-  printf("  (import \"lembeh\" \"log\"       (func $log       (param i32 i32 i32 i32)))\n");
-  if (!has_ctl_import) {
-    printf("  (import \"lembeh\" \"_ctl\"      (func $ctl       (param i32 i32 i32 i32) (result i32)))\n");
-  }
-  printf("  (import \"lembeh\" \"alloc\"     (func $alloc     (param i32) (result i32)))\n");
-  printf("  (import \"lembeh\" \"free\"      (func $free      (param i32)))\n\n");
+  printf("  ;; zABI host surface (syscall-style zi_*)\n");
+  printf("  (import \"env\" \"zi_abi_version\"   (func $zi_abi_version   (result i32)))\n");
+  printf("  (import \"env\" \"zi_abi_features\"  (func $zi_abi_features  (result i64)))\n");
+  printf("  (import \"env\" \"zi_read\"          (func $zi_read          (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_write\"         (func $zi_write         (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_end\"           (func $zi_end           (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_alloc\"         (func $zi_alloc         (param i32) (result i64)))\n");
+  printf("  (import \"env\" \"zi_free\"          (func $zi_free          (param i64) (result i32)))\n");
+  printf("  (import \"env\" \"zi_telemetry\"     (func $zi_telemetry     (param i32 i32 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_cap_count\"     (func $zi_cap_count     (result i32)))\n");
+  printf("  (import \"env\" \"zi_cap_get_size\"  (func $zi_cap_get_size  (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_cap_get\"       (func $zi_cap_get       (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_cap_open\"      (func $zi_cap_open      (param i64) (result i32)))\n");
+  printf("  (import \"env\" \"zi_handle_hflags\" (func $zi_handle_hflags (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_time_now_ms_u32\" (func $zi_time_now_ms_u32 (result i32)))\n");
+  printf("  (import \"env\" \"zi_time_sleep_ms\"   (func $zi_time_sleep_ms   (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_mvar_get_u64\"         (func $zi_mvar_get_u64         (param i64) (result i64)))\n");
+  printf("  (import \"env\" \"zi_mvar_set_default_u64\" (func $zi_mvar_set_default_u64 (param i64 i64) (result i64)))\n");
+  printf("  (import \"env\" \"zi_mvar_get\"             (func $zi_mvar_get             (param i64) (result i64)))\n");
+  printf("  (import \"env\" \"zi_mvar_set_default\"     (func $zi_mvar_set_default     (param i64 i64) (result i64)))\n");
+  printf("  (import \"env\" \"zi_enum_alloc\" (func $zi_enum_alloc (param i32 i32 i32) (result i64)))\n");
+  printf("  (import \"env\" \"zi_exec_run\" (func $zi_exec_run (param i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_fs_open_path\" (func $zi_fs_open_path (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_hop_alloc\" (func $zi_hop_alloc (param i32 i32 i32) (result i64)))\n");
+  printf("  (import \"env\" \"zi_hop_alloc_buf\" (func $zi_hop_alloc_buf (param i32 i32) (result i64)))\n");
+  printf("  (import \"env\" \"zi_hop_mark\" (func $zi_hop_mark (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_hop_release\" (func $zi_hop_release (param i32 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_hop_reset\" (func $zi_hop_reset (param i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_hop_used\" (func $zi_hop_used (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_hop_cap\" (func $zi_hop_cap (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_read_exact_timeout\" (func $zi_read_exact_timeout (param i32 i64 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_zax_read_frame_timeout\" (func $zi_zax_read_frame_timeout (param i32 i64 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_zax_q_push\" (func $zi_zax_q_push (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_zax_q_pop\" (func $zi_zax_q_pop (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_zax_q_pop_match\" (func $zi_zax_q_pop_match (param i32 i64 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_pump_bytes\" (func $zi_pump_bytes (param i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_pump_bytes_stage\" (func $zi_pump_bytes_stage (param i32 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_pump_bytes_stages\" (func $zi_pump_bytes_stages (param i32 i64 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_pump_bytes_stages3\" (func $zi_pump_bytes_stages3 (param i32 i64 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_new\" (func $zi_future_scope_new (param i32 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_handle\" (func $zi_future_scope_handle (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_lo\" (func $zi_future_scope_lo (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_hi\" (func $zi_future_scope_hi (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_next_req\" (func $zi_future_scope_next_req (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_next_future\" (func $zi_future_scope_next_future (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope_free\" (func $zi_future_scope_free (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_new\" (func $zi_future_new (param i32 i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_scope\" (func $zi_future_scope (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_handle\" (func $zi_future_handle (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_id_lo\" (func $zi_future_id_lo (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"zi_future_id_hi\" (func $zi_future_id_hi (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"res_end\" (func $res_end (param i32) (result i32)))\n");
+  printf("  (import \"env\" \"res_write_i32\" (func $res_write_i32 (param i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"res_write_u32\" (func $res_write_u32 (param i32 i32) (result i32)))\n");
+  printf("  (import \"env\" \"res_write_i64\" (func $res_write_i64 (param i32 i64) (result i32)))\n");
+  printf("  (import \"env\" \"res_write_u64\" (func $res_write_u64 (param i32 i64) (result i32)))\n\n");
 
   for (size_t i=0;i<imports.n;i++) {
     printf("  (import ");
     wat_emit_bytes((const uint8_t*)imports.v[i].module, strlen(imports.v[i].module));
     printf(" ");
     wat_emit_bytes((const uint8_t*)imports.v[i].field, strlen(imports.v[i].field));
-    if (strcmp(imports.v[i].name, "ctl") == 0 || strcmp(imports.v[i].name, "_ctl") == 0) {
-      printf(" (func $%s (param i32 i32 i32 i32) (result i32)))\n", imports.v[i].name);
-    } else {
-      printf(" (func $%s (param i32 i32)))\n", imports.v[i].name);
-    }
+    printf(" (func $%s (param i32 i32)))\n", imports.v[i].name);
   }
   if (imports.n) printf("\n");
 
@@ -2647,10 +3136,12 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   printf("    local.get $res\n");
   printf("    call $main\n");
   printf("    local.get $res\n");
-  printf("    call $res_end\n");
+  printf("    call $zi_end\n");
+  printf("    drop\n");
   printf("  )\n");
 
   for (size_t i=0;i<exports.n;i++) {
+    if (!exports.v[i].name) continue;
     long tmp = 0;
     if (gsymtab_get(&g, exports.v[i].name, &tmp)) {
       printf("  (export \"%s\" (global $%s))\n", exports.v[i].name, exports.v[i].name);
@@ -2713,7 +3204,6 @@ int emit_manifest(const recvec_t* recs) {
   if (prim_mask & PRIM_LOG) { if (!first) printf(","); json_emit_str("_log"); first = 0; }
   if (prim_mask & PRIM_ALLOC) { if (!first) printf(","); json_emit_str("_alloc"); first = 0; }
   if (prim_mask & PRIM_FREE) { if (!first) printf(","); json_emit_str("_free"); first = 0; }
-  if (prim_mask & PRIM_CTL) { if (!first) printf(","); json_emit_str("_ctl"); first = 0; }
   printf("]}\n");
 
   exportvec_free(&exports);

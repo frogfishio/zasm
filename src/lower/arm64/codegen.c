@@ -688,6 +688,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         int base = map_reg(ops[1].mem_base);
         long long off = 0;
         if (nops>=3 && ops[2].kind==IR_OP_NUM) off = ops[2].num;
+        else if (ops[1].has_mem_disp) off = ops[1].mem_disp;
         uint16_t imm12=0;
         int scale = 3;
         if (strcmp(m,"LD8U")==0 || strcmp(m,"LD8S")==0 || strcmp(m,"LD8U64")==0 || strcmp(m,"LD8S64")==0) scale=0;
@@ -735,6 +736,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       if (ops[0].kind==IR_OP_MEM) { base=map_reg(ops[0].mem_base); if (nops>=2 && ops[1].kind==IR_OP_SYM) src=map_reg(ops[1].sym); }
       if (src<0) { CG_FAIL(e, "ST src must be register"); }
       if (nops>=3 && ops[2].kind==IR_OP_NUM) off=ops[2].num;
+      else if (ops[0].has_mem_disp) off = ops[0].mem_disp;
       uint16_t imm12=0;
       int scale=3;
       if (strcmp(m,"ST8")==0) scale=0;

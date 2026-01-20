@@ -1,6 +1,6 @@
 # TO DO
 
-- New spec impact (lembeh/CLOAK_INTEGRATOR_GUIDE.md):
+- New spec impact (legacy cloak integrator guide):
   - Rename/adjust linker WAT emission to use `_alloc/_free/_ctl` names and update allowlist/manifest.
   - Update `docs/tools/zrun.md` to document `_ctl`, handle semantics, and determinism guarantees.
   - Add ABI tests for handle rules: opaque handles, reserved 0–2, nonblocking timeout_ms=0.

@@ -151,7 +151,7 @@ static void diag_emit(const char* level, const char* file, int line, const char*
 
 static void print_help(void) {
   fprintf(stdout,
-          "zrun — local runner for lembeh_handle modules\n"
+          "zrun — local runner for zABI 2.0 modules\n"
           "\n"
           "Usage:\n"
           "  zrun [--trace] [--strict] [--mem <size>] [--verbose] [--json] <module.wat|module.wasm>\n"
@@ -289,7 +289,7 @@ int main(int argc, char** argv) {
   env.strict = strict;
   env.mem_cap_bytes = mem_cap_bytes;
 
-  if (zrun_link_lembeh_imports(store, linker, &env) != 0) {
+  if (zrun_link_zabi_imports(store, linker, &env) != 0) {
     rc = 1;
     goto cleanup;
   }

@@ -87,6 +87,8 @@ static int copy_op(ir_op_t *dst, const ir_op_t *src) {
   if (!dst || !src) return -1;
   memset(dst, 0, sizeof(*dst));
   dst->kind = src->kind;
+  dst->mem_disp = src->mem_disp;
+  dst->has_mem_disp = src->has_mem_disp;
   dst->num = src->num;
   dst->unum = src->unum;
   dst->is_unsigned = src->is_unsigned;

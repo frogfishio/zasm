@@ -265,8 +265,8 @@ JIT error semantics:
 | [docs/spec/accelerator.md](./docs/spec/accelerator.md) | Accelerator profile (CUDA/Vulkan/Metal; draft) |
 | [docs/spec/fpga.md](./docs/spec/fpga.md) | FPGA profile (HLS/RTL; draft) |
 | [docs/integrator_pack/jit/README.md](./docs/integrator_pack/jit/README.md) | JIT codepack snapshot (integrator pack) |
-| [docs/integrator_pack.md](./docs/integrator_pack.md) | Third-party compiler integration guide |
-| [lembeh/CLOAK_INTEGRATOR_GUIDE.md](./lembeh/CLOAK_INTEGRATOR_GUIDE.md) | **Normative** cloak runtime implementation guide |
+| [docs/integrator_pack/integrator_pack.md](./docs/integrator_pack/integrator_pack.md) | Third-party compiler integration guide |
+| [docs/integrator_pack/integrator_pack/CLOAK_INTEGRATOR_GUIDE.md](./docs/integrator_pack/integrator_pack/CLOAK_INTEGRATOR_GUIDE.md) | Legacy cloak integration guide (retired) |
 
 ---
 
@@ -275,7 +275,7 @@ JIT error semantics:
 ### ✅ Stable (v1.x)
 
 - JSONL IR schema and versioning
-- Host ABI (`req_read`, `res_write`, `res_end`, `log`, `_alloc`, `_free`, `_ctl`)
+- Host ABI (zABI 2.0: `env.zi_*` syscalls)
 - Core ISA (arithmetic, logic, shifts, loads, stores, branches, calls)
 - WASM backend via `zld`
 - Pure-C cloak runtime

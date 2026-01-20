@@ -22,5 +22,5 @@ Deliver a feature-complete JSON IR (`zasm-v1.0`) → macOS arm64 lowerer that em
 - Instruction selection: map zasm mnemonics/operands to ARM64 encodings (arith/logical, shifts/rotates, compares/branches, loads/stores, CALL/RET/host primitives), reject unsupported forms with clear errors.
 - Data/layout: assemble DB/DW/RESB/STR/EQU into contiguous data with symbol names/offsets; carry PUBLIC/EXTERN metadata; track label offsets for code/data.
 - Relocations: emit reloc records for all symbol refs (text→text/data, data→text/data, externs) using ADRP+ADD/branch/data encodings consistent with the Mach-O writer.
-- Prologue/epilogue/ABI: generate lembeh C-call entry, save/restore state, honor stack alignment, initialize guest-mem slot.
+- Prologue/epilogue/ABI: generate zABI C-call entry, save/restore state, honor stack alignment, initialize guest-mem slot.
 - Validation/tests: add parser+codegen smoke test on fixtures to assert blob sizes, sym/reloc counts; ensure deterministic output.
