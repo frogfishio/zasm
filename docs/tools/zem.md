@@ -92,6 +92,37 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 - `--trace` emits per-instruction JSONL events to stderr.
 - `--trace-mem` adds `mem_read`/`mem_write` JSONL events to stderr.
 
+### Process snapshot (argv/env)
+
+`zem` can provide a process-like snapshot (guest argv + environment variables) to the emulated program via the `zi_*` proc/env syscalls.
+
+Guest argv:
+
+- Use `--` to stop option parsing; remaining args become guest argv.
+
+```sh
+bin/zem /tmp/program.jsonl -- hello world
+```
+
+Environment snapshot:
+
+- Default is an empty environment.
+- `--inherit-env` snapshots the host environment (best effort) for `zi_env_get_*`.
+- `--clear-env` clears the snapshot.
+- `--env KEY=VAL` adds/overrides a single entry (repeatable).
+
+```sh
+bin/zem --clear-env --env MODE=debug --env USER=alice /tmp/program.jsonl
+```
+
+Supported proc/env syscalls:
+
+- `CALL zi_argc` → `HL=argc`
+- `CALL zi_argv_len` → `HL=i, HL=len_or_err`
+- `CALL zi_argv_copy` → `HL=i, DE=out_ptr64, BC=cap, HL=written_or_err`
+- `CALL zi_env_get_len` → `HL=key_ptr64, DE=key_len, HL=len_or_err`
+- `CALL zi_env_get_copy` → `HL=key_ptr64, DE=key_len, BC=out_ptr64, IX=cap, HL=written_or_err`
+
 ### Coverage
 
 `zem` can record per-PC instruction hit counts and write them as JSONL.
@@ -119,6 +150,7 @@ Notes:
 - Coverage is per IR record index (`pc`). Only instruction records (`kind == instr`) are reported.
 - The JSONL report also includes per-label aggregates (`k == "zem_cov_label"`) to support black-hole analysis.
 - When `--debug-events-only` is used, `--coverage` requires `--coverage-out` (to keep stderr clean JSONL).
+- When `--debug-events-only` is used, `--coverage-blackholes` is rejected (since it prints a human summary to stderr).
 
 ### Debugging (CLI)
 
