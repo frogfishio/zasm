@@ -94,8 +94,12 @@ int zem_exec_ops_cmp(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
 int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
 int zem_exec_ops_jr(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
 
-int zem_exec_call_00(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
-int zem_exec_call_01(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
+int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
+int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
+int zem_exec_call_env_time_proc(zem_exec_ctx_t *ctx, const record_t *r,
+                                zem_op_t op);
+int zem_exec_call_misc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
+int zem_exec_call_label(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op);
 
 // ---- Helpers exported from modules ----
 

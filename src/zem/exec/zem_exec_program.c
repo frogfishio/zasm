@@ -424,8 +424,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     // Dispatch to modular handlers.
     if (zem_exec_ops_ld(&ctx, r, op) || zem_exec_ops_alu(&ctx, r, op) ||
         zem_exec_ops_cmp(&ctx, r, op) || zem_exec_ops_mem(&ctx, r, op) ||
-        zem_exec_ops_jr(&ctx, r, op) || zem_exec_call_00(&ctx, r, op) ||
-        zem_exec_call_01(&ctx, r, op)) {
+        zem_exec_ops_jr(&ctx, r, op) || zem_exec_call_env_time_proc(&ctx, r, op) ||
+        zem_exec_call_alloc(&ctx, r, op) || zem_exec_call_io(&ctx, r, op) ||
+        zem_exec_call_misc(&ctx, r, op) || zem_exec_call_label(&ctx, r, op)) {
       if (rc) goto done;
       continue;
     }

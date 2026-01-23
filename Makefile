@@ -688,8 +688,11 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/exec/zem_exec_ops_cmp.o \
 	$(ZEM_BUILD)/exec/zem_exec_ops_mem.o \
 	$(ZEM_BUILD)/exec/zem_exec_ops_jr.o \
-	$(ZEM_BUILD)/exec/zem_exec_call_00.o \
-	$(ZEM_BUILD)/exec/zem_exec_call_01.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_env_time_proc.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_alloc.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_io.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_misc.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_label.o \
 	$(ZEM_BUILD)/zem_rep.o \
 	$(ZEM_BUILD)/zem_strip.o \
 	$(ZEM_BUILD)/zem_hash.o \
