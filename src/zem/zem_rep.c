@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "jsonl.h"
+#include "zem_hash.h"
 #include "zem_util.h"
 
 enum { ZEM_REP_MAX_N = 64 };
@@ -578,6 +579,7 @@ static int parse_coverage_jsonl(const char *path, cov_summary_t *out, int max_bl
 
 static int process_stream(FILE *in, const char *in_path, int n, const char *mode,
                           ngram_map_t *map,
+                          uint64_t *io_module_hash,
                           uint64_t *io_total_lines,
                           uint64_t *io_total_instr,
                           uint32_t *io_max_count) {
@@ -609,6 +611,10 @@ static int process_stream(FILE *in, const char *in_path, int n, const char *mode
       free(line);
       (void)zem_failf("parse error (%s): code=%d", in_path ? in_path : "?", rc);
       return 0;
+    }
+
+    if (io_module_hash) {
+      *io_module_hash = zem_ir_module_hash_update(*io_module_hash, &r);
     }
 
     if (r.k != JREC_INSTR) {
@@ -813,9 +819,31 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
     return zem_failf("rep scan: OOM initializing map");
   }
 
+  cov_summary_t cov;
+  int have_cov = 0;
+  uint64_t dead_by_profile = 0;
+  if (coverage_jsonl_path && *coverage_jsonl_path) {
+    have_cov = parse_coverage_jsonl(coverage_jsonl_path, &cov, max_report);
+    if (!have_cov) {
+      ngram_map_free(&map);
+      return zem_failf("cannot read coverage JSONL: %s", coverage_jsonl_path);
+    }
+    if (cov.module_hash[0] == 0) {
+      cov_free(&cov);
+      ngram_map_free(&map);
+      return zem_failf("coverage JSONL missing module_hash: %s", coverage_jsonl_path);
+    }
+    if (cov.total_instr) {
+      dead_by_profile = (cov.total_instr > cov.covered_instr)
+                           ? (cov.total_instr - cov.covered_instr)
+                           : 0;
+    }
+  }
+
   uint64_t total_lines = 0;
   uint64_t total_instr = 0;
   uint32_t max_count = 0;
+  uint64_t prog_hash = zem_fnv1a64_init();
 
   for (int i = 0; i < ninputs; i++) {
     const char *path = inputs[i];
@@ -830,11 +858,13 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
       return zem_failf("cannot open %s: %s", path, strerror(errno));
     }
 
-    int ok = process_stream(in, path, n, mode, &map, &total_lines, &total_instr, &max_count);
+    int ok = process_stream(in, path, n, mode, &map, &prog_hash, &total_lines, &total_instr,
+                &max_count);
 
     if (in != stdin) fclose(in);
 
     if (!ok) {
+      if (have_cov) cov_free(&cov);
       ngram_map_free(&map);
       return 2;
     }
@@ -852,13 +882,15 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
     best_saved_instr_est = (uint64_t)(max_count - 1) * (uint64_t)n;
   }
 
-  cov_summary_t cov;
-  int have_cov = 0;
-  uint64_t dead_by_profile = 0;
-  if (coverage_jsonl_path && *coverage_jsonl_path) {
-    have_cov = parse_coverage_jsonl(coverage_jsonl_path, &cov, max_report);
-    if (have_cov && cov.total_instr) {
-      dead_by_profile = (cov.total_instr > cov.covered_instr) ? (cov.total_instr - cov.covered_instr) : 0;
+  if (have_cov) {
+    char prog_hash_s[32];
+    snprintf(prog_hash_s, sizeof(prog_hash_s), "fnv1a64:%016" PRIx64, prog_hash);
+    if (strcmp(cov.module_hash, prog_hash_s) != 0) {
+      cov_free(&cov);
+      ngram_map_free(&map);
+      return zem_failf(
+          "coverage profile does not match program: profile_module_hash=%s program_module_hash=%s",
+          cov.module_hash, prog_hash_s);
     }
   }
 
@@ -871,6 +903,7 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
     out = fopen(report_out_path, "wb");
   }
   if (!out) {
+    if (have_cov) cov_free(&cov);
     ngram_map_free(&map);
     return zem_failf("cannot open %s: %s", report_out_path, strerror(errno));
   }

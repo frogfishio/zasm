@@ -10,38 +10,43 @@ trap 'rm -f "$TMP_IR" "$TMP_COV"' EXIT
 
 # Minimal valid IR JSONL: must include "ir":"zasm-v1.1".
 # Use a repeated instruction stream so the n-gram savings estimate is stable.
+# Also include an unreachable labeled block after RET so coverage has a blackhole label.
 cat >"$TMP_IR" <<'JSONL'
+{"ir":"zasm-v1.1","k":"label","name":"main"}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
+{"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
+{"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[]}
+{"ir":"zasm-v1.1","k":"label","name":"BH_LABEL"}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
 {"ir":"zasm-v1.1","k":"instr","m":"NOP","ops":[]}
 JSONL
 
-# With 6 instructions and n=2, we see 5 identical n-grams.
-# best_saved = (5-1)*2 = 8
+# With NOP blocks split by RET and n=2, we see 6 identical NOP,NOP n-grams total.
+# best_saved = (6-1)*2 = 10
 OUT="$(bin/zem --rep-scan --rep-n 2 --rep-mode shape --rep-out - "$TMP_IR")"
 
 echo "$OUT" | grep -q '"k":"zem_rep"'
-echo "$OUT" | grep -q '"best_ngram_saved_instr_est":8'
-echo "$OUT" | grep -q '"bloat_score":8'
+echo "$OUT" | grep -q '"best_ngram_saved_instr_est":10'
+echo "$OUT" | grep -q '"bloat_score":10'
 
 # Ensure we can emit a top-offender record.
 OUT2="$(bin/zem --rep-scan --rep-n 2 --rep-mode shape --rep-max-report 1 --rep-out - "$TMP_IR")"
 echo "$OUT2" | grep -q '"k":"zem_rep_ngram"'
 echo "$OUT2" | grep -q '"mnems":\["NOP","NOP"\]'
 
-# Coverage embedding: verify zem emits rep_cov + a top blackhole record.
-cat >"$TMP_COV" <<'JSONL'
-{"k":"zem_cov","v":1,"total_instr":10,"covered_instr":6,"module_hash":"fnv1a64:0123456789abcdef"}
-{"k":"zem_cov_label","v":1,"label":"BH_LABEL","total_instr":4,"covered_instr":0,"uncovered_instr":4,"first_pc":123}
-JSONL
+# Coverage embedding: generate a coverage profile (module_hash must match).
+# Note: the execution engine may reject some mnemonics used in this fixture; we
+# still expect coverage JSONL to be written for identity checks.
+bin/zem --coverage --coverage-out "$TMP_COV" "$TMP_IR" >/dev/null || true
+grep -q '"k":"zem_cov"' "$TMP_COV"
 
-OUT3="$(bin/zem --rep-scan --rep-n 2 --rep-mode shape --rep-max-report 1 --rep-coverage-jsonl "$TMP_COV" --rep-out - "$TMP_IR")"
+OUT3="$(bin/zem --rep-scan --rep-n 2 --rep-mode shape --rep-max-report 2 --rep-coverage-jsonl "$TMP_COV" --rep-out - "$TMP_IR")"
 echo "$OUT3" | grep -q '"k":"zem_rep_cov"'
-echo "$OUT3" | grep -q '"module_hash":"fnv1a64:0123456789abcdef"'
-echo "$OUT3" | grep -q '"total_labels":1'
-echo "$OUT3" | grep -q '"blackhole_labels":1'
+echo "$OUT3" | grep -q '"total_labels":2'
+echo "$OUT3" | grep -q '"blackhole_labels":2'
 echo "$OUT3" | grep -q '"k":"zem_rep_blackhole"'
 echo "$OUT3" | grep -q '"label":"BH_LABEL"'

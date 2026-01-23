@@ -155,6 +155,7 @@ Notes:
 
 - This is a C implementation intended to eventually replace the Python repetition scan for CI/one-binary workflows.
 - The detailed “top repeated n-grams” report (`k == "zem_rep_ngram"`) is emitted when `--rep-max-report N` is non-zero.
+- When `zem --rep-scan` is given `--rep-coverage-jsonl PATH`, it requires the coverage profile `module_hash` to match the input IR; mismatch is a hard error to prevent using the wrong profile.
 
 ### Requirements
 
