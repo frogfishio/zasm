@@ -32,6 +32,7 @@ This separation keeps the system composable:
 zASM source (text)
   → zas (stdin→stdout)
   → JSONL IR (stream)
+  → zlnt (stdin→stderr)   ; optional but recommended static analysis
   → zld (stdin→stdout)
   → WAT module (text)
   → wat2wasm / other tool

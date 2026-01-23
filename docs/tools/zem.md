@@ -191,6 +191,27 @@ This is intended to make “trap, identify, explain” workflows fast when debug
 
 The warning includes the detected pattern PCs, the suspect register’s current value, and its provenance.
 
+### Shake mode (deterministic perturbations)
+
+`--shake` runs the program multiple times with small, deterministic perturbations to help surface latent bugs (e.g. uninitialized reads, reliance on a stable heap layout).
+
+Typical usage:
+
+```sh
+bin/zem --shake --shake-iters 50 /tmp/program.jsonl
+```
+
+To replay a specific failing run (use the values printed in the shake header):
+
+```sh
+bin/zem --shake --shake-seed 123 --shake-start 17 --shake-iters 1 /tmp/program.jsonl
+```
+
+Useful flags:
+
+- `--shake-heap-pad N` / `--shake-heap-pad-max N` vary the base heap address (alignment-safe padding).
+- `--shake-poison-heap` fills newly allocated heap bytes with deterministic non-zero data to surface zero-init assumptions.
+
 ## Debugger REPL quickstart
 
 Run, then interact:

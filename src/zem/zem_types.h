@@ -72,6 +72,13 @@ typedef struct {
   // Breakpoints are PC values (record indices).
   uint32_t break_pcs[256];
   size_t nbreak_pcs;
+
+  // Shake mode (opt-in): run with deterministic perturbations.
+  int shake;
+  uint32_t shake_run;      // iteration index (for replay)
+  uint64_t shake_seed;     // seed used for shake RNG (for replay)
+  uint32_t shake_heap_pad; // heap pad applied before this run (bytes)
+  int shake_poison_heap;   // if set, poison newly-allocated heap bytes
 } zem_dbg_cfg_t;
 
 typedef struct {

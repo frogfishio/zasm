@@ -17,5 +17,8 @@ Quick smoke:
 make zem
 bin/zem --help
 bin/zem src/zem/testdata/001-main-zero.zir.jsonl
+
+# Shake smoke (deterministic perturbations):
+bin/zem --shake --shake-iters 20 examples/hello.jsonl
 ```
 

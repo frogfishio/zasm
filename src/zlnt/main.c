@@ -373,9 +373,108 @@ static int analyze_function(const char* fname, const recvec_t* recs, size_t star
   int errors = 0;
   for (size_t bi=0; bi<nblocks; bi++) {
     unsigned st = in_state[bi];
+
+    // Local (basic-block) checker for definite OOB constant-offset accesses.
+    // This is intentionally conservative and only fires when we can prove:
+    //   - HL holds a pointer returned by CALL zi_enum_alloc
+    //   - slot_size (BC) was a constant at that CALL
+    //   - subsequent ADD{,64} HL, <imm> are tracked
+    //   - a later LD*/ST* (HL+disp) would exceed slot_size
+    int bc_is_const = 0;
+    long bc_const = 0;
+    int hl_enum = 0;
+    long hl_off = 0;
+    int hl_off_known = 0;
+    long hl_slot_size = 0;
+
     for (size_t i = blocks[bi].start; i < blocks[bi].end; i++) {
       const record_t* r = &recs->v[i];
       if (r->k != JREC_INSTR || !r->m) continue;
+
+      // Track constant loads into BC (for zi_enum_alloc slot_size).
+      if ((strcmp(r->m, "LD") == 0 || strcmp(r->m, "LD32") == 0 || strcmp(r->m, "LD64") == 0) &&
+          r->nops == 2 && r->ops[0].t == JOP_SYM && r->ops[1].t == JOP_NUM) {
+        if (strcmp(r->ops[0].s, "BC") == 0) {
+          bc_is_const = 1;
+          bc_const = r->ops[1].n;
+        }
+      }
+
+      // Any non-constant write to BC makes it unknown.
+      if ((strcmp(r->m, "LD") == 0 || strcmp(r->m, "LD32") == 0 || strcmp(r->m, "LD64") == 0) &&
+          r->nops == 2 && r->ops[0].t == JOP_SYM && strcmp(r->ops[0].s, "BC") == 0 && r->ops[1].t != JOP_NUM) {
+        bc_is_const = 0;
+      }
+
+      // Track CALL zi_enum_alloc producing an HL pointer with a fixed slot size.
+      if (strcmp(r->m, "CALL") == 0 && r->nops == 1 && r->ops[0].t == JOP_SYM && r->ops[0].s) {
+        const char* callee = r->ops[0].s;
+        if (strcmp(callee, "zi_enum_alloc") == 0) {
+          if (bc_is_const && bc_const > 0) {
+            hl_enum = 1;
+            hl_slot_size = bc_const;
+            hl_off = 0;
+            hl_off_known = 1;
+          } else {
+            hl_enum = 0;
+            hl_off_known = 0;
+          }
+        } else {
+          // Unknown effects; avoid carrying pointer facts across calls.
+          hl_enum = 0;
+          hl_off_known = 0;
+        }
+      }
+
+      // Pointer arithmetic: ADD{,64} HL, <imm>
+      if ((strcmp(r->m, "ADD") == 0 || strcmp(r->m, "ADD64") == 0) &&
+          r->nops == 2 && r->ops[0].t == JOP_SYM && r->ops[0].s && strcmp(r->ops[0].s, "HL") == 0) {
+        if (hl_enum && hl_off_known && r->ops[1].t == JOP_NUM) {
+          hl_off += r->ops[1].n;
+        } else {
+          // We can't keep a safe bound if HL's offset becomes non-constant.
+          hl_enum = 0;
+          hl_off_known = 0;
+        }
+      }
+
+      // Any other write to HL kills the tracked pointer.
+      if ((strcmp(r->m, "LD") == 0 || strcmp(r->m, "LD32") == 0 || strcmp(r->m, "LD64") == 0) &&
+          r->nops == 2 && r->ops[0].t == JOP_SYM && r->ops[0].s && strcmp(r->ops[0].s, "HL") == 0) {
+        hl_enum = 0;
+        hl_off_known = 0;
+      }
+      if ((strcmp(r->m, "INC") == 0 || strcmp(r->m, "DEC") == 0) && r->nops == 1 && r->ops[0].t == JOP_SYM &&
+          r->ops[0].s && strcmp(r->ops[0].s, "HL") == 0) {
+        hl_enum = 0;
+        hl_off_known = 0;
+      }
+
+      // Definite OOB check on mem ops of the form (HL + disp).
+      if (hl_enum && hl_off_known &&
+          (strcmp(r->m, "ST32") == 0 || strcmp(r->m, "ST64") == 0 || strcmp(r->m, "LD32") == 0 || strcmp(r->m, "LD64") == 0)) {
+        int width = 0;
+        if (strcmp(r->m, "ST32") == 0 || strcmp(r->m, "LD32") == 0) width = 4;
+        if (strcmp(r->m, "ST64") == 0 || strcmp(r->m, "LD64") == 0) width = 8;
+
+        const operand_t* memop = NULL;
+        if ((strcmp(r->m, "ST32") == 0 || strcmp(r->m, "ST64") == 0) && r->nops >= 1 && r->ops[0].t == JOP_MEM) {
+          memop = &r->ops[0];
+        }
+        if ((strcmp(r->m, "LD32") == 0 || strcmp(r->m, "LD64") == 0) && r->nops >= 2 && r->ops[1].t == JOP_MEM) {
+          memop = &r->ops[1];
+        }
+        if (memop && memop->base_is_reg && memop->s && strcmp(memop->s, "HL") == 0) {
+          long off = hl_off + memop->disp;
+          long end_off = off + (long)width;
+          if (off < 0 || end_off > hl_slot_size) {
+            diag_emit("error", g_source, r->line,
+                      "definite out-of-bounds %s at (HL%+ld), width=%d, slot_size=%ld after CALL zi_enum_alloc",
+                      r->m, memop->disp, width, hl_slot_size);
+            errors |= 1;
+          }
+        }
+      }
 
       if (strcmp(r->m, "CALL") == 0 && r->nops == 1 && r->ops[0].t == JOP_SYM) {
         const char* callee = r->ops[0].s;

@@ -46,6 +46,12 @@ The assembly syntax uses Z80-inspired mnemonics for human readability—but this
 │               Parses source → Emits versioned JSONL IR                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                       │
+                                      ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            zlnt (Analyzer)                                  │
+│          Static analysis on JSONL IR (recommended safety gate)               │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                      │
               ┌───────────────────────┼───────────────────────┐
               │                       │                       │
               ▼                       ▼                       ▼
@@ -216,7 +222,7 @@ msg:      STR "Hello from zasm!"
 ```
 
 ```sh
-cat hello.asm | bin/zas | bin/zld > hello.wat
+cat hello.asm | bin/zas | bin/zlnt | bin/zld > hello.wat
 wat2wasm hello.wat -o hello.wasm
 bin/zrun hello.wat
 ```

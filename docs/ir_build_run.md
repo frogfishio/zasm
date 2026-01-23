@@ -7,8 +7,13 @@
 
 ## Assemble and link (IR → WAT)
 1) Assemble IR JSONL: `bin/zas examples/hello.asm > /tmp/hello.jsonl`
-2) Lint schema (optional but recommended): `bin/zld --conform /tmp/hello.jsonl`
-3) Emit WAT: `bin/zld /tmp/hello.jsonl > /tmp/hello.wat`
+2) Static analysis (recommended): `bin/zlnt --tool /tmp/hello.jsonl`
+3) Lint schema (optional but recommended): `bin/zld --conform /tmp/hello.jsonl`
+4) Emit WAT: `bin/zld /tmp/hello.jsonl > /tmp/hello.wat`
+
+Stream form (useful for quick iteration):
+
+`cat examples/hello.asm | bin/zas | bin/zlnt | bin/zld > /tmp/hello.wat`
 
 ## Opcode container path (IR → opcodes → container)
 1) IR → opcode JSONL: `bin/zir /tmp/hello.jsonl > /tmp/hello.op.jsonl`
@@ -34,6 +39,7 @@ Common flags:
 - `--break-pc N` breaks when `pc == N` (where `pc` is the IR record index).
 - `--break-label L` breaks at label `L`.
 - `--debug-script PATH` runs debugger commands from a file/stdin (no prompt; exit on EOF).
+- `--shake` runs the program multiple times with deterministic perturbations (useful for surfacing uninitialized reads / layout sensitivity).
 
 Machine-readable debugger stops:
 

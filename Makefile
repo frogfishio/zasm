@@ -143,7 +143,7 @@ install: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
 	@install -m 0755 $(BIN)/lower $(DESTDIR)$(BINDIR)/lower
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -231,12 +231,15 @@ test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fiz
 test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
 test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
+test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
+test-validation: test-zem-zi-hop-alloc
+test-validation: test-zem-zi-enum-alloc
 test-validation: test-zem-zi-proc-env
 test-validation: test-zem-inherit-env
 test-validation: test-zem-caps
@@ -248,6 +251,7 @@ test-validation: test-zem-rep-scan
 test-validation: test-zem-rep-render-from-report
 test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
+test-validation: test-zem-shake-smoke
 
 # Experimental / local-only debloat playground (large fixture).
 # Not included in test-all/test-validation.
@@ -273,6 +277,15 @@ test-zem-zi-read: zas zem
 
 test-zem-zi-abi-version: zas zem
 	sh test/zem_zi_abi_version.sh
+
+test-zem-zi-hop-alloc: zas zem
+	sh test/zem_zi_hop_alloc.sh
+
+test-zem-zi-enum-alloc: zas zem
+	sh test/zem_zi_enum_alloc.sh
+
+test-zem-shake-smoke: zas zem
+	sh test/zem_shake_smoke.sh
 
 test-zem-zi-proc-env: zas zem
 	sh test/zem_zi_proc_env.sh
@@ -505,6 +518,9 @@ test-zlnt: zas zlnt
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zlnt
 	cat examples/upper.asm | $(BIN)/zas | $(BIN)/zlnt
 
+test-zlnt-enum-oob: zas zlnt
+	sh test/zlnt_enum_oob.sh
+
 test-opcode-golden:
 	test/opcode_golden.sh
 
@@ -663,7 +679,17 @@ ZEM_HOST_LIBCAP_EXEC := $(ZEM_HOST_BUILD)/libzingcap_exec.a
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
 	$(ZEM_BUILD)/zem_debug.o \
-	$(ZEM_BUILD)/zem_exec.o \
+	$(ZEM_BUILD)/exec/zem_exec_program.o \
+	$(ZEM_BUILD)/exec/zem_exec_helpers_base.o \
+	$(ZEM_BUILD)/exec/zem_exec_helpers_diag.o \
+	$(ZEM_BUILD)/exec/zem_exec_helpers_fail.o \
+	$(ZEM_BUILD)/exec/zem_exec_ops_ld.o \
+	$(ZEM_BUILD)/exec/zem_exec_ops_alu.o \
+	$(ZEM_BUILD)/exec/zem_exec_ops_cmp.o \
+	$(ZEM_BUILD)/exec/zem_exec_ops_mem.o \
+	$(ZEM_BUILD)/exec/zem_exec_ops_jr.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_00.o \
+	$(ZEM_BUILD)/exec/zem_exec_call_01.o \
 	$(ZEM_BUILD)/zem_rep.o \
 	$(ZEM_BUILD)/zem_strip.o \
 	$(ZEM_BUILD)/zem_hash.o \
@@ -678,6 +704,9 @@ ZEM_OBJ := \
 
 $(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@
+
+$(ZEM_BUILD)/exec/%.o: src/zem/exec/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -Isrc/zem/exec -c $< -o $@
 
 $(ZEM_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@

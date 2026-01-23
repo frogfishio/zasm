@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "version.h"
@@ -93,6 +94,8 @@ static void print_help(FILE *out) {
       "      [--source-name NAME]\n",
       "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
       "      [--sniff] [--sniff-fatal]\n",
+      "      [--shake [--shake-iters N] [--shake-seed S] [--shake-start N]\n",
+      "              [--shake-heap-pad N] [--shake-heap-pad-max N] [--shake-poison-heap]]\n",
       "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n",
       "\n",
       "Info:\n",
@@ -127,6 +130,7 @@ static void print_help(FILE *out) {
       "               CALL zi_abi_features  (DE:HL = feature bits)\n",
       "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n",
       "               CALL zi_free          (HL=ptr, HL=rc)\n",
+      "               CALL zi_enum_alloc    (HL=key_lo, DE=key_hi, BC=slot_size, DE:HL=ptr_or_0)\n",
       "               CALL zi_read          (HL=h, DE=dst_ptr64, BC=cap, HL=n_or_err)\n",
       "               CALL zi_write         (HL=h, DE=src_ptr64, BC=len, HL=n_or_err)\n",
       "               CALL zi_end           (HL=h, HL=rc)\n",
@@ -136,6 +140,13 @@ static void print_help(FILE *out) {
       "               CALL zi_argv_copy     (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n",
       "               CALL zi_env_get_len   (HL=key_ptr64, DE=key_len, HL=len_or_err)\n",
       "               CALL zi_env_get_copy  (HL=key_ptr64, DE=key_len, BC=out_ptr64, IX=cap, HL=written_or_err)\n",
+      "               CALL zi_hop_alloc     (HL=scope, DE=size, BC=align, DE:HL=ptr_or_0)\n",
+      "               CALL zi_hop_alloc_buf (HL=scope, DE=cap, DE:HL=buf_or_0)\n",
+      "               CALL zi_hop_mark      (HL=scope, HL=mark)\n",
+      "               CALL zi_hop_release   (HL=scope, DE=mark, BC=wipe, HL=rc)\n",
+      "               CALL zi_hop_reset     (HL=scope, DE=wipe, HL=rc)\n",
+      "               CALL zi_hop_used      (HL=scope, HL=used)\n",
+      "               CALL zi_hop_cap       (HL=scope, HL=cap)\n",
       "\n",
       "  - Legacy primitives (supported for older IR):\n",
       "               CALL _out (HL=ptr, DE=len)\n",
@@ -160,6 +171,13 @@ static void print_help(FILE *out) {
       "  --trace-mem         Emit memory read/write JSONL events to stderr\n",
       "  --sniff             Proactively warn about suspicious runtime patterns\n",
       "  --sniff-fatal       Like --sniff but stop execution on detection\n",
+      "  --shake             Run the program multiple times with deterministic perturbations\n",
+      "  --shake-iters N      Number of runs (default: 100)\n",
+      "  --shake-seed S       Seed for shake RNG (default: derived from time/pid)\n",
+      "  --shake-start N      Starting run index (default: 0)\n",
+      "  --shake-heap-pad N   Fixed heap-base padding per run (bytes; useful for replay)\n",
+      "  --shake-heap-pad-max N  Random heap-base padding per run: [0..N] bytes\n",
+      "  --shake-poison-heap  Poison newly-allocated heap bytes (surfaces uninit reads)\n",
       "  --break-pc N        Break when pc (record index) == N\n",
       "  --break-label L     Break at label L (first instruction after label record)\n",
       "  --debug             Interactive CLI debugger (break/step/regs/bt)\n",
@@ -176,6 +194,14 @@ static void print_help(FILE *out) {
   for (size_t i = 0; i < (sizeof(help) / sizeof(help[0])); i++) {
     fputs(help[i], out);
   }
+}
+
+static uint64_t splitmix64_step(uint64_t *state) {
+  // Deterministic, fast pseudo-random generator (not cryptographic).
+  uint64_t z = (*state += 0x9e3779b97f4a7c15ull);
+  z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
+  z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
+  return z ^ (z >> 31);
 }
 
 static int proc_env_put(zem_proc_t *p, const char *key, uint32_t key_len,
@@ -237,6 +263,16 @@ int main(int argc, char **argv) {
   const char *break_labels[256];
   size_t nbreak_labels = 0;
   int program_uses_stdin = 0;
+
+  int shake = 0;
+  uint32_t shake_iters = 100;
+  uint32_t shake_start = 0;
+  uint32_t shake_heap_pad = 0;
+  int shake_heap_pad_set = 0;
+  uint32_t shake_heap_pad_max = 0;
+  int shake_poison_heap = 0;
+  int shake_seed_set = 0;
+  uint64_t shake_seed = 0;
 
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--") == 0) {
@@ -494,6 +530,73 @@ int main(int argc, char **argv) {
       dbg.sniff_fatal = 1;
       continue;
     }
+    if (strcmp(argv[i], "--shake") == 0) {
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-iters") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-iters requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-iters value");
+      if (v == 0) return zem_failf("--shake-iters must be >= 1");
+      shake_iters = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-seed") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-seed requires a value");
+      }
+      char *end = NULL;
+      unsigned long long v = strtoull(argv[++i], &end, 0);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-seed value");
+      shake_seed = (uint64_t)v;
+      shake_seed_set = 1;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-start") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-start requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-start value");
+      shake_start = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-heap-pad") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-heap-pad requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-heap-pad value");
+      shake_heap_pad = (uint32_t)v;
+      shake_heap_pad_set = 1;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-heap-pad-max") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-heap-pad-max requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-heap-pad-max value");
+      shake_heap_pad_max = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-poison-heap") == 0) {
+      shake_poison_heap = 1;
+      shake = 1;
+      continue;
+    }
     if (strcmp(argv[i], "--debug") == 0) {
       dbg.enabled = 1;
       dbg.start_paused = 1;
@@ -616,6 +719,20 @@ int main(int argc, char **argv) {
     return zem_failf("--rep-scan cannot be combined with --strip");
   }
 
+  if (shake) {
+    if (dbg.enabled || dbg.debug_events || dbg.debug_events_only) {
+      return zem_failf("--shake cannot be combined with --debug/--debug-events");
+    }
+    if (dbg.coverage_out || dbg.coverage_merge) {
+      return zem_failf("--shake cannot be combined with --coverage-out/--coverage-merge");
+    }
+    if (!shake_seed_set) {
+      // Best-effort default; printed on failure for replay.
+      shake_seed = ((uint64_t)(uint32_t)time(NULL) << 32) ^ (uint64_t)(uint32_t)getpid();
+      shake_seed_set = 1;
+    }
+  }
+
   if (strip_mode) {
     if (!strip_profile) {
       return zem_failf("--strip requires --strip-profile");
@@ -703,8 +820,66 @@ int main(int argc, char **argv) {
     }
   }
 
-  rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs, &proc,
-                        stdin_source_name);
+  if (!shake) {
+    rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs, &proc,
+                          stdin_source_name);
+  } else {
+    // Shake harness: run repeatedly with deterministic perturbations.
+    rc = 0;
+    uint64_t base_state = shake_seed;
+    for (uint32_t run = shake_start;
+         run < shake_start + shake_iters && rc == 0; run++) {
+      zem_buf_t run_mem;
+      run_mem.bytes = NULL;
+      run_mem.len = 0;
+      if (mem.len) {
+        run_mem.bytes = (uint8_t *)malloc(mem.len);
+        if (!run_mem.bytes) {
+          rc = zem_failf("OOM preparing shake run memory");
+          break;
+        }
+        memcpy(run_mem.bytes, mem.bytes, mem.len);
+        run_mem.len = mem.len;
+      }
+
+      zem_dbg_cfg_t run_dbg = dbg;
+      run_dbg.shake = 1;
+      run_dbg.shake_run = run;
+      run_dbg.shake_seed = shake_seed;
+      run_dbg.shake_poison_heap = shake_poison_heap;
+
+      uint32_t pad = 0;
+      if (shake_heap_pad_set) {
+        pad = shake_heap_pad;
+      } else if (shake_heap_pad_max) {
+        uint64_t st = base_state ^ ((uint64_t)run * 0x9e3779b97f4a7c15ull);
+        uint64_t r = splitmix64_step(&st);
+        pad = (uint32_t)(r % ((uint64_t)shake_heap_pad_max + 1ull));
+      }
+      run_dbg.shake_heap_pad = pad;
+
+      int run_rc = zem_exec_program(&recs, &run_mem, &syms, &labels, &run_dbg,
+                                   pc_srcs, &proc, stdin_source_name);
+      zem_buf_free(&run_mem);
+      if (run_rc != 0) {
+        fprintf(stderr,
+                "zem: shake: failure run=%u seed=0x%016" PRIx64
+                " heap_pad=%u\n",
+                run, shake_seed, pad);
+        fprintf(stderr,
+                "zem: shake: replay: --shake --shake-iters 1 --shake-start %u "
+                "--shake-seed 0x%016" PRIx64 " --shake-heap-pad %u%s\n",
+                run, shake_seed, pad, shake_poison_heap ? " --shake-poison-heap" : "");
+        rc = run_rc;
+        break;
+      }
+    }
+    if (rc == 0 && !dbg.debug_events_only) {
+      fprintf(stderr,
+              "zem: shake: ok runs=%u seed=0x%016" PRIx64 "\n",
+              shake_iters, shake_seed);
+    }
+  }
 
   if (dbg_script && dbg_script != stdin) {
     fclose(dbg_script);
