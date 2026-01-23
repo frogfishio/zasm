@@ -85,6 +85,7 @@ static void print_help(FILE *out) {
           "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n"
           "      [--source-name NAME]\n"
           "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n"
+          "      [--sniff] [--sniff-fatal]\n"
           "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n"
           "\n"
           "Info:\n"
@@ -134,6 +135,8 @@ static void print_help(FILE *out) {
           "  --trace-call-target T Only emit step events for CALLs with target == T (repeatable)\n"
           "  --trace-sample N    Emit 1 out of every N step events (deterministic)\n"
           "  --trace-mem         Emit memory read/write JSONL events to stderr\n"
+          "  --sniff             Proactively warn about suspicious runtime patterns\n"
+          "  --sniff-fatal       Like --sniff but stop execution on detection\n"
           "  --break-pc N        Break when pc (record index) == N\n"
           "  --break-label L     Break at label L (first instruction after label record)\n"
           "  --debug             Interactive CLI debugger (break/step/regs/bt)\n"
@@ -324,6 +327,15 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[i], "--trace-mem") == 0) {
       dbg.trace_mem = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--sniff") == 0) {
+      dbg.sniff = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--sniff-fatal") == 0) {
+      dbg.sniff = 1;
+      dbg.sniff_fatal = 1;
       continue;
     }
     if (strcmp(argv[i], "--debug") == 0) {

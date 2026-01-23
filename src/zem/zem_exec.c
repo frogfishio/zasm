@@ -30,8 +30,20 @@ static int jump_to_label(const zem_symtab_t *labels, const char *label,
   return zem_jump_to_label(labels, label, pc);
 }
 
+static int g_fail_span_valid = 0;
+static uint32_t g_fail_span_addr = 0;
+static uint32_t g_fail_span_len = 0;
+static size_t g_fail_span_mem_len = 0;
+
 static int mem_check_span(const zem_buf_t *mem, uint32_t addr, uint32_t len) {
-  return zem_mem_check_span(mem, addr, len);
+  int ok = zem_mem_check_span(mem, addr, len);
+  if (!ok) {
+    g_fail_span_valid = 1;
+    g_fail_span_addr = addr;
+    g_fail_span_len = len;
+    g_fail_span_mem_len = mem ? mem->len : 0;
+  }
+  return ok;
 }
 
 // zABI conventions in wasm32:
@@ -377,6 +389,281 @@ static void zem_diag_print_record(FILE *out, const record_t *r) {
   fputs("(unknown)\n", out);
 }
 
+#define ZEM_DIAG_HIST_CAP 64
+typedef struct {
+  size_t pc;
+  const record_t *r;
+  const char *label;
+} zem_diag_hist_entry_t;
+
+typedef struct {
+  zem_diag_hist_entry_t v[ZEM_DIAG_HIST_CAP];
+  size_t head;
+  size_t count;
+  int enabled;
+} zem_diag_hist_t;
+
+static zem_diag_hist_t g_diag_hist;
+
+static void zem_diag_hist_reset(int enabled) {
+  memset(&g_diag_hist, 0, sizeof(g_diag_hist));
+  g_diag_hist.enabled = enabled;
+}
+
+static void zem_diag_hist_push(size_t pc, const record_t *r, const char *label) {
+  if (!g_diag_hist.enabled) return;
+  g_diag_hist.v[g_diag_hist.head].pc = pc;
+  g_diag_hist.v[g_diag_hist.head].r = r;
+  g_diag_hist.v[g_diag_hist.head].label = label;
+  g_diag_hist.head = (g_diag_hist.head + 1) % ZEM_DIAG_HIST_CAP;
+  if (g_diag_hist.count < ZEM_DIAG_HIST_CAP) {
+    g_diag_hist.count++;
+  }
+}
+
+static void zem_diag_print_recent(FILE *out, size_t max_items) {
+  if (!out || !g_diag_hist.enabled || g_diag_hist.count == 0) return;
+  size_t n = g_diag_hist.count;
+  if (max_items > 0 && n > max_items) n = max_items;
+
+  fputs("recent instructions (most recent last):\n", out);
+  size_t idx = (g_diag_hist.head + ZEM_DIAG_HIST_CAP - n) % ZEM_DIAG_HIST_CAP;
+  for (size_t i = 0; i < n; i++) {
+    const zem_diag_hist_entry_t *e = &g_diag_hist.v[idx];
+    fprintf(out, "  pc=%zu", e->pc);
+    if (e->label) fprintf(out, " label=%s", e->label);
+    if (e->r && e->r->line >= 0) fprintf(out, " line=%d", e->r->line);
+    fputc('\n', out);
+    if (e->r) {
+      fputs("    ", out);
+      zem_diag_print_record(out, e->r);
+    }
+    idx = (idx + 1) % ZEM_DIAG_HIST_CAP;
+  }
+}
+
+static int zem_diag_operand_is_ret_slot_mem(const operand_t *o) {
+  if (!o) return 0;
+  if (o->t != JOP_MEM) return 0;
+  if (o->base_is_reg) return 0;
+  if (!o->s) return 0;
+  return strncmp(o->s, "global___ret_", 13) == 0;
+}
+
+static int zem_diag_regid_from_sym(const char *s, zem_regid_t *out) {
+  if (!s || !out) return 0;
+  if (strcmp(s, "HL") == 0) {
+    *out = ZEM_REG_HL;
+    return 1;
+  }
+  if (strcmp(s, "DE") == 0) {
+    *out = ZEM_REG_DE;
+    return 1;
+  }
+  if (strcmp(s, "BC") == 0) {
+    *out = ZEM_REG_BC;
+    return 1;
+  }
+  if (strcmp(s, "IX") == 0) {
+    *out = ZEM_REG_IX;
+    return 1;
+  }
+  if (strcmp(s, "A") == 0) {
+    *out = ZEM_REG_A;
+    return 1;
+  }
+  return 0;
+}
+
+static uint64_t zem_diag_reg_value(const zem_regs_t *regs, const char *s) {
+  if (!regs || !s) return 0;
+  if (strcmp(s, "HL") == 0) return regs->HL;
+  if (strcmp(s, "DE") == 0) return regs->DE;
+  if (strcmp(s, "BC") == 0) return regs->BC;
+  if (strcmp(s, "IX") == 0) return regs->IX;
+  if (strcmp(s, "A") == 0) return regs->A;
+  return 0;
+}
+
+static void zem_diag_print_regprov(FILE *out, const zem_regprov_t *regprov,
+                                  const char *reg_name) {
+  if (!out || !regprov || !reg_name) return;
+  zem_regid_t id;
+  if (!zem_diag_regid_from_sym(reg_name, &id)) return;
+  const zem_regprov_entry_t *e = &regprov->v[id];
+  if (!e->has) return;
+  fprintf(out, "provenance: %s last written at pc=%" PRIu32, reg_name, e->pc);
+  if (e->label) fprintf(out, " label=%s", e->label);
+  if (e->line >= 0) fprintf(out, " line=%d", e->line);
+  if (e->mnemonic) fprintf(out, " via %s", e->mnemonic);
+  fputc('\n', out);
+}
+
+static int zem_diag_record_writes_reg(const record_t *r, const char *reg) {
+  if (!r || r->k != JREC_INSTR || !reg) return 0;
+  if (!r->m || r->nops == 0) return 0;
+  if (r->ops[0].t != JOP_SYM || !r->ops[0].s) return 0;
+  return strcmp(r->ops[0].s, reg) == 0;
+}
+
+static const zem_diag_hist_entry_t *zem_diag_hist_find_last_writer_before(
+    const char *reg, size_t pc_lt) {
+  if (!g_diag_hist.enabled || g_diag_hist.count == 0 || !reg) return NULL;
+  size_t idx = (g_diag_hist.head + ZEM_DIAG_HIST_CAP - 1) % ZEM_DIAG_HIST_CAP;
+  for (size_t i = 0; i < g_diag_hist.count; i++) {
+    const zem_diag_hist_entry_t *e = &g_diag_hist.v[idx];
+    if (e->r && e->pc < pc_lt && zem_diag_record_writes_reg(e->r, reg)) {
+      return e;
+    }
+    idx = (idx + ZEM_DIAG_HIST_CAP - 1) % ZEM_DIAG_HIST_CAP;
+  }
+  return NULL;
+}
+
+static void zem_diag_print_reg_chain(FILE *out, const char *reg,
+                                    size_t max_steps) {
+  if (!out || !reg || !g_diag_hist.enabled || g_diag_hist.count == 0) return;
+  if (max_steps == 0) return;
+
+  fputs("explain:\n", out);
+  size_t pc_lt = (size_t)-1;
+  for (size_t step = 0; step < max_steps; step++) {
+    const zem_diag_hist_entry_t *e = zem_diag_hist_find_last_writer_before(reg, pc_lt);
+    if (!e || !e->r) {
+      fprintf(out, "  %s: no earlier writer in recent history\n", reg);
+      return;
+    }
+
+    const record_t *r = e->r;
+    fprintf(out, "  %s set by %s at pc=%zu", reg, r->m ? r->m : "(null)", e->pc);
+    if (e->label) fprintf(out, " label=%s", e->label);
+    if (r->line >= 0) fprintf(out, " line=%d", r->line);
+    fputc('\n', out);
+
+    // Recognize the common truncation/sign-extension chain and keep walking.
+    if (r->m && (strcmp(r->m, "SLA64") == 0 || strcmp(r->m, "SRA64") == 0) &&
+        r->nops == 2 && r->ops[1].t == JOP_NUM) {
+      // Unary op: reg depends on prior value of itself.
+      pc_lt = e->pc;
+      continue;
+    }
+    if (r->m && strcmp(r->m, "LD32") == 0 && r->nops == 2 &&
+        r->ops[1].t == JOP_MEM && !r->ops[1].base_is_reg && r->ops[1].s) {
+      fprintf(out, "  source: memory symbol %s\n", r->ops[1].s);
+      return;
+    }
+
+    // Unknown dependency structure; stop after the last-writer.
+    return;
+  }
+}
+
+static int zem_diag_record_is_shift64_by_32(const record_t *r, const char *m,
+                                           const char *reg) {
+  if (!r || r->k != JREC_INSTR || !r->m || !m || !reg) return 0;
+  if (strcmp(r->m, m) != 0) return 0;
+  if (r->nops != 2) return 0;
+  if (r->ops[0].t != JOP_SYM || !r->ops[0].s) return 0;
+  if (strcmp(r->ops[0].s, reg) != 0) return 0;
+  return (r->ops[1].t == JOP_NUM && r->ops[1].n == 32);
+}
+
+static int zem_diag_record_is_ld32_from_ret_slot(const record_t *r,
+                                                const char **out_reg,
+                                                const char **out_slot) {
+  if (!r || r->k != JREC_INSTR || !r->m) return 0;
+  if (strcmp(r->m, "LD32") != 0) return 0;
+  if (r->nops != 2) return 0;
+  if (r->ops[0].t != JOP_SYM || !r->ops[0].s) return 0;
+  if (!zem_diag_operand_is_ret_slot_mem(&r->ops[1])) return 0;
+  if (out_reg) *out_reg = r->ops[0].s;
+  if (out_slot) *out_slot = r->ops[1].s;
+  return 1;
+}
+
+static int zem_diag_record_uses_reg_as_mem_base(const record_t *r,
+                                               const char *reg) {
+  if (!r || r->k != JREC_INSTR || !reg) return 0;
+  for (size_t i = 0; i < r->nops; i++) {
+    const operand_t *o = &r->ops[i];
+    if (o->t != JOP_MEM) continue;
+    if (!o->base_is_reg) continue;
+    if (!o->s) continue;
+    if (strcmp(o->s, reg) == 0) return 1;
+  }
+  return 0;
+}
+
+static void zem_diag_print_mem_base_regs(FILE *out, const record_t *r,
+                                        const zem_regs_t *regs,
+                                        const zem_regprov_t *regprov) {
+  if (!out || !r || r->k != JREC_INSTR || !regs || !regprov) return;
+  int seen[ZEM_REG__COUNT];
+  for (int i = 0; i < ZEM_REG__COUNT; i++) seen[i] = 0;
+
+  for (size_t i = 0; i < r->nops; i++) {
+    const operand_t *o = &r->ops[i];
+    if (o->t != JOP_MEM) continue;
+    if (!o->base_is_reg) continue;
+    if (!o->s) continue;
+
+    zem_regid_t id;
+    if (zem_diag_regid_from_sym(o->s, &id)) {
+      if (seen[id]) continue;
+      seen[id] = 1;
+    }
+
+    uint64_t *rp = NULL;
+    if (zem_reg_ref((zem_regs_t *)regs, o->s, &rp) && rp) {
+      fprintf(out, "mem-base: %s=0x%016" PRIx64 "\n", o->s, *rp);
+    } else {
+      fprintf(out, "mem-base: %s\n", o->s);
+    }
+    zem_diag_print_regprov(out, regprov, o->s);
+  }
+}
+
+static int zem_diag_hist_find_ret_truncation_event(
+    size_t *out_ld_pc, size_t *out_sra_pc, const char **out_reg,
+    const char **out_slot) {
+  // Heuristic: LD32 r,(global___ret_*) followed by SLA64 r,32 then SRA64 r,32.
+  if (!g_diag_hist.enabled || g_diag_hist.count < 3) return 0;
+
+  const char *tracked_reg = NULL;
+  const char *tracked_slot = NULL;
+  size_t tracked_ld_pc = 0;
+  int saw_sla = 0;
+
+  size_t idx = (g_diag_hist.head + ZEM_DIAG_HIST_CAP - g_diag_hist.count) %
+               ZEM_DIAG_HIST_CAP;
+  for (size_t i = 0; i < g_diag_hist.count; i++) {
+    const zem_diag_hist_entry_t *e = &g_diag_hist.v[idx];
+    const record_t *r = e->r;
+
+    const char *reg = NULL;
+    const char *slot = NULL;
+    if (!tracked_reg && zem_diag_record_is_ld32_from_ret_slot(r, &reg, &slot)) {
+      tracked_reg = reg;
+      tracked_slot = slot;
+      tracked_ld_pc = e->pc;
+      saw_sla = 0;
+    } else if (tracked_reg && !saw_sla &&
+               zem_diag_record_is_shift64_by_32(r, "SLA64", tracked_reg)) {
+      saw_sla = 1;
+    } else if (tracked_reg && saw_sla &&
+               zem_diag_record_is_shift64_by_32(r, "SRA64", tracked_reg)) {
+      if (out_ld_pc) *out_ld_pc = tracked_ld_pc;
+      if (out_sra_pc) *out_sra_pc = e->pc;
+      if (out_reg) *out_reg = tracked_reg;
+      if (out_slot) *out_slot = tracked_slot;
+      return 1;
+    }
+
+    idx = (idx + 1) % ZEM_DIAG_HIST_CAP;
+  }
+  return 0;
+}
+
 static void zem_diag_try_print_bytes_obj(FILE *out, const zem_buf_t *mem,
                                         const char *name, uint64_t reg_u64) {
   if (!out || !mem || !name) return;
@@ -429,6 +716,10 @@ static int zem_exec_fail_simple(const char *fmt, ...) {
   return 2;
 }
 
+// Threading reg provenance into every failure site is noisy; keep a pointer to
+// the current run's provenance map for richer trap diagnostics.
+static const zem_regprov_t *g_fail_regprov = NULL;
+
 static int zem_exec_fail_at(size_t pc, const record_t *r,
                             const char *const *pc_labels,
                             const uint32_t *stack, size_t sp,
@@ -452,9 +743,27 @@ static int zem_exec_fail_at(size_t pc, const record_t *r,
   } else {
     fprintf(stderr, "pc=%zu\n", pc);
   }
+  if (g_fail_span_valid) {
+    uint64_t end = (uint64_t)g_fail_span_addr + (uint64_t)g_fail_span_len;
+    fprintf(stderr,
+            "mem-span: [0x%08" PRIx32 ", 0x%08" PRIx64 ") len=%" PRIu32
+            " mem_len=%zu\n",
+            g_fail_span_addr, end, g_fail_span_len, g_fail_span_mem_len);
+  }
   if (r) {
     zem_diag_print_record(stderr, r);
   }
+  if (r && regs && g_fail_regprov) {
+    zem_diag_print_mem_base_regs(stderr, r, regs, g_fail_regprov);
+    // When a base reg is involved in the fault, try to explain where it came
+    // from using the recent-instruction history.
+    for (size_t i = 0; i < r->nops; i++) {
+      const operand_t *o = &r->ops[i];
+      if (o->t != JOP_MEM || !o->base_is_reg || !o->s) continue;
+      zem_diag_print_reg_chain(stderr, o->s, 4);
+    }
+  }
+  zem_diag_print_recent(stderr, 20);
   if (regs && mem) {
     zem_diag_try_print_bytes_obj(stderr, mem, "HL", regs->HL);
     zem_diag_try_print_bytes_obj(stderr, mem, "DE", regs->DE);
@@ -680,10 +989,27 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   memset(&watches, 0, sizeof(watches));
   zem_regprov_t regprov;
   zem_regprov_clear(&regprov);
+  g_fail_regprov = &regprov;
   const char *cur_label = NULL;
+
+  // Keep a lightweight "recent instruction" buffer for post-mortem diagnostics.
+  zem_diag_hist_reset(1);
+
+  const int sniff_enabled = (dbg_cfg && dbg_cfg->sniff);
+  const int sniff_fatal = (dbg_cfg && dbg_cfg->sniff_fatal);
+  zem_u32set_t sniff_warned;
+  memset(&sniff_warned, 0, sizeof(sniff_warned));
+  const char *sniff_suspect_reg = NULL;
+  const char *sniff_suspect_slot = NULL;
+  size_t sniff_suspect_ld_pc = 0;
+  size_t sniff_suspect_since_pc = 0;
+  int sniff_suspect_active = 0;
   while (pc < recs->n) {
     const record_t *r = &recs->v[pc];
     const zem_op_t op = ops[pc];
+
+    // Clear any prior span failure so only the current fault reports it.
+    g_fail_span_valid = 0;
 
     int stop_bp_hit = 0;
     uint32_t stop_bp_pc = 0;
@@ -693,6 +1019,68 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
     if (pc_labels && pc < recs->n && pc_labels[pc]) {
       cur_label = pc_labels[pc];
+    }
+
+    if (r->k == JREC_INSTR) {
+      zem_diag_hist_push(pc, r, cur_label);
+
+      if (sniff_enabled) {
+        // 1) Detect the classic "return-slot loaded as 32-bit then sign-extended" pattern.
+        size_t ld_pc = 0;
+        size_t sra_pc = 0;
+        const char *reg = NULL;
+        const char *slot = NULL;
+        if (zem_diag_hist_find_ret_truncation_event(&ld_pc, &sra_pc, &reg, &slot)) {
+          if (!zem_u32set_contains(&sniff_warned, (uint32_t)ld_pc)) {
+            (void)zem_u32set_add_unique(&sniff_warned, (uint32_t)ld_pc);
+            const uint64_t regv = zem_diag_reg_value(&regs, reg);
+            fprintf(stderr,
+                    "zem: sniff: possible pointer truncation (width mismatch)\n"
+                    "  pattern: LD32 %s,(%s) at pc=%zu; sign-extended at pc=%zu\n"
+                    "  state:   %s=0x%016" PRIx64 "\n"
+                    "  note:    this often means the compiler inferred i32 for a pointer-like value (e.g. return slot / EXPR_HANDLE)\n",
+                    reg ? reg : "?", slot ? slot : "?", ld_pc, sra_pc,
+                    reg ? reg : "?", regv);
+            zem_diag_print_regprov(stderr, &regprov, reg);
+            if (sniff_fatal) {
+              rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                    "sniff: possible pointer truncation (LD32 from %s + sign-extension)",
+                                    slot ? slot : "global___ret_*?");
+              goto done;
+            }
+          }
+          sniff_suspect_active = 1;
+          sniff_suspect_reg = reg;
+          sniff_suspect_slot = slot;
+          sniff_suspect_ld_pc = ld_pc;
+          sniff_suspect_since_pc = pc;
+        }
+
+        // 2) If the suspicious register is later used as a memory base, that's the
+        //    typical "bomb" moment (tag/payload loads, etc). Warn with context.
+        if (sniff_suspect_active && sniff_suspect_reg &&
+            zem_diag_record_uses_reg_as_mem_base(r, sniff_suspect_reg)) {
+          const uint64_t regv = zem_diag_reg_value(&regs, sniff_suspect_reg);
+          fprintf(stderr,
+                  "zem: sniff: suspicious dereference\n"
+                  "  use:     %s used as mem base at pc=%zu (value=0x%016" PRIx64 ")\n"
+                  "  origin:  came from LD32 (%s) at pc=%zu\n",
+                  sniff_suspect_reg, pc, regv,
+                  sniff_suspect_slot ? sniff_suspect_slot : "global___ret_*?",
+                  sniff_suspect_ld_pc);
+          zem_diag_print_regprov(stderr, &regprov, sniff_suspect_reg);
+          if (sniff_fatal) {
+            rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, &regs, mem,
+                                  "sniff: suspicious dereference of sign-extended 32-bit value (%s)",
+                                  sniff_suspect_reg);
+            goto done;
+          }
+          sniff_suspect_active = 0;
+        }
+        if (sniff_suspect_active && (pc - sniff_suspect_since_pc) > 64) {
+          sniff_suspect_active = 0;
+        }
+      }
     }
 
     if (trace_enabled && trace_pending) {
@@ -2735,6 +3123,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   }
 
 done:
+  g_fail_regprov = NULL;
   zem_bpcondset_clear(&bpconds);
   if (ops) free(ops);
   if (pc_labels) free(pc_labels);

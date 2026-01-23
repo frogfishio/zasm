@@ -237,7 +237,10 @@ test-validation: test-zem-stdin-program
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
+test-validation: test-zem-zi-proc-env
+test-validation: test-zem-inherit-env
 test-validation: test-zem-caps
+test-validation: test-zem-sniff-ret-trunc
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -258,6 +261,15 @@ test-zem-zi-read: zas zem
 
 test-zem-zi-abi-version: zas zem
 	sh test/zem_zi_abi_version.sh
+
+test-zem-zi-proc-env: zas zem
+	sh test/zem_zi_proc_env.sh
+
+test-zem-inherit-env: zas zem
+	sh test/zem_inherit_env.sh
+
+test-zem-sniff-ret-trunc: zas zem
+	sh test/zem_sniff_ret_trunc.sh
 
 test-zem-caps: zem
 	sh test/zem_caps.sh

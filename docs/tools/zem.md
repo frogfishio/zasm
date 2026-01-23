@@ -111,6 +111,24 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 - `--debug-events` emits JSONL `dbg_stop` events to stderr on each debugger stop.
 - `--debug-events-only` like `--debug-events`, but suppresses human-oriented debugger output (prompt/help/regs/disasm/etc) and suppresses zem lifecycle telemetry.
 
+### Diagnostics (trap reports)
+
+When `zem` fails (e.g. out-of-bounds memory access), it prints a human-oriented trap report to stderr including:
+
+- the failing IR record (`pc`, label/line if present)
+- register dump + backtrace
+- a short “recent instruction” history
+- for instructions that dereference memory, the base register value and its provenance (where that register was last written)
+
+This is intended to make “trap, identify, explain” workflows fast when debugging compiler lowering bugs.
+
+### Sniffer mode (proactive warnings)
+
+- `--sniff` enables heuristic warnings for high-signal bug signatures (currently: return-slot pointer truncation patterns).
+- `--sniff-fatal` like `--sniff`, but turns a warning into a failing trap.
+
+The warning includes the detected pattern PCs, the suspect register’s current value, and its provenance.
+
 ## Debugger REPL quickstart
 
 Run, then interact:

@@ -48,6 +48,9 @@ typedef struct {
   int trace;
   int trace_mem;
   int start_paused;
+  // Proactive diagnostics (opt-in): emit warnings for suspicious patterns.
+  int sniff;
+  int sniff_fatal;
   FILE *repl_in;
   int repl_no_prompt;
   int debug_events;
