@@ -106,6 +106,7 @@ static void print_help(FILE *out) {
       "  --rep-n N          N-gram length (e.g. 8)\n",
       "  --rep-mode MODE    MODE: exact | shape\n",
       "  --rep-out PATH     Write repetition report JSONL to PATH (or '-' for stdout)\n",
+      "  --rep-max-report N Emit up to N zem_rep_ngram records (top repeated n-grams)\n",
       "  --rep-coverage-jsonl PATH Optional coverage JSONL to enrich bloat score\n",
       "  --rep-diag         Print one-line bloat_diag summary to stdout\n",
       "  --                Stop option parsing; remaining args become guest argv\n",
@@ -224,6 +225,7 @@ int main(int argc, char **argv) {
   const char *rep_mode = "shape";
   const char *rep_out = NULL;
   const char *rep_cov = NULL;
+  int rep_max_report = 0;
 
   zem_proc_t proc;
   memset(&proc, 0, sizeof(proc));
@@ -319,6 +321,16 @@ int main(int argc, char **argv) {
         return zem_failf("--rep-out requires a path");
       }
       rep_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-max-report") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--rep-max-report requires a number");
+      }
+      char *end = NULL;
+      long v = strtol(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --rep-max-report value");
+      rep_max_report = (int)v;
       continue;
     }
     if (strcmp(argv[i], "--rep-coverage-jsonl") == 0) {
@@ -621,7 +633,7 @@ int main(int argc, char **argv) {
       return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
     }
     return zem_rep_scan_program(inputs, ninputs, rep_n, rep_mode, rep_cov, rep_out,
-                                rep_diag);
+                                rep_max_report, rep_diag);
   }
 
   if (!dbg.debug_events_only) {

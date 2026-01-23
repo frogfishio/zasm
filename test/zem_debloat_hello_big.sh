@@ -52,12 +52,18 @@ fi
 bin/zem --coverage --coverage-blackholes 20 --coverage-out "$BASE_COV" "$PROG" >/dev/null
 
 # 3) Baseline repetition scan (shape mode) + machine-readable report + one-line diag.
-python3 tools/zem_repetition_scan.py "$PROG" \
-  --n 8 --mode shape --max-report 20 \
-  --coverage-jsonl "$BASE_COV" \
-  --report-jsonl "$BASE_REP" \
-  --report-html "$BASE_HTML" \
-  --diag
+# JSONL is produced by zem itself (single-binary metrics). HTML stays Python for now.
+bin/zem --rep-scan \
+  --rep-n 8 --rep-mode shape --rep-max-report 20 \
+  --rep-coverage-jsonl "$BASE_COV" \
+  --rep-out "$BASE_REP" \
+  --rep-diag \
+  "$PROG"
+
+python3 tools/zem_repetition_scan.py \
+  --from-report-jsonl "$BASE_REP" \
+  --max-report 20 \
+  --report-html "$BASE_HTML" >/dev/null
 
 # 4) Conservative strip (uncovered-ret) driven by baseline coverage.
 bin/zem --strip uncovered-ret \
@@ -77,12 +83,17 @@ fi
 
 # 6) Stripped coverage + repetition scan.
 bin/zem --coverage --coverage-blackholes 20 --coverage-out "$AFTER_COV" "$STRIPPED" >/dev/null
-python3 tools/zem_repetition_scan.py "$STRIPPED" \
-  --n 8 --mode shape --max-report 20 \
-  --coverage-jsonl "$AFTER_COV" \
-  --report-jsonl "$AFTER_REP" \
-  --report-html "$AFTER_HTML" \
-  --diag
+bin/zem --rep-scan \
+  --rep-n 8 --rep-mode shape --rep-max-report 20 \
+  --rep-coverage-jsonl "$AFTER_COV" \
+  --rep-out "$AFTER_REP" \
+  --rep-diag \
+  "$STRIPPED"
+
+python3 tools/zem_repetition_scan.py \
+  --from-report-jsonl "$AFTER_REP" \
+  --max-report 20 \
+  --report-html "$AFTER_HTML" >/dev/null
 
 # 7) Aggressive strip (uncovered-delete) driven by baseline coverage.
 bin/zem --strip uncovered-delete \
@@ -102,12 +113,17 @@ fi
 
 # 9) Aggressive coverage + repetition scan.
 bin/zem --coverage --coverage-blackholes 20 --coverage-out "$AGG_COV" "$AGG_STRIPPED" >/dev/null
-python3 tools/zem_repetition_scan.py "$AGG_STRIPPED" \
-  --n 8 --mode shape --max-report 20 \
-  --coverage-jsonl "$AGG_COV" \
-  --report-jsonl "$AGG_REP" \
-  --report-html "$AGG_HTML" \
-  --diag
+bin/zem --rep-scan \
+  --rep-n 8 --rep-mode shape --rep-max-report 20 \
+  --rep-coverage-jsonl "$AGG_COV" \
+  --rep-out "$AGG_REP" \
+  --rep-diag \
+  "$AGG_STRIPPED"
+
+python3 tools/zem_repetition_scan.py \
+  --from-report-jsonl "$AGG_REP" \
+  --max-report 20 \
+  --report-html "$AGG_HTML" >/dev/null
 
 rm -f "$OUT"
 

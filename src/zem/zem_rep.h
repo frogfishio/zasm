@@ -14,4 +14,5 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
                          const char *mode,
                          const char *coverage_jsonl_path,
                          const char *report_out_path,
+                         int max_report,
                          int diag);

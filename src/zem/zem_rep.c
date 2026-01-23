@@ -149,6 +149,7 @@ static uint64_t hash_instr_token(const record_t *r, const char *mode) {
 typedef struct {
   uint64_t key_hash;
   uint32_t key_off;   // offset in key_pool (in uint64_t units)
+  uint32_t mnem_off;  // offset in mnem_pool (in uint32_t units)
   uint32_t first_pc;  // 1-based record index, like the python tool
   uint32_t count;
   uint8_t used;
@@ -162,6 +163,14 @@ typedef struct {
   uint64_t *key_pool;
   size_t key_pool_cap;
   size_t key_pool_len;
+
+  uint32_t *mnem_pool;
+  size_t mnem_pool_cap;
+  size_t mnem_pool_len;
+
+  char **mnem_intern;
+  size_t mnem_intern_cap;
+  size_t mnem_intern_len;
 
   int n; // key length in uint64_t units
 } ngram_map_t;
@@ -201,6 +210,25 @@ static int ngram_map_init(ngram_map_t *m, int n, size_t initial_cap) {
     memset(m, 0, sizeof(*m));
     return 0;
   }
+
+  m->mnem_pool_cap = cap * (size_t)n;
+  m->mnem_pool = (uint32_t *)malloc(m->mnem_pool_cap * sizeof(uint32_t));
+  if (!m->mnem_pool) {
+    free(m->key_pool);
+    free(m->v);
+    memset(m, 0, sizeof(*m));
+    return 0;
+  }
+
+  m->mnem_intern_cap = 128;
+  m->mnem_intern = (char **)calloc(m->mnem_intern_cap, sizeof(char *));
+  if (!m->mnem_intern) {
+    free(m->mnem_pool);
+    free(m->key_pool);
+    free(m->v);
+    memset(m, 0, sizeof(*m));
+    return 0;
+  }
   return 1;
 }
 
@@ -208,6 +236,13 @@ static void ngram_map_free(ngram_map_t *m) {
   if (!m) return;
   free(m->v);
   free(m->key_pool);
+  free(m->mnem_pool);
+  if (m->mnem_intern) {
+    for (size_t i = 0; i < m->mnem_intern_len; i++) {
+      free(m->mnem_intern[i]);
+    }
+  }
+  free(m->mnem_intern);
   memset(m, 0, sizeof(*m));
 }
 
@@ -250,7 +285,40 @@ static int ngram_map_grow(ngram_map_t *m) {
     m->key_pool_cap = new_key_cap;
   }
 
+  if (m->mnem_pool_len + (size_t)m->n >= m->mnem_pool_cap) {
+    size_t need = m->mnem_pool_len + (size_t)m->n;
+    size_t new_mnem_cap = m->mnem_pool_cap;
+    while (new_mnem_cap < need) new_mnem_cap *= 2;
+    uint32_t *np = (uint32_t *)realloc(m->mnem_pool, new_mnem_cap * sizeof(uint32_t));
+    if (!np) return 0;
+    m->mnem_pool = np;
+    m->mnem_pool_cap = new_mnem_cap;
+  }
+
   return 1;
+}
+
+static uint32_t ngram_map_intern_mnem(ngram_map_t *m, const char *s) {
+  if (!m) return 0;
+  if (!s) s = "";
+  for (size_t i = 0; i < m->mnem_intern_len; i++) {
+    if (m->mnem_intern[i] && strcmp(m->mnem_intern[i], s) == 0) {
+      return (uint32_t)i;
+    }
+  }
+  if (m->mnem_intern_len == m->mnem_intern_cap) {
+    size_t new_cap = m->mnem_intern_cap ? (m->mnem_intern_cap * 2) : 128;
+    char **np = (char **)realloc(m->mnem_intern, new_cap * sizeof(char *));
+    if (!np) return 0;
+    memset(&np[m->mnem_intern_cap], 0,
+           (new_cap - m->mnem_intern_cap) * sizeof(char *));
+    m->mnem_intern = np;
+    m->mnem_intern_cap = new_cap;
+  }
+  char *dup = strdup(s);
+  if (!dup) return 0;
+  m->mnem_intern[m->mnem_intern_len] = dup;
+  return (uint32_t)m->mnem_intern_len++;
 }
 
 static int ngram_key_equal(const ngram_map_t *m, uint32_t key_off, const uint64_t *key) {
@@ -261,7 +329,8 @@ static int ngram_key_equal(const ngram_map_t *m, uint32_t key_off, const uint64_
   return 1;
 }
 
-static int ngram_map_inc(ngram_map_t *m, const uint64_t *key, uint32_t first_pc,
+static int ngram_map_inc(ngram_map_t *m, const uint64_t *key, const uint32_t *mnems,
+                         uint32_t first_pc,
                          uint32_t *io_max_count) {
   if (!m || !m->v || !key) return 0;
 
@@ -291,6 +360,26 @@ static int ngram_map_inc(ngram_map_t *m, const uint64_t *key, uint32_t first_pc,
       memcpy(&m->key_pool[m->key_pool_len], key, (size_t)m->n * sizeof(uint64_t));
       m->key_pool_len += (size_t)m->n;
 
+      // allocate mnems
+      if (mnems) {
+        if (m->mnem_pool_len + (size_t)m->n > m->mnem_pool_cap) {
+          size_t need = m->mnem_pool_len + (size_t)m->n;
+          size_t new_cap = m->mnem_pool_cap ? m->mnem_pool_cap : 1024;
+          while (new_cap < need) new_cap *= 2;
+          uint32_t *np = (uint32_t *)realloc(m->mnem_pool, new_cap * sizeof(uint32_t));
+          if (!np) return 0;
+          m->mnem_pool = np;
+          m->mnem_pool_cap = new_cap;
+        }
+        uint32_t moff = (uint32_t)m->mnem_pool_len;
+        memcpy(&m->mnem_pool[m->mnem_pool_len], mnems,
+               (size_t)m->n * sizeof(uint32_t));
+        m->mnem_pool_len += (size_t)m->n;
+        e->mnem_off = moff;
+      } else {
+        e->mnem_off = 0;
+      }
+
       e->used = 1;
       e->key_hash = kh;
       e->key_off = off;
@@ -317,7 +406,20 @@ typedef struct {
   uint64_t total_labels;
   uint64_t blackhole_labels;
   char module_hash[128];
+
+  // Top blackholes by uncovered_instr (descending). Only populated when requested.
+  struct cov_blackhole {
+    char *label;
+    uint64_t uncovered_instr;
+    uint64_t covered_instr;
+    uint64_t total_instr;
+    uint64_t first_pc;
+  } *top_blackholes;
+  size_t top_blackholes_n;
+  size_t top_blackholes_cap;
 } cov_summary_t;
+
+static void json_escape_and_print(FILE *out, const char *s);
 
 static int cov_parse_u64_field(const char *line, const char *key, uint64_t *out) {
   if (!line || !key || !out) return 0;
@@ -353,10 +455,89 @@ static void cov_parse_module_hash(const char *line, char *out, size_t out_cap) {
   out[n] = 0;
 }
 
-static int parse_coverage_jsonl(const char *path, cov_summary_t *out) {
+static char *cov_parse_string_field_dup(const char *line, const char *keypat) {
+  if (!line || !keypat) return NULL;
+  const char *p = strstr(line, keypat);
+  if (!p) return NULL;
+  p += strlen(keypat);
+  const char *endq = strchr(p, '"');
+  if (!endq) return NULL;
+  size_t n = (size_t)(endq - p);
+  char *s = (char *)malloc(n + 1);
+  if (!s) return NULL;
+  memcpy(s, p, n);
+  s[n] = 0;
+  return s;
+}
+
+static void cov_free(cov_summary_t *cov) {
+  if (!cov) return;
+  if (cov->top_blackholes) {
+    for (size_t i = 0; i < cov->top_blackholes_n; i++) {
+      free(cov->top_blackholes[i].label);
+    }
+  }
+  free(cov->top_blackholes);
+  cov->top_blackholes = NULL;
+  cov->top_blackholes_n = 0;
+  cov->top_blackholes_cap = 0;
+}
+
+static void cov_consider_blackhole(cov_summary_t *cov, const char *label,
+                                  uint64_t uncovered_instr, uint64_t covered_instr,
+                                  uint64_t total_instr, uint64_t first_pc) {
+  if (!cov || !cov->top_blackholes || cov->top_blackholes_cap == 0) return;
+  if (!label) label = "";
+
+  // If there's room, insert.
+  if (cov->top_blackholes_n < cov->top_blackholes_cap) {
+    size_t i = cov->top_blackholes_n++;
+    cov->top_blackholes[i].label = strdup(label);
+    if (!cov->top_blackholes[i].label) {
+      cov->top_blackholes_n--;
+      return;
+    }
+    cov->top_blackholes[i].uncovered_instr = uncovered_instr;
+    cov->top_blackholes[i].covered_instr = covered_instr;
+    cov->top_blackholes[i].total_instr = total_instr;
+    cov->top_blackholes[i].first_pc = first_pc;
+    return;
+  }
+
+  // Replace the smallest uncovered_instr if this one is bigger.
+  size_t min_i = 0;
+  uint64_t min_unc = cov->top_blackholes[0].uncovered_instr;
+  for (size_t i = 1; i < cov->top_blackholes_n; i++) {
+    if (cov->top_blackholes[i].uncovered_instr < min_unc) {
+      min_unc = cov->top_blackholes[i].uncovered_instr;
+      min_i = i;
+    }
+  }
+  if (uncovered_instr <= min_unc) return;
+
+  char *dup = strdup(label);
+  if (!dup) return;
+  free(cov->top_blackholes[min_i].label);
+  cov->top_blackholes[min_i].label = dup;
+  cov->top_blackholes[min_i].uncovered_instr = uncovered_instr;
+  cov->top_blackholes[min_i].covered_instr = covered_instr;
+  cov->top_blackholes[min_i].total_instr = total_instr;
+  cov->top_blackholes[min_i].first_pc = first_pc;
+}
+
+static int parse_coverage_jsonl(const char *path, cov_summary_t *out, int max_blackholes) {
   if (!path || !*path || !out) return 0;
   memset(out, 0, sizeof(*out));
   out->module_hash[0] = 0;
+
+  if (max_blackholes > 0) {
+    out->top_blackholes_cap = (size_t)max_blackholes;
+    out->top_blackholes = (struct cov_blackhole *)calloc(out->top_blackholes_cap,
+                                                        sizeof(*out->top_blackholes));
+    if (!out->top_blackholes) {
+      out->top_blackholes_cap = 0;
+    }
+  }
 
   FILE *f = fopen(path, "rb");
   if (!f) return 0;
@@ -374,6 +555,19 @@ static int parse_coverage_jsonl(const char *path, cov_summary_t *out) {
       uint64_t unc = 0;
       if (cov_parse_u64_field(line, "\"uncovered_instr\"", &unc) && unc > 0) {
         out->blackhole_labels++;
+
+        if (out->top_blackholes_cap) {
+          uint64_t covi = 0;
+          uint64_t toti = 0;
+          uint64_t first_pc = 0;
+          (void)cov_parse_u64_field(line, "\"covered_instr\"", &covi);
+          (void)cov_parse_u64_field(line, "\"total_instr\"", &toti);
+          (void)cov_parse_u64_field(line, "\"first_pc\"", &first_pc);
+
+          char *lbl = cov_parse_string_field_dup(line, "\"label\":\"");
+          cov_consider_blackhole(out, lbl ? lbl : "", unc, covi, toti, first_pc);
+          free(lbl);
+        }
       }
     }
   }
@@ -390,6 +584,7 @@ static int process_stream(FILE *in, const char *in_path, int n, const char *mode
   if (!in || !mode || !map || n <= 0) return 0;
 
   uint64_t window[ZEM_REP_MAX_N];
+  uint32_t window_mnems[ZEM_REP_MAX_N];
   int win_len = 0;
 
   char *line = NULL;
@@ -431,19 +626,31 @@ static int process_stream(FILE *in, const char *in_path, int n, const char *mode
     }
 
     uint64_t tok = hash_instr_token(&r, mode);
+
+    uint32_t mid = ngram_map_intern_mnem(map, r.m ? r.m : "");
+    if (mid == 0 && map->mnem_intern_len == 0) {
+      // Interning failed due to OOM.
+      record_free(&r);
+      free(line);
+      return 0;
+    }
     record_free(&r);
 
     // push into window (small n, shift is fine)
     if (win_len < n) {
       window[win_len++] = tok;
+      window_mnems[win_len - 1] = mid;
       if (win_len < n) continue;
     } else {
       memmove(&window[0], &window[1], (size_t)(n - 1) * sizeof(uint64_t));
       window[n - 1] = tok;
+      memmove(&window_mnems[0], &window_mnems[1],
+              (size_t)(n - 1) * sizeof(uint32_t));
+      window_mnems[n - 1] = mid;
     }
 
     uint32_t first_pc = (uint32_t)(pc - (int64_t)n + 1);
-    if (!ngram_map_inc(map, window, first_pc, io_max_count)) {
+    if (!ngram_map_inc(map, window, window_mnems, first_pc, io_max_count)) {
       free(line);
       return 0;
     }
@@ -489,18 +696,102 @@ static void write_jsonl_rep(FILE *out, const char *mode, int n, const char *path
 
 static void write_jsonl_rep_cov(FILE *out, const cov_summary_t *cov) {
   if (!cov) return;
+  fprintf(out, "{\"k\":\"zem_rep_cov\",\"v\":1,\"module_hash\":");
+  json_escape_and_print(out, cov->module_hash);
   fprintf(out,
-          "{\"k\":\"zem_rep_cov\",\"v\":1,\"total_instr\":%" PRIu64
+          ",\"total_instr\":%" PRIu64
           ",\"covered_instr\":%" PRIu64
+          ",\"total_labels\":%" PRIu64
           ",\"blackhole_labels\":%" PRIu64
           "}\n",
-          cov->total_instr, cov->covered_instr, cov->blackhole_labels);
+          cov->total_instr, cov->covered_instr, cov->total_labels, cov->blackhole_labels);
+}
+
+static int cov_blackhole_cmp_desc(const void *a, const void *b) {
+  const struct cov_blackhole *x = (const struct cov_blackhole *)a;
+  const struct cov_blackhole *y = (const struct cov_blackhole *)b;
+  if (x->uncovered_instr != y->uncovered_instr) {
+    return (x->uncovered_instr < y->uncovered_instr) ? 1 : -1;
+  }
+  if (x->first_pc != y->first_pc) {
+    return (x->first_pc > y->first_pc) ? 1 : -1;
+  }
+  return 0;
+}
+
+static void write_jsonl_rep_blackholes(FILE *out, cov_summary_t *cov, int max_report) {
+  if (!out || !cov || !cov->top_blackholes || cov->top_blackholes_n == 0 || max_report <= 0) return;
+  qsort(cov->top_blackholes, cov->top_blackholes_n, sizeof(cov->top_blackholes[0]),
+        cov_blackhole_cmp_desc);
+  size_t n = cov->top_blackholes_n;
+  if ((size_t)max_report < n) n = (size_t)max_report;
+  for (size_t i = 0; i < n; i++) {
+    struct cov_blackhole *bh = &cov->top_blackholes[i];
+    fprintf(out, "{\"k\":\"zem_rep_blackhole\",\"v\":1,\"label\":");
+    json_escape_and_print(out, bh->label ? bh->label : "");
+    fprintf(out,
+            ",\"uncovered_instr\":%" PRIu64
+            ",\"covered_instr\":%" PRIu64
+            ",\"total_instr\":%" PRIu64
+            ",\"first_pc\":%" PRIu64
+            "}\n",
+            bh->uncovered_instr, bh->covered_instr, bh->total_instr, bh->first_pc);
+  }
+}
+
+static void json_escape_and_print(FILE *out, const char *s) {
+  fputc('"', out);
+  for (const char *p = s ? s : ""; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '\\' || c == '"') {
+      fputc('\\', out);
+      fputc(c, out);
+    } else if (c < 0x20) {
+      fprintf(out, "\\u%04x", (unsigned)c);
+    } else {
+      fputc(c, out);
+    }
+  }
+  fputc('"', out);
+}
+
+typedef struct {
+  uint32_t count;
+  uint32_t first_pc;
+  uint32_t mnem_off;
+} rep_item_t;
+
+static int rep_item_cmp(const void *a, const void *b) {
+  const rep_item_t *x = (const rep_item_t *)a;
+  const rep_item_t *y = (const rep_item_t *)b;
+  if (x->count != y->count) return (x->count < y->count) ? 1 : -1;
+  if (x->first_pc != y->first_pc) return (x->first_pc > y->first_pc) ? 1 : -1;
+  return 0;
+}
+
+static void write_jsonl_rep_ngram(FILE *out, const ngram_map_t *map, const char *mode, int n,
+                                  const rep_item_t *it) {
+  if (!out || !map || !it) return;
+  fprintf(out,
+          "{\"k\":\"zem_rep_ngram\",\"v\":1,\"mode\":\"%s\",\"n\":%d,",
+          mode, n);
+  fprintf(out, "\"count\":%u,\"first_pc\":%u,\"saved_instr_est\":%u,\"mnems\":[",
+          it->count, it->first_pc, (unsigned)((it->count - 1u) * (uint32_t)n));
+  const uint32_t *mids = &map->mnem_pool[(size_t)it->mnem_off];
+  for (int i = 0; i < n; i++) {
+    if (i) fputc(',', out);
+    uint32_t mid = mids[i];
+    const char *ms = (mid < map->mnem_intern_len) ? map->mnem_intern[mid] : "";
+    json_escape_and_print(out, ms);
+  }
+  fprintf(out, "]}\n");
 }
 
 int zem_rep_scan_program(const char **inputs, int ninputs, int n,
                          const char *mode,
                          const char *coverage_jsonl_path,
                          const char *report_out_path,
+                         int max_report,
                          int diag) {
   if (!inputs || ninputs <= 0) return zem_failf("rep scan requires inputs (or '-' for stdin)");
   if (!mode || !*mode) return zem_failf("--rep-mode requires a mode");
@@ -512,6 +803,9 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
   }
   if (!report_out_path || !*report_out_path) {
     return zem_failf("--rep-out requires a path");
+  }
+  if (max_report < 0) {
+    return zem_failf("bad --rep-max-report value");
   }
 
   ngram_map_t map;
@@ -562,7 +856,7 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
   int have_cov = 0;
   uint64_t dead_by_profile = 0;
   if (coverage_jsonl_path && *coverage_jsonl_path) {
-    have_cov = parse_coverage_jsonl(coverage_jsonl_path, &cov);
+    have_cov = parse_coverage_jsonl(coverage_jsonl_path, &cov, max_report);
     if (have_cov && cov.total_instr) {
       dead_by_profile = (cov.total_instr > cov.covered_instr) ? (cov.total_instr - cov.covered_instr) : 0;
     }
@@ -587,6 +881,32 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
                   repeated_ngrams, best_saved_instr_est, bloat_score);
   if (have_cov) {
     write_jsonl_rep_cov(out, &cov);
+    write_jsonl_rep_blackholes(out, &cov, max_report);
+  }
+
+  if (max_report > 0 && repeated_ngrams > 0) {
+    size_t want = (size_t)max_report;
+    if (want > repeated_ngrams) want = (size_t)repeated_ngrams;
+    rep_item_t *items = (rep_item_t *)malloc((size_t)repeated_ngrams * sizeof(rep_item_t));
+    if (!items) {
+      if (out != stdout) fclose(out);
+      ngram_map_free(&map);
+      return zem_failf("rep scan: OOM building report");
+    }
+    size_t k = 0;
+    for (size_t i = 0; i < map.cap; i++) {
+      if (!map.v[i].used) continue;
+      if (map.v[i].count <= 1) continue;
+      items[k].count = map.v[i].count;
+      items[k].first_pc = map.v[i].first_pc;
+      items[k].mnem_off = map.v[i].mnem_off;
+      k++;
+    }
+    qsort(items, k, sizeof(items[0]), rep_item_cmp);
+    for (size_t i = 0; i < want && i < k; i++) {
+      write_jsonl_rep_ngram(out, &map, mode, n, &items[i]);
+    }
+    free(items);
   }
 
   if (out != stdout) fclose(out);
@@ -634,6 +954,7 @@ int zem_rep_scan_program(const char **inputs, int ninputs, int n,
     }
   }
 
+  if (have_cov) cov_free(&cov);
   ngram_map_free(&map);
   return 0;
 }

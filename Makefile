@@ -245,6 +245,7 @@ test-validation: test-zem-diag-ret-trunc-ld32s64
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
 test-validation: test-zem-rep-scan
+test-validation: test-zem-rep-render-from-report
 test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
 
@@ -293,6 +294,9 @@ test-zem-coverage-blackholes: zas zem
 
 test-zem-rep-scan: zem
 	sh test/zem_rep_scan.sh
+
+test-zem-rep-render-from-report:
+	sh test/zem_rep_render_from_report.sh
 
 test-zem-caps: zem
 	sh test/zem_caps.sh

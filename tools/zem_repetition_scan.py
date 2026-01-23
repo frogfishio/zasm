@@ -675,9 +675,153 @@ def scan(
     return 0
 
 
+def _load_rep_report_jsonl(
+    path: str,
+) -> Tuple[Dict[str, Any], Optional[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Load a zem repetition report JSONL (as emitted by zem or this tool).
+
+    Returns: (rep_summary, rep_cov, rep_ngrams, rep_blackholes)
+    """
+    rep: Optional[Dict[str, Any]] = None
+    rep_cov: Optional[Dict[str, Any]] = None
+    ngrams: List[Dict[str, Any]] = []
+    blackholes: List[Dict[str, Any]] = []
+
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            k = rec.get("k")
+            if k == "zem_rep" and rep is None:
+                rep = rec
+                continue
+            if k == "zem_rep_cov" and rep_cov is None:
+                rep_cov = rec
+                continue
+            if k == "zem_rep_ngram":
+                ngrams.append(rec)
+            if k == "zem_rep_blackhole":
+                blackholes.append(rec)
+
+    if rep is None:
+        raise ValueError(f"missing zem_rep record in {path}")
+    return rep, rep_cov, ngrams, blackholes
+
+
+def render_html_from_report(
+    report_jsonl_in: str,
+    report_html: str,
+    coverage_jsonl: Optional[str],
+    max_report: int,
+) -> int:
+    rep, rep_cov, ngrams, rep_blackholes = _load_rep_report_jsonl(report_jsonl_in)
+
+    # Prefer richer coverage parse (has top_blackholes + module_hash).
+    cov: Optional[CoverageSummary] = None
+    if coverage_jsonl:
+        cov = parse_coverage_jsonl(coverage_jsonl)
+    elif rep_cov:
+        # Coverage info embedded in repetition report.
+        mh = rep_cov.get("module_hash")
+        module_hash = mh if isinstance(mh, str) and mh else None
+        # If zem embedded top blackholes, use them; otherwise we still render summary.
+        embedded_blackholes: List[Dict[str, Any]] = []
+        for r in rep_blackholes:
+            embedded_blackholes.append(
+                {
+                    "label": r.get("label"),
+                    "uncovered_instr": int(r.get("uncovered_instr") or 0),
+                    "covered_instr": int(r.get("covered_instr") or 0),
+                    "total_instr": int(r.get("total_instr") or 0),
+                    "first_pc": int(r.get("first_pc") or 0),
+                }
+            )
+        embedded_blackholes.sort(
+            key=lambda r: (
+                int(r.get("uncovered_instr") or 0),
+                int(r.get("total_instr") or 0),
+                str(r.get("label") or ""),
+            ),
+            reverse=True,
+        )
+
+        cov = CoverageSummary(
+            module_hash=module_hash,
+            total_instr=int(rep_cov.get("total_instr") or 0),
+            covered_instr=int(rep_cov.get("covered_instr") or 0),
+            total_labels=int(rep_cov.get("total_labels") or 0),
+            blackhole_labels=int(rep_cov.get("blackhole_labels") or 0),
+            top_blackholes=embedded_blackholes,
+        )
+
+    # Top repeated n-grams: match the printed ordering (count desc).
+    def _ng_sort_key(r: Dict[str, Any]) -> Tuple[int, int]:
+        try:
+            c = int(r.get("count") or 0)
+        except Exception:
+            c = 0
+        mn = r.get("mnems")
+        mlen = len(mn) if isinstance(mn, list) else 0
+        return (c, mlen)
+
+    ngrams_sorted = sorted(ngrams, key=_ng_sort_key, reverse=True)
+    top_rep: List[Dict[str, Any]] = []
+    for r in ngrams_sorted[:max_report]:
+        try:
+            count = int(r.get("count") or 0)
+        except Exception:
+            count = 0
+        try:
+            first_pc = int(r.get("first_pc") or 0)
+        except Exception:
+            first_pc = 0
+        try:
+            saved = int(r.get("saved_instr_est") or 0)
+        except Exception:
+            saved = 0
+        mnems = r.get("mnems")
+        if not isinstance(mnems, list):
+            mnems = []
+        top_rep.append(
+            {
+                "count": count,
+                "first_pc": first_pc,
+                "saved_instr_est": saved,
+                "mnems": [str(m) for m in mnems],
+            }
+        )
+
+    top_bh: List[Dict[str, Any]] = []
+    if cov:
+        top_bh = cov.top_blackholes[:max_report]
+
+    _write_html_report(
+        report_html,
+        input_path=str(rep.get("path") or ""),
+        mode=str(rep.get("mode") or "shape"),
+        n=int(rep.get("n") or 0),
+        total_lines=int(rep.get("lines") or 0),
+        total_instr=int(rep.get("instr") or 0),
+        unique_ngrams=int(rep.get("unique_ngrams") or 0),
+        repeated_ngrams=int(rep.get("repeated_ngrams") or 0),
+        best_saved_instr_est=int(rep.get("best_ngram_saved_instr_est") or 0),
+        bloat_score=int(rep.get("bloat_score") or 0),
+        cov=cov,
+        top_repeated=top_rep,
+        top_blackholes=top_bh,
+    )
+
+    return 0
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("path", help="Path to IR JSONL file")
+    ap.add_argument("path", nargs="?", default=None, help="Path to IR JSONL file")
     ap.add_argument("--n", type=int, default=8, help="n-gram size (default: 8)")
     ap.add_argument(
         "--mode",
@@ -695,6 +839,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--report-jsonl",
         default=None,
         help="Write a machine-readable repetition report as JSONL",
+    )
+    ap.add_argument(
+        "--from-report-jsonl",
+        dest="from_report_jsonl",
+        default=None,
+        help="Render HTML from an existing repetition report JSONL (skip IR scan)",
     )
     ap.add_argument(
         "--report-html",
@@ -715,6 +865,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     ns = ap.parse_args(argv)
     if ns.n < 2 or ns.n > 64:
         ap.error("--n must be in [2, 64]")
+
+    if ns.from_report_jsonl:
+        if not ns.report_html:
+            ap.error("--from-report-jsonl requires --report-html")
+        if ns.report_jsonl:
+            ap.error("--from-report-jsonl cannot be combined with --report-jsonl")
+        if ns.diag:
+            ap.error("--from-report-jsonl does not support --diag (use zem --rep-diag)")
+        return render_html_from_report(ns.from_report_jsonl, ns.report_html, ns.coverage_jsonl, ns.max_report)
+
+    if not ns.path:
+        ap.error("missing IR JSONL path")
 
     return scan(
         ns.path,

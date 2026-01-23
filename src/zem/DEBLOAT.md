@@ -137,14 +137,24 @@ The coverage report is line-delimited JSON (JSONL). Record keys:
 
 - `k == "zem_rep_cov"` (optional repetition/coverage enrichment)
   - `v`: schema version (currently `1`)
+  - `module_hash`: from coverage summary (string)
   - `total_instr`: from coverage summary
   - `covered_instr`: from coverage summary
+  - `total_labels`: number of labels seen in coverage
   - `blackhole_labels`: number of labels with uncovered instructions
+
+- `k == "zem_rep_blackhole"` (optional top blackhole labels; emitted when `--rep-max-report N` is non-zero)
+  - `v`: schema version (currently `1`)
+  - `label`: label name (string)
+  - `uncovered_instr`: uncovered instruction records under this label
+  - `covered_instr`: covered instruction records under this label
+  - `total_instr`: total instruction records under this label
+  - `first_pc`: first IR record index where this label appears
 
 Notes:
 
 - This is a C implementation intended to eventually replace the Python repetition scan for CI/one-binary workflows.
-- The detailed “top repeated n-grams” report (`zem_rep_ngram`) is not emitted yet.
+- The detailed “top repeated n-grams” report (`k == "zem_rep_ngram"`) is emitted when `--rep-max-report N` is non-zero.
 
 ### Requirements
 
