@@ -51,6 +51,11 @@ typedef struct {
   // Proactive diagnostics (opt-in): emit warnings for suspicious patterns.
   int sniff;
   int sniff_fatal;
+  // Coverage (opt-in): record per-PC hit counts.
+  int coverage;
+  const char *coverage_out;   // output path (JSONL); NULL => no file output
+  const char *coverage_merge; // input path (JSONL) to merge into this run
+  uint32_t coverage_blackholes_n; // if >0, print top-N uncovered labels to stderr
   FILE *repl_in;
   int repl_no_prompt;
   int debug_events;

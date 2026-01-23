@@ -92,6 +92,34 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 - `--trace` emits per-instruction JSONL events to stderr.
 - `--trace-mem` adds `mem_read`/`mem_write` JSONL events to stderr.
 
+### Coverage
+
+`zem` can record per-PC instruction hit counts and write them as JSONL.
+
+```sh
+bin/zem --coverage --coverage-out /tmp/zem.coverage.jsonl /tmp/program.jsonl
+```
+
+Print a quick “black holes” summary (labels with uncovered instructions):
+
+```sh
+bin/zem --coverage --coverage-blackholes 20 --coverage-out /tmp/zem.coverage.jsonl /tmp/program.jsonl
+```
+
+Merge multiple runs (useful for CI shards or multi-phase pipelines):
+
+```sh
+bin/zem --coverage --coverage-merge /tmp/zem.coverage.jsonl \
+  --coverage-out /tmp/zem.coverage.merged.jsonl \
+  /tmp/program.jsonl
+```
+
+Notes:
+
+- Coverage is per IR record index (`pc`). Only instruction records (`kind == instr`) are reported.
+- The JSONL report also includes per-label aggregates (`k == "zem_cov_label"`) to support black-hole analysis.
+- When `--debug-events-only` is used, `--coverage` requires `--coverage-out` (to keep stderr clean JSONL).
+
 ### Debugging (CLI)
 
 - `--debug` starts the interactive CLI debugger (starts paused).
@@ -119,6 +147,8 @@ When `zem` fails (e.g. out-of-bounds memory access), it prints a human-oriented 
 - register dump + backtrace
 - a short “recent instruction” history
 - for instructions that dereference memory, the base register value and its provenance (where that register was last written)
+
+In some cases `zem` can also emit a targeted diagnosis if it recognizes a high-signal signature (e.g. return-slot loaded with `LD32`, sign-extended, then used as an address and traps out-of-bounds).
 
 This is intended to make “trap, identify, explain” workflows fast when debugging compiler lowering bugs.
 

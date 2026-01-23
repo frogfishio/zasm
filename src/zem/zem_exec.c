@@ -269,6 +269,271 @@ static int bpcond_eval(const char *expr, const zem_regs_t *regs,
   return 1;
 }
 
+
+static void zem_cov_json_write_str(FILE *out, const char *s) {
+  if (!s) {
+    fputs("null", out);
+    return;
+  }
+  fputc('"', out);
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    unsigned char c = *p;
+    switch (c) {
+    case '"': fputs("\\\"", out); break;
+    case '\\': fputs("\\\\", out); break;
+    case '\b': fputs("\\b", out); break;
+    case '\f': fputs("\\f", out); break;
+    case '\n': fputs("\\n", out); break;
+    case '\r': fputs("\\r", out); break;
+    case '\t': fputs("\\t", out); break;
+    default:
+      if (c < 0x20) {
+        fprintf(out, "\\u%04x", (unsigned)c);
+      } else {
+        fputc((int)c, out);
+      }
+      break;
+    }
+  }
+  fputc('"', out);
+}
+
+static int zem_cov_parse_u64_field(const char *line, const char *key, uint64_t *out) {
+  if (!line || !key || !out) return 0;
+  const char *p = strstr(line, key);
+  if (!p) return 0;
+  p += strlen(key);
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p == ':') p++;
+  while (*p == ' ' || *p == '\t') p++;
+  char *end = NULL;
+  unsigned long long v = strtoull(p, &end, 10);
+  if (!end || end == p) return 0;
+  *out = (uint64_t)v;
+  return 1;
+}
+
+static void zem_cov_merge_jsonl(uint64_t *hits, size_t nhits, const char *path) {
+  if (!hits || nhits == 0 || !path || !*path) return;
+  FILE *f = fopen(path, "rb");
+  if (!f) return;
+  char line[4096];
+  while (fgets(line, (int)sizeof(line), f)) {
+    if (!strstr(line, "\"k\":\"zem_cov_rec\"")) continue;
+    uint64_t pc = 0;
+    uint64_t count = 0;
+    if (!zem_cov_parse_u64_field(line, "\"pc\"", &pc)) continue;
+    if (!zem_cov_parse_u64_field(line, "\"count\"", &count)) continue;
+    if (pc >= nhits) continue;
+    hits[pc] += count;
+  }
+  fclose(f);
+}
+
+static int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,
+                              const char *stdin_source_name, uint64_t *hits,
+                              size_t nhits, const char *out_path,
+                              int suppress_stderr_summary,
+                              uint32_t blackholes_n) {
+  if (!recs || !hits || nhits == 0) return 2;
+
+  FILE *out = NULL;
+  if (out_path && *out_path) {
+    out = fopen(out_path, "wb");
+    if (!out) return 2;
+  }
+
+  uint64_t steps = 0;
+  uint32_t total_instr = 0;
+  uint32_t covered_instr = 0;
+
+  enum { ZEM_COV_LABEL_MAX = 4096 };
+  const char *label_keys[ZEM_COV_LABEL_MAX];
+  uint32_t label_total[ZEM_COV_LABEL_MAX];
+  uint32_t label_covered[ZEM_COV_LABEL_MAX];
+  uint32_t label_first_pc[ZEM_COV_LABEL_MAX];
+  size_t nlabels = 0;
+
+  memset(label_keys, 0, sizeof(label_keys));
+  memset(label_total, 0, sizeof(label_total));
+  memset(label_covered, 0, sizeof(label_covered));
+  memset(label_first_pc, 0, sizeof(label_first_pc));
+
+  const char *cur_label = NULL;
+  uint32_t cur_label_first_pc = 0;
+  int cur_label_has_first_pc = 0;
+
+  for (size_t pc = 0; pc < recs->n; pc++) {
+    const record_t *r = &recs->v[pc];
+    if (r->k == JREC_LABEL && r->label) {
+      cur_label = r->label;
+      cur_label_has_first_pc = 0;
+    }
+    if (r->k != JREC_INSTR) continue;
+
+    if (cur_label && !cur_label_has_first_pc) {
+      cur_label_first_pc = (uint32_t)pc;
+      cur_label_has_first_pc = 1;
+    }
+
+    total_instr++;
+    steps += hits[pc];
+    if (hits[pc] > 0) covered_instr++;
+
+    if (cur_label) {
+      size_t li = 0;
+      for (; li < nlabels; li++) {
+        if (label_keys[li] && strcmp(label_keys[li], cur_label) == 0) break;
+      }
+      if (li == nlabels) {
+        if (nlabels < ZEM_COV_LABEL_MAX) {
+          label_keys[li] = cur_label;
+          label_first_pc[li] = cur_label_first_pc;
+          label_total[li] = 0;
+          label_covered[li] = 0;
+          nlabels++;
+        } else {
+          // Too many labels to group; silently skip label aggregation.
+          cur_label = NULL;
+        }
+      }
+      if (cur_label) {
+        label_total[li]++;
+        if (hits[pc] > 0) label_covered[li]++;
+      }
+    }
+  }
+
+  if (out) {
+    fputs("{\"k\":\"zem_cov\",\"v\":1,\"nrecs\":", out);
+    fprintf(out, "%zu", recs->n);
+    fputs(",\"total_instr\":", out);
+    fprintf(out, "%u", total_instr);
+    fputs(",\"covered_instr\":", out);
+    fprintf(out, "%u", covered_instr);
+    fputs(",\"steps\":", out);
+    fprintf(out, "%" PRIu64, steps);
+    fputs(",\"stdin_source_name\":", out);
+    zem_cov_json_write_str(out, stdin_source_name);
+    fputs("}\n", out);
+
+    cur_label = NULL;
+    for (size_t pc = 0; pc < recs->n; pc++) {
+      const record_t *r = &recs->v[pc];
+      if (r->k == JREC_LABEL && r->label) {
+        cur_label = r->label;
+      }
+      if (r->k != JREC_INSTR) continue;
+
+      fputs("{\"k\":\"zem_cov_rec\",\"pc\":", out);
+      fprintf(out, "%zu", pc);
+      fputs(",\"count\":", out);
+      fprintf(out, "%" PRIu64, hits[pc]);
+      fputs(",\"label\":", out);
+      zem_cov_json_write_str(out, cur_label);
+      fputs(",\"line\":", out);
+      if (r->line >= 0) {
+        fprintf(out, "%d", r->line);
+      } else {
+        fputs("null", out);
+      }
+      fputs(",\"m\":", out);
+      zem_cov_json_write_str(out, r->m);
+      fputs(",\"src\":", out);
+      if (pc_srcs && pc_srcs[pc]) {
+        zem_cov_json_write_str(out, pc_srcs[pc]);
+      } else {
+        fputs("null", out);
+      }
+      fputs("}\n", out);
+    }
+
+    // Label summaries.
+    for (size_t li = 0; li < nlabels; li++) {
+      const char *lk = label_keys[li];
+      if (!lk) continue;
+      uint32_t tot = label_total[li];
+      uint32_t cov = label_covered[li];
+      uint32_t uncov = (tot > cov) ? (tot - cov) : 0;
+      fputs("{\"k\":\"zem_cov_label\",\"label\":", out);
+      zem_cov_json_write_str(out, lk);
+      fputs(",\"total_instr\":", out);
+      fprintf(out, "%u", tot);
+      fputs(",\"covered_instr\":", out);
+      fprintf(out, "%u", cov);
+      fputs(",\"uncovered_instr\":", out);
+      fprintf(out, "%u", uncov);
+      fputs(",\"first_pc\":", out);
+      fprintf(out, "%u", label_first_pc[li]);
+      fputs("}\n", out);
+    }
+
+    fclose(out);
+  }
+
+  if (!suppress_stderr_summary) {
+    double pct = 0.0;
+    if (total_instr) pct = (100.0 * (double)covered_instr) / (double)total_instr;
+    fprintf(stderr,
+            "zem: coverage: covered %u/%u instr (%.1f%%), steps=%" PRIu64 "\n",
+            covered_instr, total_instr, pct, steps);
+
+    if (blackholes_n && nlabels) {
+      typedef struct {
+        const char *label;
+        uint32_t total;
+        uint32_t covered;
+        uint32_t first_pc;
+      } zem_cov_label_stat_t;
+      zem_cov_label_stat_t *stats =
+          (zem_cov_label_stat_t *)calloc(nlabels, sizeof(zem_cov_label_stat_t));
+      if (stats) {
+        for (size_t li = 0; li < nlabels; li++) {
+          stats[li].label = label_keys[li];
+          stats[li].total = label_total[li];
+          stats[li].covered = label_covered[li];
+          stats[li].first_pc = label_first_pc[li];
+        }
+        // Sort by uncovered desc, then total desc, then label.
+        for (size_t i = 0; i < nlabels; i++) {
+          for (size_t j = i + 1; j < nlabels; j++) {
+            uint32_t ui = (stats[i].total > stats[i].covered) ? (stats[i].total - stats[i].covered) : 0;
+            uint32_t uj = (stats[j].total > stats[j].covered) ? (stats[j].total - stats[j].covered) : 0;
+            int swap = 0;
+            if (uj > ui) swap = 1;
+            else if (uj == ui && stats[j].total > stats[i].total) swap = 1;
+            else if (uj == ui && stats[j].total == stats[i].total && stats[i].label && stats[j].label &&
+                     strcmp(stats[j].label, stats[i].label) < 0) swap = 1;
+            if (swap) {
+              zem_cov_label_stat_t tmp = stats[i];
+              stats[i] = stats[j];
+              stats[j] = tmp;
+            }
+          }
+        }
+        fprintf(stderr,
+                "zem: coverage: blackholes (top %u labels by uncovered instr)\n",
+                blackholes_n);
+        uint32_t printed = 0;
+        for (size_t i = 0; i < nlabels && printed < blackholes_n; i++) {
+          uint32_t unc = (stats[i].total > stats[i].covered) ? (stats[i].total - stats[i].covered) : 0;
+          if (unc == 0) continue;
+          fprintf(stderr,
+                  "  label=%s uncovered=%u covered=%u total=%u first_pc=%u\n",
+                  stats[i].label ? stats[i].label : "(null)",
+                  unc, stats[i].covered, stats[i].total, stats[i].first_pc);
+          printed++;
+        }
+        if (printed == 0) {
+          fputs("  (none)\n", stderr);
+        }
+        free(stats);
+      }
+    }
+  }
+  return 0;
+}
+
 static int memop_addr_u32(const zem_symtab_t *syms, const zem_regs_t *regs,
                           const operand_t *memop, uint32_t *out_addr) {
   return zem_memop_addr_u32(syms, regs, memop, out_addr);
@@ -279,6 +544,7 @@ static int bytes_view(const zem_buf_t *mem, uint32_t obj_ptr, uint32_t *out_ptr,
   return zem_bytes_view(mem, obj_ptr, out_ptr, out_len);
 }
 
+  uint64_t *cov_hits = NULL;
 static uint64_t hash64_fnv1a(const void *data, size_t len) {
   const uint8_t *p = (const uint8_t *)data;
   uint64_t h = 1469598103934665603ull;
@@ -506,6 +772,45 @@ static int zem_diag_record_writes_reg(const record_t *r, const char *reg) {
   return strcmp(r->ops[0].s, reg) == 0;
 }
 
+static int zem_diag_record_is_unary_inplace(const record_t *r, const char *reg) {
+  if (!r || r->k != JREC_INSTR || !reg) return 0;
+  if (!r->m || r->nops == 0) return 0;
+  if (r->ops[0].t != JOP_SYM || !r->ops[0].s) return 0;
+  if (strcmp(r->ops[0].s, reg) != 0) return 0;
+  // Common in-place unary ops: OP reg[, imm]
+  if (r->nops == 1) return 1;
+  if (r->nops == 2 && r->ops[1].t == JOP_NUM) return 1;
+  return 0;
+}
+
+static int zem_diag_record_input_reg(const record_t *r, const char *dst_reg,
+                                     const char **out_reg) {
+  if (out_reg) *out_reg = NULL;
+  if (!r || r->k != JREC_INSTR || !dst_reg) return 0;
+  if (!zem_diag_record_writes_reg(r, dst_reg)) return 0;
+
+  // Simple move/copy patterns: DST <- SRC
+  if (r->nops == 2 && r->ops[1].t == JOP_SYM && r->ops[1].s) {
+    if (out_reg) *out_reg = r->ops[1].s;
+    return 1;
+  }
+
+  // Unary ops that operate on the register itself (shift/sign/neg/etc).
+  if (zem_diag_record_is_unary_inplace(r, dst_reg)) {
+    if (out_reg) *out_reg = dst_reg;
+    return 1;
+  }
+
+  // Basic ALU patterns: DST <- DST op SRC (or DST op imm)
+  // Heuristic: many instructions are encoded as "OP DST, SRC".
+  if (r->nops == 2 && r->ops[1].t == JOP_SYM && r->ops[1].s) {
+    if (out_reg) *out_reg = r->ops[1].s;
+    return 1;
+  }
+
+  return 0;
+}
+
 static const zem_diag_hist_entry_t *zem_diag_hist_find_last_writer_before(
     const char *reg, size_t pc_lt) {
   if (!g_diag_hist.enabled || g_diag_hist.count == 0 || !reg) return NULL;
@@ -527,30 +832,52 @@ static void zem_diag_print_reg_chain(FILE *out, const char *reg,
 
   fputs("explain:\n", out);
   size_t pc_lt = (size_t)-1;
+  const char *cur_reg = reg;
   for (size_t step = 0; step < max_steps; step++) {
-    const zem_diag_hist_entry_t *e = zem_diag_hist_find_last_writer_before(reg, pc_lt);
+    const zem_diag_hist_entry_t *e =
+        zem_diag_hist_find_last_writer_before(cur_reg, pc_lt);
     if (!e || !e->r) {
-      fprintf(out, "  %s: no earlier writer in recent history\n", reg);
+      fprintf(out, "  %s: no earlier writer in recent history\n", cur_reg);
       return;
     }
 
     const record_t *r = e->r;
-    fprintf(out, "  %s set by %s at pc=%zu", reg, r->m ? r->m : "(null)", e->pc);
+    fprintf(out, "  %s set by %s at pc=%zu", cur_reg,
+            r->m ? r->m : "(null)", e->pc);
     if (e->label) fprintf(out, " label=%s", e->label);
     if (r->line >= 0) fprintf(out, " line=%d", r->line);
     fputc('\n', out);
 
-    // Recognize the common truncation/sign-extension chain and keep walking.
-    if (r->m && (strcmp(r->m, "SLA64") == 0 || strcmp(r->m, "SRA64") == 0) &&
-        r->nops == 2 && r->ops[1].t == JOP_NUM) {
-      // Unary op: reg depends on prior value of itself.
-      pc_lt = e->pc;
-      continue;
-    }
-    if (r->m && strcmp(r->m, "LD32") == 0 && r->nops == 2 &&
-        r->ops[1].t == JOP_MEM && !r->ops[1].base_is_reg && r->ops[1].s) {
-      fprintf(out, "  source: memory symbol %s\n", r->ops[1].s);
+    // Memory-load source explanation.
+    if (r->nops == 2 && r->ops[1].t == JOP_MEM && r->ops[1].s) {
+      if (r->ops[1].base_is_reg) {
+        if (r->ops[1].disp) {
+          fprintf(out, "  source: mem (%s%+ld)\n", r->ops[1].s, r->ops[1].disp);
+        } else {
+          fprintf(out, "  source: mem (%s)\n", r->ops[1].s);
+        }
+        // Follow the base register to explain where the address came from.
+        pc_lt = e->pc;
+        cur_reg = r->ops[1].s;
+        continue;
+      }
+      if (r->ops[1].disp) {
+        fprintf(out, "  source: mem (%s%+ld)\n", r->ops[1].s, r->ops[1].disp);
+      } else {
+        fprintf(out, "  source: mem (%s)\n", r->ops[1].s);
+      }
       return;
+    }
+
+    // Try to follow register-to-register dependency.
+    const char *next_reg = NULL;
+    if (zem_diag_record_input_reg(r, cur_reg, &next_reg) && next_reg) {
+      if (strcmp(next_reg, cur_reg) != 0) {
+        fprintf(out, "  depends-on: %s\n", next_reg);
+      }
+      pc_lt = e->pc;
+      cur_reg = next_reg;
+      continue;
     }
 
     // Unknown dependency structure; stop after the last-writer.
@@ -572,7 +899,9 @@ static int zem_diag_record_is_ld32_from_ret_slot(const record_t *r,
                                                 const char **out_reg,
                                                 const char **out_slot) {
   if (!r || r->k != JREC_INSTR || !r->m) return 0;
-  if (strcmp(r->m, "LD32") != 0) return 0;
+  if (strcmp(r->m, "LD32") != 0 && strcmp(r->m, "LD32U64") != 0 &&
+      strcmp(r->m, "LD32S64") != 0)
+    return 0;
   if (r->nops != 2) return 0;
   if (r->ops[0].t != JOP_SYM || !r->ops[0].s) return 0;
   if (!zem_diag_operand_is_ret_slot_mem(&r->ops[1])) return 0;
@@ -626,13 +955,15 @@ static void zem_diag_print_mem_base_regs(FILE *out, const record_t *r,
 static int zem_diag_hist_find_ret_truncation_event(
     size_t *out_ld_pc, size_t *out_sra_pc, const char **out_reg,
     const char **out_slot) {
-  // Heuristic: LD32 r,(global___ret_*) followed by SLA64 r,32 then SRA64 r,32.
+  // Heuristic: 32-bit return-slot load into a reg (LD32/LD32U64/LD32S64), then
+  // sign-extension (SXT32 or SLA64/SRA64 by 32).
   if (!g_diag_hist.enabled || g_diag_hist.count < 3) return 0;
 
   const char *tracked_reg = NULL;
   const char *tracked_slot = NULL;
   size_t tracked_ld_pc = 0;
   int saw_sla = 0;
+  int load_is_signed = 0;
 
   size_t idx = (g_diag_hist.head + ZEM_DIAG_HIST_CAP - g_diag_hist.count) %
                ZEM_DIAG_HIST_CAP;
@@ -647,9 +978,25 @@ static int zem_diag_hist_find_ret_truncation_event(
       tracked_slot = slot;
       tracked_ld_pc = e->pc;
       saw_sla = 0;
+      load_is_signed = (r && r->m && strcmp(r->m, "LD32S64") == 0);
+      if (load_is_signed) {
+        if (out_ld_pc) *out_ld_pc = tracked_ld_pc;
+        if (out_sra_pc) *out_sra_pc = tracked_ld_pc;
+        if (out_reg) *out_reg = tracked_reg;
+        if (out_slot) *out_slot = tracked_slot;
+        return 1;
+      }
     } else if (tracked_reg && !saw_sla &&
                zem_diag_record_is_shift64_by_32(r, "SLA64", tracked_reg)) {
       saw_sla = 1;
+    } else if (tracked_reg && r && r->m && strcmp(r->m, "SXT32") == 0 &&
+               r->nops == 1 && r->ops[0].t == JOP_SYM && r->ops[0].s &&
+               strcmp(r->ops[0].s, tracked_reg) == 0) {
+      if (out_ld_pc) *out_ld_pc = tracked_ld_pc;
+      if (out_sra_pc) *out_sra_pc = e->pc;
+      if (out_reg) *out_reg = tracked_reg;
+      if (out_slot) *out_slot = tracked_slot;
+      return 1;
     } else if (tracked_reg && saw_sla &&
                zem_diag_record_is_shift64_by_32(r, "SRA64", tracked_reg)) {
       if (out_ld_pc) *out_ld_pc = tracked_ld_pc;
@@ -662,6 +1009,115 @@ static int zem_diag_hist_find_ret_truncation_event(
     idx = (idx + 1) % ZEM_DIAG_HIST_CAP;
   }
   return 0;
+}
+
+static int zem_diag_hist_find_ret_truncation_for_reg(
+    const char *want_reg, size_t *out_ld_pc, size_t *out_sra_pc,
+    const char **out_slot, int *out_confidence) {
+  // Confidence:
+  // 1 => saw LD32/LD32U64 want_reg,(global___ret_*)
+  // 2 => saw LD32S64, or saw sign-extension (SXT32 or SLA64/SRA64 by 32)
+  if (out_confidence) *out_confidence = 0;
+  if (!g_diag_hist.enabled || g_diag_hist.count < 1 || !want_reg) return 0;
+
+  const char *tracked_slot = NULL;
+  size_t tracked_ld_pc = 0;
+  size_t tracked_sra_pc = 0;
+  int saw_ld = 0;
+  int saw_sla = 0;
+
+  // Scan oldest->newest so we prefer the most recent complete chain.
+  size_t idx = (g_diag_hist.head + ZEM_DIAG_HIST_CAP - g_diag_hist.count) %
+               ZEM_DIAG_HIST_CAP;
+  for (size_t i = 0; i < g_diag_hist.count; i++) {
+    const zem_diag_hist_entry_t *e = &g_diag_hist.v[idx];
+    const record_t *r = e->r;
+
+    const char *reg = NULL;
+    const char *slot = NULL;
+    if (zem_diag_record_is_ld32_from_ret_slot(r, &reg, &slot) && reg &&
+        strcmp(reg, want_reg) == 0) {
+      tracked_slot = slot;
+      tracked_ld_pc = e->pc;
+      tracked_sra_pc = 0;
+      saw_ld = 1;
+      saw_sla = 0;
+      if (out_confidence) *out_confidence = 1;
+      if (r && r->m && strcmp(r->m, "LD32S64") == 0) {
+        tracked_sra_pc = tracked_ld_pc;
+        if (out_confidence) *out_confidence = 2;
+        saw_ld = 0;
+        saw_sla = 0;
+      }
+    } else if (saw_ld && !saw_sla &&
+               zem_diag_record_is_shift64_by_32(r, "SLA64", want_reg)) {
+      saw_sla = 1;
+    } else if (saw_ld && r && r->m && strcmp(r->m, "SXT32") == 0 &&
+               r->nops == 1 && r->ops[0].t == JOP_SYM && r->ops[0].s &&
+               strcmp(r->ops[0].s, want_reg) == 0) {
+      tracked_sra_pc = e->pc;
+      if (out_confidence) *out_confidence = 2;
+      saw_ld = 0;
+      saw_sla = 0;
+    } else if (saw_ld && saw_sla &&
+               zem_diag_record_is_shift64_by_32(r, "SRA64", want_reg)) {
+      tracked_sra_pc = e->pc;
+      if (out_confidence) *out_confidence = 2;
+      // Finalize the chain but keep scanning in case a more recent one exists.
+      saw_ld = 0;
+      saw_sla = 0;
+    }
+
+    idx = (idx + 1) % ZEM_DIAG_HIST_CAP;
+  }
+
+  if (out_confidence && *out_confidence >= 1) {
+    if (out_ld_pc) *out_ld_pc = tracked_ld_pc;
+    if (out_sra_pc) *out_sra_pc = tracked_sra_pc;
+    if (out_slot) *out_slot = tracked_slot;
+    return 1;
+  }
+  return 0;
+}
+
+static void zem_diag_maybe_print_width_bug_diagnosis(FILE *out,
+                                                     size_t fault_pc,
+                                                     const record_t *r) {
+  if (!out || !r || r->k != JREC_INSTR) return;
+  if (!g_fail_span_valid) return;
+
+  // Emit at most one diagnosis per trap.
+  for (size_t i = 0; i < r->nops; i++) {
+    const operand_t *o = &r->ops[i];
+    if (o->t != JOP_MEM || !o->base_is_reg || !o->s) continue;
+
+    size_t ld_pc = 0;
+    size_t sra_pc = 0;
+    const char *slot = NULL;
+    int conf = 0;
+    if (!zem_diag_hist_find_ret_truncation_for_reg(o->s, &ld_pc, &sra_pc, &slot,
+                                                   &conf)) {
+      continue;
+    }
+
+    fputs("diagnosis: likely pointer truncation due to wrong inferred width\n", out);
+    uint64_t end = (uint64_t)g_fail_span_addr + (uint64_t)g_fail_span_len;
+    if (conf >= 2 && sra_pc != 0) {
+      fprintf(out,
+              "  evidence: LD32* %s,(%s) at pc=%zu; sign-extended at pc=%zu; deref via (%s) at pc=%zu; span=[0x%08" PRIx32 ",0x%08" PRIx64 ") mem_len=%zu\n",
+              o->s, slot ? slot : "global___ret_*?", ld_pc, sra_pc, o->s,
+              fault_pc, g_fail_span_addr, end, g_fail_span_mem_len);
+    } else {
+      fprintf(out,
+              "  evidence: LD32* %s,(%s) at pc=%zu; deref via (%s) at pc=%zu; span=[0x%08" PRIx32 ",0x%08" PRIx64 ") mem_len=%zu\n",
+              o->s, slot ? slot : "global___ret_*?", ld_pc, o->s, fault_pc,
+              g_fail_span_addr, end, g_fail_span_mem_len);
+    }
+    fputs(
+        "  note: this often happens when a pointer-like value (e.g. return slot) is loaded as 32-bit and later used as an address\n",
+        out);
+    return;
+  }
 }
 
 static void zem_diag_try_print_bytes_obj(FILE *out, const zem_buf_t *mem,
@@ -762,6 +1218,9 @@ static int zem_exec_fail_at(size_t pc, const record_t *r,
       if (o->t != JOP_MEM || !o->base_is_reg || !o->s) continue;
       zem_diag_print_reg_chain(stderr, o->s, 4);
     }
+  }
+  if (r) {
+    zem_diag_maybe_print_width_bug_diagnosis(stderr, pc, r);
   }
   zem_diag_print_recent(stderr, 20);
   if (regs && mem) {
@@ -865,8 +1324,27 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   int rc = 0;
   const char **pc_labels = NULL;
   zem_op_t *ops = NULL;
+  uint64_t *cov_hits = NULL;
   zem_regs_t regs;
   memset(&regs, 0, sizeof(regs));
+
+  const int dbg_enabled = (dbg_cfg && dbg_cfg->enabled);
+  const int trace_enabled = (dbg_cfg && dbg_cfg->trace);
+  const int trace_mem_enabled = (dbg_cfg && dbg_cfg->trace_mem);
+  const int cov_enabled = (dbg_cfg && dbg_cfg->coverage);
+  const char *cov_out = dbg_cfg ? dbg_cfg->coverage_out : NULL;
+  const char *cov_merge = dbg_cfg ? dbg_cfg->coverage_merge : NULL;
+
+  FILE *repl_in = NULL;
+  int repl_no_prompt = 0;
+  int debug_events = 0;
+  int debug_events_only = 0;
+  if (dbg_cfg) {
+    repl_in = dbg_cfg->repl_in;
+    repl_no_prompt = dbg_cfg->repl_no_prompt;
+    debug_events = dbg_cfg->debug_events;
+    debug_events_only = dbg_cfg->debug_events_only;
+  }
 
   // Establish a simple bump heap above static data.
   if (!mem_align4(mem)) {
@@ -892,19 +1370,15 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   uint32_t stack[MAX_STACK];
   size_t sp = 0;
 
-  const int dbg_enabled = (dbg_cfg && dbg_cfg->enabled);
-  const int trace_enabled = (dbg_cfg && dbg_cfg->trace);
-  const int trace_mem_enabled = (dbg_cfg && dbg_cfg->trace_mem);
-
-  FILE *repl_in = NULL;
-  int repl_no_prompt = 0;
-  int debug_events = 0;
-  int debug_events_only = 0;
-  if (dbg_cfg) {
-    repl_in = dbg_cfg->repl_in;
-    repl_no_prompt = dbg_cfg->repl_no_prompt;
-    debug_events = dbg_cfg->debug_events;
-    debug_events_only = dbg_cfg->debug_events_only;
+  if (cov_enabled) {
+    cov_hits = (uint64_t *)calloc(recs->n ? recs->n : 1, sizeof(uint64_t));
+    if (!cov_hits) {
+      rc = zem_exec_fail_simple("OOM allocating coverage counters");
+      goto done;
+    }
+    if (cov_merge && *cov_merge) {
+      zem_cov_merge_jsonl(cov_hits, recs->n, cov_merge);
+    }
   }
 
   // Configure the global mem trace context for helper functions.
@@ -939,7 +1413,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   zem_bpcondset_t bpconds;
   memset(&bpconds, 0, sizeof(bpconds));
 
-  if (dbg_enabled) {
+  if (dbg_enabled || cov_enabled) {
     pc_labels = (const char **)calloc(recs->n ? recs->n : 1, sizeof(char *));
     if (!pc_labels) {
       rc = zem_exec_fail_simple("OOM building debug label map");
@@ -1007,6 +1481,10 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   while (pc < recs->n) {
     const record_t *r = &recs->v[pc];
     const zem_op_t op = ops[pc];
+
+    if (cov_enabled && r->k == JREC_INSTR) {
+      cov_hits[pc]++;
+    }
 
     // Clear any prior span failure so only the current fault reports it.
     g_fail_span_valid = 0;
@@ -3123,6 +3601,14 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   }
 
 done:
+  if (cov_enabled && cov_hits) {
+    const uint32_t blackholes_n = dbg_cfg ? dbg_cfg->coverage_blackholes_n : 0;
+    int cov_rc = zem_cov_write_jsonl(recs, pc_srcs, stdin_source_name, cov_hits,
+                                    recs->n, cov_out, debug_events_only,
+                                    blackholes_n);
+    if (cov_rc != 0 && rc == 0) rc = cov_rc;
+  }
+  if (cov_hits) free(cov_hits);
   g_fail_regprov = NULL;
   zem_bpcondset_clear(&bpconds);
   if (ops) free(ops);

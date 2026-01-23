@@ -60,7 +60,8 @@ static void print_caps(FILE *out) {
   // Collect exec selectors for a compact view.
   const zi_async_selector *exec_sel[64];
   size_t exec_n = 0;
-  for (size_t i = 0; i < total && exec_n < (sizeof(exec_sel) / sizeof(exec_sel[0])); i++) {
+  for (size_t i = 0;
+       i < total && exec_n < (sizeof(exec_sel) / sizeof(exec_sel[0])); i++) {
     const zi_async_selector *s = areg->selectors[i];
     if (!s || !s->cap_kind || !s->cap_name || !s->selector) continue;
     if (strcmp(s->cap_kind, "exec") == 0) {
@@ -76,77 +77,89 @@ static void print_caps(FILE *out) {
 }
 
 static void print_help(FILE *out) {
-  fprintf(out,
-          "zem — zasm IR v1.1 emulator (minimal)\n"
-          "\n"
-          "Usage:\n"
-          "  zem [--help] [--version] [--caps] [--trace] [--trace-mem]\n"
-          "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n"
-          "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n"
-          "      [--source-name NAME]\n"
-          "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n"
-          "      [--sniff] [--sniff-fatal]\n"
-          "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n"
-          "\n"
-          "Info:\n"
-          "  --caps            Print loaded host capabilities and registered selectors\n"
-          "  --                Stop option parsing; remaining args become guest argv\n"
-          "  --inherit-env      Snapshot host environment for zi_env_get_*\n"
-          "  --clear-env        Clear the env snapshot (default: empty)\n"
-          "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n"
-          "\n"
-          "Stream mode:\n"
-          "  If no input files are provided, zem reads the program IR JSONL from stdin\n"
-          "  (equivalent to specifying a single '-' input).\n"
-          "\n"
-          "Supported (subset):\n"
-          "  - Directives: DB, DW, RESB, STR\n"
-          "  - Instructions: LD, ADD, SUB, AND, OR, XOR, INC, DEC, CP, JR,\n"
-          "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n"
-          "  - Primitives (Zingcore ABI v2, preferred):\n"
-          "               CALL zi_abi_version   (HL=0x00020000)\n"
-          "               CALL zi_abi_features  (DE:HL = feature bits)\n"
-          "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n"
-          "               CALL zi_free          (HL=ptr, HL=rc)\n"
-          "               CALL zi_read          (HL=h, DE=dst_ptr64, BC=cap, HL=n_or_err)\n"
-          "               CALL zi_write         (HL=h, DE=src_ptr64, BC=len, HL=n_or_err)\n"
-          "               CALL zi_end           (HL=h, HL=rc)\n"
-          "               CALL zi_telemetry     (HL=topic_ptr64, DE=topic_len, BC=msg_ptr64, IX=msg_len, HL=rc)\n"
-          "               CALL zi_argc          (HL=argc)\n"
-          "               CALL zi_argv_len      (HL=i, HL=len_or_err)\n"
-          "               CALL zi_argv_copy     (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n"
-          "               CALL zi_env_get_len   (HL=key_ptr64, DE=key_len, HL=len_or_err)\n"
-          "               CALL zi_env_get_copy  (HL=key_ptr64, DE=key_len, BC=out_ptr64, IX=cap, HL=written_or_err)\n"
-          "\n"
-          "  - Legacy primitives (supported for older IR):\n"
-          "               CALL _out (HL=ptr, DE=len)\n"
-          "               CALL _in  (HL=ptr, DE=cap, HL=nread)\n"
-          "               CALL _log (HL=topic_ptr, DE=topic_len, BC=msg_ptr, IX=msg_len)\n"
-          "               CALL _alloc (HL=size, HL=ptr)\n"
-          "               CALL _free  (HL=ptr)\n"
-          "               CALL _ctl   (HL=req_ptr, DE=req_len, BC=resp_ptr, IX=resp_cap, HL=resp_len)\n"
-          "               CALL _cap   (HL=idx, HL=value)\n"
-          "\n"
-          "Debugging:\n"
-          "  --trace            Emit per-instruction JSONL events to stderr\n"
-          "                    (step events include CALL/RET metadata)\n"
-          "  --trace-mnemonic M  Only emit step events whose mnemonic == M (repeatable)\n"
-          "  --trace-pc N[..M]   Only emit step events with pc in [N, M] (inclusive)\n"
-          "  --trace-call-target T Only emit step events for CALLs with target == T (repeatable)\n"
-          "  --trace-sample N    Emit 1 out of every N step events (deterministic)\n"
-          "  --trace-mem         Emit memory read/write JSONL events to stderr\n"
-          "  --sniff             Proactively warn about suspicious runtime patterns\n"
-          "  --sniff-fatal       Like --sniff but stop execution on detection\n"
-          "  --break-pc N        Break when pc (record index) == N\n"
-          "  --break-label L     Break at label L (first instruction after label record)\n"
-          "  --debug             Interactive CLI debugger (break/step/regs/bt)\n"
-          "  --debug-script PATH Run debugger commands from PATH (no prompt; exit on EOF).\n"
-          "                    Note: --debug-script - reads debugger commands from stdin;\n"
-          "                    this cannot be combined with reading program IR JSONL from stdin\n"
-          "                    (either via '-' or via stream mode with no inputs).\n"
-          "  --debug-events      Emit JSONL dbg_stop events to stderr on each stop\n"
-          "  --debug-events-only Like --debug-events but suppress debugger text output\n"
-          "  --source-name NAME  Source name to report when reading program JSONL from stdin ('-')\n");
+  // Keep as separate string literals to avoid -Woverlength-strings warnings.
+  static const char *const help[] = {
+      "zem — zasm IR v1.1 emulator (minimal)\n",
+      "\n",
+      "Usage:\n",
+      "  zem [--help] [--version] [--caps] [--trace] [--trace-mem]\n",
+      "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
+      "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
+      "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
+      "      [--source-name NAME]\n",
+      "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
+      "      [--sniff] [--sniff-fatal]\n",
+      "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n",
+      "\n",
+      "Info:\n",
+      "  --caps            Print loaded host capabilities and registered selectors\n",
+      "  --                Stop option parsing; remaining args become guest argv\n",
+      "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
+      "  --clear-env        Clear the env snapshot (default: empty)\n",
+      "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n",
+      "\n",
+      "Stream mode:\n",
+      "  If no input files are provided, zem reads the program IR JSONL from stdin\n",
+      "  (equivalent to specifying a single '-' input).\n",
+      "\n",
+      "Supported (subset):\n",
+      "  - Directives: DB, DW, RESB, STR\n",
+      "  - Instructions: LD, ADD, SUB, AND, OR, XOR, INC, DEC, CP, JR,\n",
+      "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n",
+      "  - Primitives (Zingcore ABI v2, preferred):\n",
+      "               CALL zi_abi_version   (HL=0x00020000)\n",
+      "               CALL zi_abi_features  (DE:HL = feature bits)\n",
+      "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n",
+      "               CALL zi_free          (HL=ptr, HL=rc)\n",
+      "               CALL zi_read          (HL=h, DE=dst_ptr64, BC=cap, HL=n_or_err)\n",
+      "               CALL zi_write         (HL=h, DE=src_ptr64, BC=len, HL=n_or_err)\n",
+      "               CALL zi_end           (HL=h, HL=rc)\n",
+      "               CALL zi_telemetry     (HL=topic_ptr64, DE=topic_len, BC=msg_ptr64, IX=msg_len, HL=rc)\n",
+      "               CALL zi_argc          (HL=argc)\n",
+      "               CALL zi_argv_len      (HL=i, HL=len_or_err)\n",
+      "               CALL zi_argv_copy     (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n",
+      "               CALL zi_env_get_len   (HL=key_ptr64, DE=key_len, HL=len_or_err)\n",
+      "               CALL zi_env_get_copy  (HL=key_ptr64, DE=key_len, BC=out_ptr64, IX=cap, HL=written_or_err)\n",
+      "\n",
+      "  - Legacy primitives (supported for older IR):\n",
+      "               CALL _out (HL=ptr, DE=len)\n",
+      "               CALL _in  (HL=ptr, DE=cap, HL=nread)\n",
+      "               CALL _log (HL=topic_ptr, DE=topic_len, BC=msg_ptr, IX=msg_len)\n",
+      "               CALL _alloc (HL=size, HL=ptr)\n",
+      "               CALL _free  (HL=ptr)\n",
+      "               CALL _ctl   (HL=req_ptr, DE=req_len, BC=resp_ptr, IX=resp_cap, HL=resp_len)\n",
+      "               CALL _cap   (HL=idx, HL=value)\n",
+      "\n",
+      "Debugging:\n",
+      "  --trace            Emit per-instruction JSONL events to stderr\n",
+      "                    (step events include CALL/RET metadata)\n",
+      "  --coverage         Record per-PC hit counts and emit a coverage report\n",
+      "  --coverage-out PATH Write coverage JSONL to PATH\n",
+      "  --coverage-merge PATH Merge existing coverage JSONL from PATH into this run\n",
+      "  --coverage-blackholes N Print top-N labels with uncovered instructions\n",
+      "  --trace-mnemonic M  Only emit step events whose mnemonic == M (repeatable)\n",
+      "  --trace-pc N[..M]   Only emit step events with pc in [N, M] (inclusive)\n",
+      "  --trace-call-target T Only emit step events for CALLs with target == T (repeatable)\n",
+      "  --trace-sample N    Emit 1 out of every N step events (deterministic)\n",
+      "  --trace-mem         Emit memory read/write JSONL events to stderr\n",
+      "  --sniff             Proactively warn about suspicious runtime patterns\n",
+      "  --sniff-fatal       Like --sniff but stop execution on detection\n",
+      "  --break-pc N        Break when pc (record index) == N\n",
+      "  --break-label L     Break at label L (first instruction after label record)\n",
+      "  --debug             Interactive CLI debugger (break/step/regs/bt)\n",
+      "  --debug-script PATH Run debugger commands from PATH (no prompt; exit on EOF).\n",
+      "                    Note: --debug-script - reads debugger commands from stdin;\n",
+      "                    this cannot be combined with reading program IR JSONL from stdin\n",
+      "                    (either via '-' or via stream mode with no inputs).\n",
+      "  --debug-events      Emit JSONL dbg_stop events to stderr on each stop\n",
+      "  --debug-events-only Like --debug-events but suppress debugger text output\n",
+      "                    and suppresses zem lifecycle telemetry.\n",
+      "  --source-name NAME  Source name to report when reading program JSONL from stdin ('-')\n",
+  };
+
+  for (size_t i = 0; i < (sizeof(help) / sizeof(help[0])); i++) {
+    fputs(help[i], out);
+  }
 }
 
 static int proc_env_put(zem_proc_t *p, const char *key, uint32_t key_len,
@@ -247,6 +260,43 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[i], "--trace") == 0) {
       dbg.trace = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--coverage") == 0) {
+      dbg.coverage = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--coverage-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--coverage-out requires a path");
+      }
+      dbg.coverage = 1;
+      dbg.coverage_out = argv[++i];
+      if (!dbg.coverage_out || !*dbg.coverage_out) {
+        return zem_failf("bad --coverage-out value");
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--coverage-merge") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--coverage-merge requires a path");
+      }
+      dbg.coverage = 1;
+      dbg.coverage_merge = argv[++i];
+      if (!dbg.coverage_merge || !*dbg.coverage_merge) {
+        return zem_failf("bad --coverage-merge value");
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--coverage-blackholes") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--coverage-blackholes requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --coverage-blackholes value");
+      dbg.coverage = 1;
+      dbg.coverage_blackholes_n = (uint32_t)v;
       continue;
     }
     if (strcmp(argv[i], "--trace-mnemonic") == 0) {
@@ -446,6 +496,14 @@ int main(int argc, char **argv) {
 
   if (program_uses_stdin && dbg_script == stdin) {
     return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
+  }
+
+  if (dbg.debug_events_only && dbg.coverage && !dbg.coverage_out) {
+    return zem_failf("--coverage requires --coverage-out when using --debug-events-only");
+  }
+
+  if (dbg.debug_events_only && dbg.coverage_blackholes_n) {
+    return zem_failf("--coverage-blackholes cannot be used with --debug-events-only");
   }
 
   if (!dbg.debug_events_only) {

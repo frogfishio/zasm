@@ -53,4 +53,11 @@ if ! grep -q "sniff: possible pointer truncation" "$err"; then
   exit 1
 fi
 
+if ! grep -q "diagnosis: likely pointer truncation" "$err"; then
+  echo "missing trap diagnosis" >&2
+  echo "stderr:" >&2
+  head -n 120 "$err" >&2
+  exit 1
+fi
+
 echo "ok"
