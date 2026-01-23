@@ -123,6 +123,29 @@ The coverage report is line-delimited JSON (JSONL). Record keys:
   - `bytes_in`: approximate input JSONL bytes processed
   - `bytes_out`: bytes written in the output JSONL
 
+- `k == "zem_rep"` (repetition / bloat summary)
+  - `v`: schema version (currently `1`)
+  - `mode`: repetition tokenization mode (`"exact"` or `"shape"`)
+  - `n`: n-gram length
+  - `path`: input path (string)
+  - `lines`: number of lines read
+  - `instr`: number of instruction records observed
+  - `unique_ngrams`: unique n-grams observed
+  - `repeated_ngrams`: n-grams with count > 1
+  - `best_ngram_saved_instr_est`: heuristic outline savings estimate (instr)
+  - `bloat_score`: `dead_by_profile_instr + best_ngram_saved_instr_est`
+
+- `k == "zem_rep_cov"` (optional repetition/coverage enrichment)
+  - `v`: schema version (currently `1`)
+  - `total_instr`: from coverage summary
+  - `covered_instr`: from coverage summary
+  - `blackhole_labels`: number of labels with uncovered instructions
+
+Notes:
+
+- This is a C implementation intended to eventually replace the Python repetition scan for CI/one-binary workflows.
+- The detailed “top repeated n-grams” report (`zem_rep_ngram`) is not emitted yet.
+
 ### Requirements
 
 - Stable schema (versioned) for downstream tooling.

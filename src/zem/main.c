@@ -23,6 +23,7 @@
 #include "zem_debug.h"
 #include "zem_exec.h"
 #include "zem_host.h"
+#include "zem_rep.h"
 #include "zem_strip.h"
 #include "zem_util.h"
 
@@ -87,6 +88,7 @@ static void print_help(FILE *out) {
       "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
       "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
       "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
+      "      [--rep-scan --rep-n N --rep-mode MODE --rep-out PATH [--rep-coverage-jsonl PATH] [--rep-diag]]\n",
       "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
       "      [--source-name NAME]\n",
       "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
@@ -100,6 +102,12 @@ static void print_help(FILE *out) {
       "  --strip-profile PATH Coverage JSONL produced by --coverage-out\n",
       "  --strip-out PATH   Write stripped IR JSONL to PATH (default: stdout)\n",
       "  --strip-stats-out PATH Write strip stats JSONL to PATH (or '-' for stderr)\n",
+      "  --rep-scan         Analyze IR JSONL for repetition (no execution)\n",
+      "  --rep-n N          N-gram length (e.g. 8)\n",
+      "  --rep-mode MODE    MODE: exact | shape\n",
+      "  --rep-out PATH     Write repetition report JSONL to PATH (or '-' for stdout)\n",
+      "  --rep-coverage-jsonl PATH Optional coverage JSONL to enrich bloat score\n",
+      "  --rep-diag         Print one-line bloat_diag summary to stdout\n",
       "  --                Stop option parsing; remaining args become guest argv\n",
       "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
       "  --clear-env        Clear the env snapshot (default: empty)\n",
@@ -210,6 +218,13 @@ int main(int argc, char **argv) {
   const char *strip_out = NULL;
   const char *strip_stats_out = NULL;
 
+  int rep_scan = 0;
+  int rep_diag = 0;
+  int rep_n = 8;
+  const char *rep_mode = "shape";
+  const char *rep_out = NULL;
+  const char *rep_cov = NULL;
+
   zem_proc_t proc;
   memset(&proc, 0, sizeof(proc));
 
@@ -272,6 +287,45 @@ int main(int argc, char **argv) {
         return zem_failf("--strip-stats-out requires a path");
       }
       strip_stats_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-scan") == 0) {
+      rep_scan = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-diag") == 0) {
+      rep_diag = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-n") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--rep-n requires a number");
+      }
+      char *end = NULL;
+      long v = strtol(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --rep-n value");
+      rep_n = (int)v;
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-mode") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--rep-mode requires a value");
+      }
+      rep_mode = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--rep-out requires a path");
+      }
+      rep_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--rep-coverage-jsonl") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--rep-coverage-jsonl requires a path");
+      }
+      rep_cov = argv[++i];
       continue;
     }
     if (strcmp(argv[i], "--clear-env") == 0) {
@@ -546,6 +600,10 @@ int main(int argc, char **argv) {
     return zem_failf("--coverage-blackholes cannot be used with --debug-events-only");
   }
 
+  if (rep_scan && strip_mode) {
+    return zem_failf("--rep-scan cannot be combined with --strip");
+  }
+
   if (strip_mode) {
     if (!strip_profile) {
       return zem_failf("--strip requires --strip-profile");
@@ -555,6 +613,15 @@ int main(int argc, char **argv) {
     }
     return zem_strip_program(strip_mode, inputs, ninputs, strip_profile, strip_out,
                              strip_stats_out);
+  }
+
+  if (rep_scan) {
+    if (!rep_out) rep_out = "-";
+    if (program_uses_stdin && dbg_script == stdin) {
+      return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
+    }
+    return zem_rep_scan_program(inputs, ninputs, rep_n, rep_mode, rep_cov, rep_out,
+                                rep_diag);
   }
 
   if (!dbg.debug_events_only) {

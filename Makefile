@@ -244,6 +244,7 @@ test-validation: test-zem-sniff-ret-trunc
 test-validation: test-zem-diag-ret-trunc-ld32s64
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
+test-validation: test-zem-rep-scan
 test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
 
@@ -289,6 +290,9 @@ test-zem-coverage-smoke: zas zem
 
 test-zem-coverage-blackholes: zas zem
 	sh test/zem_coverage_blackholes.sh
+
+test-zem-rep-scan: zem
+	sh test/zem_rep_scan.sh
 
 test-zem-caps: zem
 	sh test/zem_caps.sh
@@ -656,6 +660,7 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
 	$(ZEM_BUILD)/zem_debug.o \
 	$(ZEM_BUILD)/zem_exec.o \
+	$(ZEM_BUILD)/zem_rep.o \
 	$(ZEM_BUILD)/zem_strip.o \
 	$(ZEM_BUILD)/zem_hash.o \
 	$(ZEM_BUILD)/zem_mem.o \
