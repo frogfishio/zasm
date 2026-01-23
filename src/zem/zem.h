@@ -23,6 +23,20 @@ typedef struct {
   size_t cap;
 } zem_symtab_t;
 
+// Guest process snapshot (argv/env) for ABI v2.1 proc syscalls.
+// All pointers are borrowed and must remain valid for the duration of execution.
+typedef struct {
+  const char *argv[256];
+  uint32_t argc;
+  struct {
+    const char *key;
+    uint32_t key_len;
+    const char *val;
+    uint32_t val_len;
+  } env[256];
+  uint32_t envc;
+} zem_proc_t;
+
 void zem_symtab_init(zem_symtab_t *t);
 void zem_symtab_free(zem_symtab_t *t);
 int zem_symtab_put(zem_symtab_t *t, const char *name, int is_ptr, uint32_t u32);

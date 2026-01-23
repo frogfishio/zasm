@@ -551,6 +551,7 @@ static int op_to_u64(const zem_symtab_t *syms, const zem_regs_t *regs,
 int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                      const zem_symtab_t *syms, const zem_symtab_t *labels,
                      const zem_dbg_cfg_t *dbg_cfg, const char *const *pc_srcs,
+                     const zem_proc_t *proc,
                      const char *stdin_source_name) {
   int rc = 0;
   const char **pc_labels = NULL;
@@ -1808,7 +1809,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
         // Minimal feature bits exposed by zem.
         // u64 return uses (DE:HL) as (hi32:lo32).
-        const uint64_t feats = (1ull << 2); // ZI_FEAT_TIME
+        const uint64_t feats = (1ull << 2) /* ZI_FEAT_TIME */ |
+                               (1ull << 4) /* ZI_FEAT_PROC */;
         regs.HL = (uint64_t)(uint32_t)(feats & 0xffffffffu);
         regs.DE = (uint64_t)(uint32_t)(feats >> 32);
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -1966,6 +1968,204 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         telemetry((const char *)(mem->bytes + topic_ptr), (int32_t)topic_len,
                   (const char *)(mem->bytes + msg_ptr), (int32_t)msg_len);
         regs.HL = (uint64_t)ZI_OK;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+
+      // proc/default (argv/env) — ABI v2.1
+      if (strcmp(callee, "zi_argc") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        regs.HL = (uint64_t)(proc ? proc->argc : 0u);
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_argv_len") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint32_t index = 0;
+        if (!zabi_u32_from_u64(regs.HL, &index)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        if (!proc || index >= proc->argc || !proc->argv[index]) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_NOENT;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        size_t n = strlen(proc->argv[index]);
+        if (n > INT32_MAX) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+        } else {
+          regs.HL = (uint64_t)(uint32_t)(int32_t)n;
+        }
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_argv_copy") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint32_t index = 0;
+        uint32_t out_ptr = 0;
+        uint32_t out_cap_u = 0;
+        if (!zabi_u32_from_u64(regs.HL, &index) ||
+            !zabi_u32_from_u64(regs.DE, &out_ptr) ||
+            !zabi_u32_from_u64(regs.BC, &out_cap_u)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        int32_t out_cap = (int32_t)out_cap_u;
+        if (out_cap < 0) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        if (!proc || index >= proc->argc || !proc->argv[index]) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_NOENT;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        size_t n = strlen(proc->argv[index]);
+        if (n > (size_t)out_cap) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        if (!mem_check_span(mem, out_ptr, (uint32_t)n)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        memcpy(mem->bytes + out_ptr, proc->argv[index], n);
+        zem_watchset_note_write(&watches, out_ptr, (uint32_t)n, (uint32_t)pc,
+                                cur_label, r->line);
+        regs.HL = (uint64_t)(uint32_t)(int32_t)n;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_env_get_len") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint32_t key_ptr = 0;
+        uint32_t key_len_u = 0;
+        if (!zabi_u32_from_u64(regs.HL, &key_ptr) ||
+            !zabi_u32_from_u64(regs.DE, &key_len_u)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        int32_t key_len = (int32_t)key_len_u;
+        if (key_len < 0 || !mem_check_span(mem, key_ptr, (uint32_t)key_len)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        int32_t rc = ZI_E_NOENT;
+        if (proc) {
+          const uint8_t *k = mem->bytes + key_ptr;
+          for (uint32_t i = 0; i < proc->envc; i++) {
+            if (proc->env[i].key_len != (uint32_t)key_len) continue;
+            if (memcmp(proc->env[i].key, k, (size_t)key_len) == 0) {
+              rc = (int32_t)proc->env[i].val_len;
+              break;
+            }
+          }
+        }
+        regs.HL = (uint64_t)(uint32_t)rc;
+        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                         r->m);
+        pc++;
+        continue;
+      }
+      if (strcmp(callee, "zi_env_get_copy") == 0) {
+        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
+        uint32_t key_ptr = 0;
+        uint32_t key_len_u = 0;
+        uint32_t out_ptr = 0;
+        uint32_t out_cap_u = 0;
+        if (!zabi_u32_from_u64(regs.HL, &key_ptr) ||
+            !zabi_u32_from_u64(regs.DE, &key_len_u) ||
+            !zabi_u32_from_u64(regs.BC, &out_ptr) ||
+            !zabi_u32_from_u64(regs.IX, &out_cap_u)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        int32_t key_len = (int32_t)key_len_u;
+        int32_t out_cap = (int32_t)out_cap_u;
+        if (key_len < 0 || out_cap < 0 ||
+            !mem_check_span(mem, key_ptr, (uint32_t)key_len)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+
+        const char *val = NULL;
+        uint32_t val_len = 0;
+        if (proc) {
+          const uint8_t *k = mem->bytes + key_ptr;
+          for (uint32_t i = 0; i < proc->envc; i++) {
+            if (proc->env[i].key_len != (uint32_t)key_len) continue;
+            if (memcmp(proc->env[i].key, k, (size_t)key_len) == 0) {
+              val = proc->env[i].val;
+              val_len = proc->env[i].val_len;
+              break;
+            }
+          }
+        }
+        if (!val) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_NOENT;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        if (val_len > (uint32_t)out_cap) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        if (!mem_check_span(mem, out_ptr, val_len)) {
+          regs.HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+          zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label,
+                           r->line, r->m);
+          pc++;
+          continue;
+        }
+        memcpy(mem->bytes + out_ptr, val, (size_t)val_len);
+        zem_watchset_note_write(&watches, out_ptr, val_len, (uint32_t)pc,
+                                cur_label, r->line);
+        regs.HL = (uint64_t)(uint32_t)(int32_t)val_len;
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                          r->m);
         pc++;

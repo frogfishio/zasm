@@ -85,9 +85,14 @@ static void print_help(FILE *out) {
           "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n"
           "      [--source-name NAME]\n"
           "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n"
+          "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n"
           "\n"
           "Info:\n"
           "  --caps            Print loaded host capabilities and registered selectors\n"
+          "  --                Stop option parsing; remaining args become guest argv\n"
+          "  --inherit-env      Snapshot host environment for zi_env_get_*\n"
+          "  --clear-env        Clear the env snapshot (default: empty)\n"
+          "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n"
           "\n"
           "Stream mode:\n"
           "  If no input files are provided, zem reads the program IR JSONL from stdin\n"
@@ -99,12 +104,18 @@ static void print_help(FILE *out) {
           "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n"
           "  - Primitives (Zingcore ABI v2, preferred):\n"
           "               CALL zi_abi_version   (HL=0x00020000)\n"
+          "               CALL zi_abi_features  (DE:HL = feature bits)\n"
           "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n"
           "               CALL zi_free          (HL=ptr, HL=rc)\n"
           "               CALL zi_read          (HL=h, DE=dst_ptr64, BC=cap, HL=n_or_err)\n"
           "               CALL zi_write         (HL=h, DE=src_ptr64, BC=len, HL=n_or_err)\n"
           "               CALL zi_end           (HL=h, HL=rc)\n"
           "               CALL zi_telemetry     (HL=topic_ptr64, DE=topic_len, BC=msg_ptr64, IX=msg_len, HL=rc)\n"
+          "               CALL zi_argc          (HL=argc)\n"
+          "               CALL zi_argv_len      (HL=i, HL=len_or_err)\n"
+          "               CALL zi_argv_copy     (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n"
+          "               CALL zi_env_get_len   (HL=key_ptr64, DE=key_len, HL=len_or_err)\n"
+          "               CALL zi_env_get_copy  (HL=key_ptr64, DE=key_len, BC=out_ptr64, IX=cap, HL=written_or_err)\n"
           "\n"
           "  - Legacy primitives (supported for older IR):\n"
           "               CALL _out (HL=ptr, DE=len)\n"
@@ -135,9 +146,44 @@ static void print_help(FILE *out) {
           "  --source-name NAME  Source name to report when reading program JSONL from stdin ('-')\n");
 }
 
+static int proc_env_put(zem_proc_t *p, const char *key, uint32_t key_len,
+                        const char *val, uint32_t val_len) {
+  if (!p || !key) return 0;
+  for (uint32_t i = 0; i < p->envc; i++) {
+    if (p->env[i].key_len == key_len &&
+        memcmp(p->env[i].key, key, key_len) == 0) {
+      p->env[i].val = val;
+      p->env[i].val_len = val_len;
+      return 1;
+    }
+  }
+  if (p->envc >= (uint32_t)(sizeof(p->env) / sizeof(p->env[0]))) return 0;
+  p->env[p->envc].key = key;
+  p->env[p->envc].key_len = key_len;
+  p->env[p->envc].val = val;
+  p->env[p->envc].val_len = val_len;
+  p->envc++;
+  return 1;
+}
+
+static int proc_env_put_kv(zem_proc_t *p, const char *kv) {
+  if (!p || !kv) return 0;
+  const char *eq = strchr(kv, '=');
+  if (!eq) return 0;
+  size_t klen = (size_t)(eq - kv);
+  if (klen == 0 || klen > UINT32_MAX) return 0;
+  const char *v = eq + 1;
+  size_t vlen = strlen(v);
+  if (vlen > UINT32_MAX) return 0;
+  return proc_env_put(p, kv, (uint32_t)klen, v, (uint32_t)vlen);
+}
+
 int main(int argc, char **argv) {
   const char *inputs[256];
   int ninputs = 0;
+
+  zem_proc_t proc;
+  memset(&proc, 0, sizeof(proc));
 
   zem_dbg_cfg_t dbg;
   memset(&dbg, 0, sizeof(dbg));
@@ -148,6 +194,16 @@ int main(int argc, char **argv) {
   int program_uses_stdin = 0;
 
   for (int i = 1; i < argc; i++) {
+    if (strcmp(argv[i], "--") == 0) {
+      // Remaining args become guest argv.
+      for (int j = i + 1; j < argc; j++) {
+        if (proc.argc >= (uint32_t)(sizeof(proc.argv) / sizeof(proc.argv[0]))) {
+          return zem_failf("too many guest args (after --)");
+        }
+        proc.argv[proc.argc++] = argv[j];
+      }
+      break;
+    }
     if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
       print_help(stdout);
       return 0;
@@ -161,6 +217,30 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--caps") == 0) {
       print_caps(stdout);
       return 0;
+    }
+    if (strcmp(argv[i], "--clear-env") == 0) {
+      proc.envc = 0;
+      continue;
+    }
+    if (strcmp(argv[i], "--inherit-env") == 0) {
+      extern char **environ;
+      if (environ) {
+        for (char **ep = environ; *ep; ep++) {
+          // Best effort; ignore malformed entries.
+          (void)proc_env_put_kv(&proc, *ep);
+        }
+      }
+      continue;
+    }
+    if (strcmp(argv[i], "--env") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--env requires KEY=VAL");
+      }
+      const char *kv = argv[++i];
+      if (!kv || !*kv || !proc_env_put_kv(&proc, kv)) {
+        return zem_failf("bad --env value (expected KEY=VAL)");
+      }
+      continue;
     }
     if (strcmp(argv[i], "--trace") == 0) {
       dbg.trace = 1;
@@ -423,7 +503,7 @@ int main(int argc, char **argv) {
     }
   }
 
-  rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs,
+  rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs, &proc,
                         stdin_source_name);
 
   if (dbg_script && dbg_script != stdin) {
