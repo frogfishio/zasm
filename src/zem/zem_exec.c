@@ -16,6 +16,7 @@
 #include "zem_host.h"
 #include "zem_mem.h"
 #include "zem_op.h"
+#include "zem_hash.h"
 #include "zem_trace.h"
 #include "zem_util.h"
 
@@ -337,6 +338,10 @@ static int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,
                               uint32_t blackholes_n) {
   if (!recs || !hits || nhits == 0) return 2;
 
+  const uint64_t module_hash = zem_ir_module_hash(recs);
+  char module_hash_s[32];
+  snprintf(module_hash_s, sizeof(module_hash_s), "fnv1a64:%016" PRIx64, module_hash);
+
   FILE *out = NULL;
   if (out_path && *out_path) {
     out = fopen(out_path, "wb");
@@ -415,6 +420,8 @@ static int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,
     fprintf(out, "%" PRIu64, steps);
     fputs(",\"stdin_source_name\":", out);
     zem_cov_json_write_str(out, stdin_source_name);
+    fputs(",\"module_hash\":", out);
+    zem_cov_json_write_str(out, module_hash_s);
     fputs("}\n", out);
 
     cur_label = NULL;

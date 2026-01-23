@@ -23,6 +23,7 @@
 #include "zem_debug.h"
 #include "zem_exec.h"
 #include "zem_host.h"
+#include "zem_strip.h"
 #include "zem_util.h"
 
 // Optional: query the host-side capability registry (if linked).
@@ -85,6 +86,7 @@ static void print_help(FILE *out) {
       "  zem [--help] [--version] [--caps] [--trace] [--trace-mem]\n",
       "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
       "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
+      "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
       "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
       "      [--source-name NAME]\n",
       "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
@@ -93,6 +95,11 @@ static void print_help(FILE *out) {
       "\n",
       "Info:\n",
       "  --caps            Print loaded host capabilities and registered selectors\n",
+      "  --strip MODE       Rewrite IR JSONL using a coverage profile (no execution)\n",
+      "                    MODE: uncovered-ret | uncovered-delete\n",
+      "  --strip-profile PATH Coverage JSONL produced by --coverage-out\n",
+      "  --strip-out PATH   Write stripped IR JSONL to PATH (default: stdout)\n",
+      "  --strip-stats-out PATH Write strip stats JSONL to PATH (or '-' for stderr)\n",
       "  --                Stop option parsing; remaining args become guest argv\n",
       "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
       "  --clear-env        Clear the env snapshot (default: empty)\n",
@@ -198,6 +205,11 @@ int main(int argc, char **argv) {
   const char *inputs[256];
   int ninputs = 0;
 
+  const char *strip_mode = NULL;
+  const char *strip_profile = NULL;
+  const char *strip_out = NULL;
+  const char *strip_stats_out = NULL;
+
   zem_proc_t proc;
   memset(&proc, 0, sizeof(proc));
 
@@ -233,6 +245,34 @@ int main(int argc, char **argv) {
     if (strcmp(argv[i], "--caps") == 0) {
       print_caps(stdout);
       return 0;
+    }
+    if (strcmp(argv[i], "--strip") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--strip requires a mode");
+      }
+      strip_mode = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--strip-profile") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--strip-profile requires a path");
+      }
+      strip_profile = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--strip-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--strip-out requires a path");
+      }
+      strip_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--strip-stats-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--strip-stats-out requires a path");
+      }
+      strip_stats_out = argv[++i];
+      continue;
     }
     if (strcmp(argv[i], "--clear-env") == 0) {
       proc.envc = 0;
@@ -504,6 +544,17 @@ int main(int argc, char **argv) {
 
   if (dbg.debug_events_only && dbg.coverage_blackholes_n) {
     return zem_failf("--coverage-blackholes cannot be used with --debug-events-only");
+  }
+
+  if (strip_mode) {
+    if (!strip_profile) {
+      return zem_failf("--strip requires --strip-profile");
+    }
+    if (program_uses_stdin && dbg_script == stdin) {
+      return zem_failf("cannot read program IR from stdin while --debug-script - uses stdin");
+    }
+    return zem_strip_program(strip_mode, inputs, ninputs, strip_profile, strip_out,
+                             strip_stats_out);
   }
 
   if (!dbg.debug_events_only) {

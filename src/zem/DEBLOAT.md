@@ -89,6 +89,8 @@ The coverage report is line-delimited JSON (JSONL). Record keys:
   - `covered_instr`: instruction records with `count > 0`
   - `steps`: total instruction steps executed
   - `stdin_source_name`: source name for stdin inputs (string or `null`)
+  - `module_hash`: stable identity for the loaded IR (string)
+    - format: `fnv1a64:0123456789abcdef`
 
 - `k == "zem_cov_rec"` (per-PC instruction record)
   - `pc`: IR record index (0-based)
@@ -105,6 +107,22 @@ The coverage report is line-delimited JSON (JSONL). Record keys:
   - `uncovered_instr`: `total_instr - covered_instr`
   - `first_pc`: first IR record index where this label appears
 
+- `k == "zem_strip"` (strip-stage metrics)
+  - `v`: schema version (currently `1`)
+  - `mode`: strip mode (string)
+  - `profile`: coverage JSONL path used (string)
+  - `profile_module_hash`: module hash read from the coverage summary (string)
+  - `in_module_hash`: module hash of the input IR (string)
+  - `out_module_hash`: module hash of the output IR (string)
+  - `nrecs`: number of IR records loaded
+  - `total_instr`: number of instruction records
+  - `covered_instr`: instruction records with `count > 0` in the profile
+  - `dead_by_profile_instr`: `total_instr - covered_instr`
+  - `changed_instr`: number of instruction records rewritten by the strip pass
+  - `removed_instr`: number of instruction records deleted by the strip pass
+  - `bytes_in`: approximate input JSONL bytes processed
+  - `bytes_out`: bytes written in the output JSONL
+
 ### Requirements
 
 - Stable schema (versioned) for downstream tooling.
@@ -119,7 +137,7 @@ The current schema is intentionally simple and already useful, but downstream de
 
 Additions worth doing before `--strip` becomes real:
 
-- Add a stable `module_hash` (or equivalent) to the summary record so we can reject applying coverage to the wrong program.
+- `module_hash` is now implemented in `zem_cov` and should be treated as *required* for coverage-guided strip/debloat passes.
 - (Optional) Add `build_id` / tool version strings for auditability.
 
 Notes:
@@ -312,6 +330,13 @@ Recommendation:
 
 These flags are conceptual; final spelling can change.
 
+Current implementation (conservative stage) uses:
+
+- `--strip MODE` (currently: `uncovered-ret`)
+- `--strip-profile PATH` (coverage JSONL; must match `module_hash`)
+- `--strip-out PATH` (stripped IR JSONL)
+- `--strip-stats-out PATH` (optional JSONL metrics; use `-` to write to stderr)
+
 - `--coverage ...` (already exists)
 - `--coverage-out PATH` (already exists)
 - `--strip PATH_TO_COVERAGE` (apply debloat using coverage)
@@ -356,3 +381,46 @@ This is how we keep it "killer" without making it a foot-gun.
 4) Implement `--strip=uncovered` as trap-stubbing.
 5) Implement `--strip=repetitious=func` (ICF).
 6) Consider tail-merge / outlining as optional advanced passes.
+
+---
+
+## Recommended experiment fixture: `hello.zir.jsonl`
+
+There is a deliberately “degenerate” but extremely useful fixture:
+
+- `src/zem/testdata2/hello.zir.jsonl` (~18MB JSONL)
+
+It behaves like a “hello world” program, but brings along a large amount of IR.
+That makes it a great patsy for aggressive experiments:
+
+- coverage-driven stripping (`uncovered` modes)
+- repetition detection / dedup heuristics (`repetitious` modes)
+
+Local harness:
+
+- `make test-zem-debloat-hello-big`
+
+The harness writes reports to stable paths under `/tmp/`:
+
+- `/tmp/zem_debloat_hello_big.coverage.jsonl`
+- `/tmp/zem_debloat_hello_big.repetition.jsonl`
+- `/tmp/zem_debloat_hello_big.report.html`
+
+This target is **not** part of `test-all`/`test-validation` because it is intentionally heavy and intended for local iteration.
+
+### Repetition + coverage diagnosis tooling
+
+There is a small analysis tool for repetition detection:
+
+```sh
+python3 tools/zem_repetition_scan.py src/zem/testdata2/hello.zir.jsonl \
+  --n 8 --mode shape \
+  --coverage-jsonl /tmp/zem.coverage.jsonl \
+  --report-jsonl /tmp/zem.repetition.jsonl \
+  --report-html /tmp/zem.debloat.html \
+  --diag
+```
+
+- `--report-jsonl` writes a machine-readable report suitable for future `--strip=repetitious` planning.
+- `--report-html` writes a self-contained HTML report (pie charts + top tables for blackhole labels and repeated n-grams).
+- `--diag` prints a one-line bloat diagnosis (coverage %s, blackhole %, repetition signals, and a trendable `bloat_score`).

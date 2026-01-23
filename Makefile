@@ -244,6 +244,13 @@ test-validation: test-zem-sniff-ret-trunc
 test-validation: test-zem-diag-ret-trunc-ld32s64
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
+test-validation: test-zem-strip-uncovered-ret
+test-validation: test-zem-strip-uncovered-delete
+
+# Experimental / local-only debloat playground (large fixture).
+# Not included in test-all/test-validation.
+test-zem-debloat-hello-big: zem
+	sh test/zem_debloat_hello_big.sh
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -285,6 +292,12 @@ test-zem-coverage-blackholes: zas zem
 
 test-zem-caps: zem
 	sh test/zem_caps.sh
+
+test-zem-strip-uncovered-ret: zas zem
+	sh test/zem_strip_uncovered_ret.sh
+
+test-zem-strip-uncovered-delete: zas zem
+	sh test/zem_strip_uncovered_delete.sh
 
 test-zas-opcodes-directives: zas zop
 	sh test/zas_opcodes_directives.sh
@@ -643,6 +656,8 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
 	$(ZEM_BUILD)/zem_debug.o \
 	$(ZEM_BUILD)/zem_exec.o \
+	$(ZEM_BUILD)/zem_strip.o \
+	$(ZEM_BUILD)/zem_hash.o \
 	$(ZEM_BUILD)/zem_mem.o \
 	$(ZEM_BUILD)/zem_heap.o \
 	$(ZEM_BUILD)/zem_op.o \
