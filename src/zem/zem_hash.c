@@ -18,6 +18,11 @@ static uint64_t fnv1a64_update(uint64_t h, const void *data, size_t n) {
 
 uint64_t zem_fnv1a64_init(void) { return 14695981039346656037ull; }
 
+uint64_t zem_hash64_fnv1a(const void *data, size_t len) {
+  if (!data || len == 0) return zem_fnv1a64_init();
+  return fnv1a64_update(zem_fnv1a64_init(), data, len);
+}
+
 static uint64_t fnv_u8(uint64_t h, uint8_t v) { return fnv1a64_update(h, &v, 1); }
 
 static uint64_t fnv_u32le(uint64_t h, uint32_t v) {

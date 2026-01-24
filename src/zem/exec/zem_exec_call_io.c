@@ -11,6 +11,22 @@
 
 #include "zem_host.h"
 
+static int32_t req_read_maybe_captured(const zem_proc_t *proc, uint32_t *pos,
+                                      int32_t handle, void *ptr, size_t cap) {
+  if (handle == 0 && proc && proc->stdin_bytes && pos) {
+    uint32_t p = *pos;
+    uint32_t n = 0;
+    if (p < proc->stdin_len && cap) {
+      uint32_t avail = proc->stdin_len - p;
+      n = (uint32_t)((avail < cap) ? avail : cap);
+      memcpy(ptr, proc->stdin_bytes + p, (size_t)n);
+      *pos = p + n;
+    }
+    return (int32_t)n;
+  }
+  return req_read(handle, ptr, cap);
+}
+
 int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   if (!ctx || !r) return 0;
   if (op != ZEM_OP_CALL) return 0;
@@ -67,7 +83,8 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
       eff_cap = chunk;
     }
-    int32_t n = req_read(0, mem->bytes + ptr, (size_t)eff_cap);
+    int32_t n = req_read_maybe_captured(ctx->proc, ctx->stdin_pos, 0,
+                                        mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
       uint32_t wlen = (uint32_t)n;
       if (wlen > eff_cap) wlen = eff_cap;
@@ -165,7 +182,8 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
       eff_cap = chunk;
     }
-    int32_t n = req_read(handle, mem->bytes + ptr, (size_t)eff_cap);
+    int32_t n = req_read_maybe_captured(ctx->proc, ctx->stdin_pos, handle,
+                                        mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
       uint32_t wlen = (uint32_t)n;
       if (wlen > eff_cap) wlen = eff_cap;

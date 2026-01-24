@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "jsonl.h" // record_t, recvec_t
@@ -27,6 +28,9 @@ uint64_t zem_ir_module_hash_update(uint64_t h, const record_t *r);
 
 // Return the FNV-1a 64-bit offset basis.
 uint64_t zem_fnv1a64_init(void);
+
+// Hash arbitrary bytes with FNV-1a 64-bit.
+uint64_t zem_hash64_fnv1a(const void *data, size_t len);
 
 #ifdef __cplusplus
 }

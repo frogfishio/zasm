@@ -169,6 +169,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   zem_trace_meta_t trace_meta;
   int prev_iter_executed = 0;
 
+  uint32_t stdin_pos = 0;
+
   size_t pc = 0;
   zem_watchset_t watches;
   memset(&watches, 0, sizeof(watches));
@@ -199,6 +201,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   ctx.pc_srcs = pc_srcs;
   ctx.proc = proc;
   ctx.stdin_source_name = stdin_source_name;
+  ctx.stdin_pos = &stdin_pos;
   ctx.pc_labels = pc_labels;
   ctx.ops = ops;
   ctx.pc = &pc;
@@ -295,7 +298,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (trace_enabled && trace_pending) {
-      zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
+      zem_trace_emit_step(zem_trace_out(), trace_pc, trace_rec, &trace_before, &regs,
                           &trace_meta, sp);
       trace_pending = 0;
     }
@@ -438,7 +441,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (sp == 0) {
         if (trace_enabled && trace_pending) {
           trace_meta.ret_is_exit = 1;
-          zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
+          zem_trace_emit_step(zem_trace_out(), trace_pc, trace_rec, &trace_before, &regs,
                               &trace_meta, sp);
           trace_pending = 0;
         }

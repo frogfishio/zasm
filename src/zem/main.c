@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 #include "version.h"
 
@@ -24,13 +25,17 @@
 #include "zem_debug.h"
 #include "zem_exec.h"
 #include "zem_host.h"
+#include "zem_cert.h"
+#include "zem_hash.h"
 #include "zem_rep.h"
 #include "zem_strip.h"
+#include "zem_trace.h"
 #include "zem_util.h"
 
 // Optional: query the host-side capability registry (if linked).
 #include "zingcore/include/zi_caps.h"
 #include "zingcore/include/zi_async.h"
+#include "zingcore/include/zing_hash.h"
 
 // Allow zem to link even if a different host runtime omits caps.
 #if defined(__APPLE__)
@@ -86,10 +91,12 @@ static void print_help(FILE *out) {
       "\n",
       "Usage:\n",
       "  zem [--help] [--version] [--caps] [--trace] [--trace-mem]\n",
+      "      [--trace-jsonl-out PATH]\n",
       "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
       "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
       "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
       "      [--rep-scan --rep-n N --rep-mode MODE --rep-out PATH [--rep-coverage-jsonl PATH] [--rep-diag]]\n",
+      "      [--stdin PATH] [--emit-cert DIR]\n",
       "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
       "      [--source-name NAME]\n",
       "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
@@ -162,6 +169,7 @@ static void print_help(FILE *out) {
       "Debugging:\n",
       "  --trace            Emit per-instruction JSONL events to stderr\n",
       "                    (step events include CALL/RET metadata)\n",
+      "  --trace-jsonl-out PATH Write trace JSONL (step+mem) to PATH ('-' for stdout, or 'stderr')\n",
       "  --coverage         Record per-PC hit counts and emit a coverage report\n",
       "  --coverage-out PATH Write coverage JSONL to PATH\n",
       "  --coverage-merge PATH Merge existing coverage JSONL from PATH into this run\n",
@@ -171,6 +179,8 @@ static void print_help(FILE *out) {
       "  --trace-call-target T Only emit step events for CALLs with target == T (repeatable)\n",
       "  --trace-sample N    Emit 1 out of every N step events (deterministic)\n",
       "  --trace-mem         Emit memory read/write JSONL events to stderr\n",
+      "  --stdin PATH        Use PATH as guest stdin (captured for replay/certs)\n",
+      "  --emit-cert DIR     Emit a trace-validity certificate (SMT-LIB) into DIR\n",
       "  --sniff             Proactively warn about suspicious runtime patterns\n",
       "  --sniff-fatal       Like --sniff but stop execution on detection\n",
       "  --shake             Run the program multiple times with deterministic perturbations\n",
@@ -209,6 +219,48 @@ static uint64_t splitmix64_step(uint64_t *state) {
   z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ull;
   z = (z ^ (z >> 27)) * 0x94d049bb133111ebull;
   return z ^ (z >> 31);
+}
+
+static int slurp_stream(FILE *f, uint8_t **out_bytes, size_t *out_len) {
+  if (!out_bytes || !out_len) return 0;
+  *out_bytes = NULL;
+  *out_len = 0;
+  if (!f) return 0;
+
+  uint8_t *buf = NULL;
+  size_t len = 0;
+  size_t cap = 0;
+  for (;;) {
+    if (cap - len < 4096) {
+      size_t ncap = cap ? cap * 2 : 8192;
+      uint8_t *p = (uint8_t *)realloc(buf, ncap);
+      if (!p) {
+        free(buf);
+        return 0;
+      }
+      buf = p;
+      cap = ncap;
+    }
+    size_t n = fread(buf + len, 1, cap - len, f);
+    len += n;
+    if (n == 0) {
+      if (feof(f)) break;
+      free(buf);
+      return 0;
+    }
+  }
+  *out_bytes = buf;
+  *out_len = len;
+  return 1;
+}
+
+static int slurp_path(const char *path, uint8_t **out_bytes, size_t *out_len) {
+  if (!path || !out_bytes || !out_len) return 0;
+  FILE *f = fopen(path, "rb");
+  if (!f) return 0;
+  int ok = slurp_stream(f, out_bytes, out_len);
+  fclose(f);
+  return ok;
 }
 
 static int proc_env_put(zem_proc_t *p, const char *key, uint32_t key_len,
@@ -259,6 +311,19 @@ int main(int argc, char **argv) {
   const char *rep_out = NULL;
   const char *rep_cov = NULL;
   int rep_max_report = 0;
+
+  const char *trace_jsonl_out = NULL;
+  FILE *trace_jsonl_fp = NULL;
+
+  const char *stdin_path = NULL;
+  uint8_t *stdin_bytes = NULL;
+  size_t stdin_len = 0;
+
+  const char *emit_cert_dir = NULL;
+  char emit_cert_trace_path[4096];
+  char emit_cert_smt2_path[4096];
+  char emit_cert_manifest_path[4096];
+  char emit_cert_prove_sh_path[4096];
 
   zem_proc_t proc;
   memset(&proc, 0, sizeof(proc));
@@ -529,6 +594,58 @@ int main(int argc, char **argv) {
       dbg.trace = 1;
       continue;
     }
+    if (strcmp(argv[i], "--trace-jsonl-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--trace-jsonl-out requires a path");
+      }
+      trace_jsonl_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--stdin") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--stdin requires a path");
+      }
+      stdin_path = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--emit-cert") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--emit-cert requires a directory");
+      }
+      emit_cert_dir = argv[++i];
+      if (!emit_cert_dir || !*emit_cert_dir) {
+        return zem_failf("bad --emit-cert dir");
+      }
+      if (mkdir(emit_cert_dir, 0777) != 0 && errno != EEXIST) {
+        return zem_failf("failed to create --emit-cert dir: %s (%s)",
+                         emit_cert_dir, strerror(errno));
+      }
+      // Default cert layout.
+      if (snprintf(emit_cert_trace_path, sizeof(emit_cert_trace_path), "%s/trace.jsonl",
+                   emit_cert_dir) <= 0) {
+        return zem_failf("bad --emit-cert dir");
+      }
+      if (snprintf(emit_cert_smt2_path, sizeof(emit_cert_smt2_path), "%s/cert.smt2",
+                   emit_cert_dir) <= 0) {
+        return zem_failf("bad --emit-cert dir");
+      }
+      if (snprintf(emit_cert_manifest_path, sizeof(emit_cert_manifest_path), "%s/cert.manifest.json",
+                   emit_cert_dir) <= 0) {
+        return zem_failf("bad --emit-cert dir");
+      }
+      if (snprintf(emit_cert_prove_sh_path, sizeof(emit_cert_prove_sh_path), "%s/prove.sh",
+                   emit_cert_dir) <= 0) {
+        return zem_failf("bad --emit-cert dir");
+      }
+
+      // Emitting a cert implies instruction trace.
+      dbg.trace = 1;
+      // Route trace JSONL into the cert dir unless the user explicitly set it.
+      if (!trace_jsonl_out) {
+        trace_jsonl_out = emit_cert_trace_path;
+      }
+      continue;
+    }
     if (strcmp(argv[i], "--trace-mem") == 0) {
       dbg.trace_mem = 1;
       continue;
@@ -746,6 +863,23 @@ int main(int argc, char **argv) {
     inputs[ninputs++] = argv[i];
   }
 
+  if (trace_jsonl_out && *trace_jsonl_out) {
+    if (strcmp(trace_jsonl_out, "-") == 0) {
+      trace_jsonl_fp = stdout;
+    } else if (strcmp(trace_jsonl_out, "stderr") == 0) {
+      trace_jsonl_fp = stderr;
+    } else {
+      trace_jsonl_fp = fopen(trace_jsonl_out, "w");
+      if (!trace_jsonl_fp) {
+        return zem_failf("failed to open --trace-jsonl-out file: %s (%s)",
+                         trace_jsonl_out, strerror(errno));
+      }
+      // Line-buffered is a good default for JSONL.
+      setvbuf(trace_jsonl_fp, NULL, _IOLBF, 0);
+    }
+    zem_trace_set_out(trace_jsonl_fp);
+  }
+
   // Stream mode: if no inputs are provided, read the program IR JSONL from stdin.
   if (ninputs == 0) {
     program_uses_stdin = 1;
@@ -776,6 +910,9 @@ int main(int argc, char **argv) {
   }
 
   if (shake) {
+    if (emit_cert_dir) {
+      return zem_failf("--emit-cert cannot be combined with --shake (use replayable single-run flags)");
+    }
     if (dbg.enabled || dbg.debug_events || dbg.debug_events_only) {
       return zem_failf("--shake cannot be combined with --debug/--debug-events");
     }
@@ -836,6 +973,42 @@ int main(int argc, char **argv) {
       telemetry("zem", 3, "failed", 6);
     }
     return rc;
+  }
+
+  if (emit_cert_dir) {
+    if (program_uses_stdin && !stdin_path) {
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("--emit-cert needs guest stdin captured, but program IR used stdin; pass IR as a file and use --stdin PATH");
+    }
+
+    int ok = 0;
+    if (stdin_path) {
+      ok = slurp_path(stdin_path, &stdin_bytes, &stdin_len);
+    } else {
+      ok = slurp_stream(stdin, &stdin_bytes, &stdin_len);
+    }
+    if (!ok) {
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("failed to capture stdin for cert");
+    }
+    if (stdin_len > UINT32_MAX) {
+      free(stdin_bytes);
+      stdin_bytes = NULL;
+      stdin_len = 0;
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("stdin capture too large");
+    }
+    proc.stdin_bytes = stdin_bytes;
+    proc.stdin_len = (uint32_t)stdin_len;
   }
 
   zem_symtab_t labels;
@@ -951,8 +1124,64 @@ int main(int argc, char **argv) {
     }
   }
 
+  if (emit_cert_dir && rc == 0) {
+    // Ensure trace is flushed to disk before cert emission.
+    if (trace_jsonl_fp) fflush(trace_jsonl_fp);
+    if (trace_jsonl_fp && trace_jsonl_fp != stderr && trace_jsonl_fp != stdout) {
+      fclose(trace_jsonl_fp);
+      trace_jsonl_fp = NULL;
+      zem_trace_set_out(NULL);
+    }
+
+    const char *semantics_id = "zem:smt:qf_bv:regs32:v1";
+    const uint64_t program_hash = zem_ir_module_hash(&recs);
+    const uint64_t stdin_hash = zem_hash64_fnv1a(proc.stdin_bytes, proc.stdin_len);
+
+    char cert_err[256];
+    cert_err[0] = 0;
+    if (!zem_cert_emit_smtlib(emit_cert_smt2_path, &recs, &syms,
+                              emit_cert_trace_path, program_hash, semantics_id,
+                              stdin_hash, cert_err, sizeof(cert_err))) {
+      rc = zem_failf("failed to emit cert SMT: %s", cert_err[0] ? cert_err : "(unknown)");
+    } else {
+      FILE *mf = fopen(emit_cert_manifest_path, "w");
+      if (!mf) {
+        rc = zem_failf("failed to write cert manifest");
+      } else {
+        fprintf(mf,
+                "{\n"
+                "  \"semantics_id\": \"%s\",\n"
+                "  \"program_hash_fnv1a64\": \"0x%016" PRIx64 "\",\n"
+                "  \"stdin_hash_fnv1a64\": \"0x%016" PRIx64 "\",\n"
+                "  \"trace_jsonl\": \"trace.jsonl\",\n"
+                "  \"cert_smt2\": \"cert.smt2\"\n"
+                "}\n",
+                semantics_id, program_hash, stdin_hash);
+        fclose(mf);
+      }
+
+      FILE *pf = fopen(emit_cert_prove_sh_path, "w");
+      if (!pf) {
+        rc = zem_failf("failed to write prove.sh");
+      } else {
+        fputs("#!/bin/sh\nset -eu\n\n", pf);
+        fputs("# Produces an Alethe proof with cvc5 and checks it with Carcara.\n", pf);
+        fputs("# Note: exact flags may vary by cvc5 version.\n", pf);
+        fputs("# If this fails, run: cvc5 --help | grep -i proof\n\n", pf);
+        fputs("cvc5 --lang smt2 --produce-proofs --proof-format-mode=alethe cert.smt2 > cert.alethe\n", pf);
+        fputs("carcara check cert.smt2 cert.alethe\n", pf);
+        fclose(pf);
+        (void)chmod(emit_cert_prove_sh_path, 0755);
+      }
+    }
+  }
+
   if (dbg_script && dbg_script != stdin) {
     fclose(dbg_script);
+  }
+
+  if (trace_jsonl_fp && trace_jsonl_fp != stderr && trace_jsonl_fp != stdout) {
+    fclose(trace_jsonl_fp);
   }
 
   zem_symtab_free(&labels);
@@ -960,6 +1189,7 @@ int main(int argc, char **argv) {
   zem_symtab_free(&syms);
   recvec_free(&recs);
   free((void *)pc_srcs);
+  free(stdin_bytes);
 
   if (rc != 0) {
     if (!dbg.debug_events_only) {

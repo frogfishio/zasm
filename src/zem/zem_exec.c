@@ -1569,7 +1569,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (trace_enabled && trace_pending) {
-      zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
+      zem_trace_emit_step(zem_trace_out(), trace_pc, trace_rec, &trace_before, &regs,
                           &trace_meta, sp);
       trace_pending = 0;
     }
@@ -3587,7 +3587,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (sp == 0) {
         if (trace_enabled && trace_pending) {
           trace_meta.ret_is_exit = 1;
-          zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
+          zem_trace_emit_step(zem_trace_out(), trace_pc, trace_rec, &trace_before, &regs,
                               &trace_meta, sp);
           trace_pending = 0;
         }
@@ -3623,7 +3623,7 @@ done:
   return rc;
 
   if (trace_enabled && trace_pending) {
-    zem_trace_emit_step(stderr, trace_pc, trace_rec, &trace_before, &regs,
+    zem_trace_emit_step(zem_trace_out(), trace_pc, trace_rec, &trace_before, &regs,
                         &trace_meta, sp);
     trace_pending = 0;
   }

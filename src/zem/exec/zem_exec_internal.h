@@ -52,6 +52,9 @@ typedef struct {
   const zem_proc_t *proc;
   const char *stdin_source_name;
 
+  // Optional: captured stdin read cursor (bytes already captured in proc).
+  uint32_t *stdin_pos;
+
   // Tables / run state
   const char **pc_labels;
   zem_op_t *ops;

@@ -35,6 +35,11 @@ typedef struct {
     uint32_t val_len;
   } env[256];
   uint32_t envc;
+
+  // Optional captured stdin (used for deterministic replay / certs).
+  // If stdin_bytes is NULL, reads go to the host handle as usual.
+  const uint8_t *stdin_bytes;
+  uint32_t stdin_len;
 } zem_proc_t;
 
 void zem_symtab_init(zem_symtab_t *t);

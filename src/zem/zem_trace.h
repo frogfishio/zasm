@@ -20,6 +20,10 @@ typedef struct {
   uint32_t ret_target_pc;
 } zem_trace_meta_t;
 
+// Output sink for trace JSONL (single-threaded). Default is stderr.
+void zem_trace_set_out(FILE *out);
+FILE *zem_trace_out(void);
+
 void zem_trace_set_mem_enabled(int enabled);
 void zem_trace_set_mem_context(size_t pc, int line);
 

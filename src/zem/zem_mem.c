@@ -12,14 +12,14 @@ int zem_mem_load_u8(const zem_buf_t *mem, uint32_t addr, uint8_t *out) {
   if (!out) return 0;
   if (!zem_mem_check_span(mem, addr, 1)) return 0;
   *out = mem->bytes[addr];
-  zem_trace_emit_mem(stderr, "mem_read", addr, 1, (uint64_t)*out);
+  zem_trace_emit_mem(zem_trace_out(), "mem_read", addr, 1, (uint64_t)*out);
   return 1;
 }
 
 int zem_mem_store_u8(zem_buf_t *mem, uint32_t addr, uint8_t v) {
   if (!zem_mem_check_span(mem, addr, 1)) return 0;
   mem->bytes[addr] = v;
-  zem_trace_emit_mem(stderr, "mem_write", addr, 1, (uint64_t)v);
+  zem_trace_emit_mem(zem_trace_out(), "mem_write", addr, 1, (uint64_t)v);
   return 1;
 }
 
@@ -28,7 +28,7 @@ int zem_mem_load_u16le(const zem_buf_t *mem, uint32_t addr, uint16_t *out) {
   if (!zem_mem_check_span(mem, addr, 2)) return 0;
   *out = (uint16_t)((uint16_t)mem->bytes[addr] |
                     ((uint16_t)mem->bytes[addr + 1] << 8));
-  zem_trace_emit_mem(stderr, "mem_read", addr, 2, (uint64_t)*out);
+  zem_trace_emit_mem(zem_trace_out(), "mem_read", addr, 2, (uint64_t)*out);
   return 1;
 }
 
@@ -36,7 +36,7 @@ int zem_mem_store_u16le(zem_buf_t *mem, uint32_t addr, uint16_t v) {
   if (!zem_mem_check_span(mem, addr, 2)) return 0;
   mem->bytes[addr] = (uint8_t)(v & 0xffu);
   mem->bytes[addr + 1] = (uint8_t)((v >> 8) & 0xffu);
-  zem_trace_emit_mem(stderr, "mem_write", addr, 2, (uint64_t)v);
+  zem_trace_emit_mem(zem_trace_out(), "mem_write", addr, 2, (uint64_t)v);
   return 1;
 }
 
@@ -46,7 +46,7 @@ int zem_mem_load_u32le(const zem_buf_t *mem, uint32_t addr, uint32_t *out) {
   *out = ((uint32_t)mem->bytes[addr]) | ((uint32_t)mem->bytes[addr + 1] << 8) |
          ((uint32_t)mem->bytes[addr + 2] << 16) |
          ((uint32_t)mem->bytes[addr + 3] << 24);
-  zem_trace_emit_mem(stderr, "mem_read", addr, 4, (uint64_t)*out);
+  zem_trace_emit_mem(zem_trace_out(), "mem_read", addr, 4, (uint64_t)*out);
   return 1;
 }
 
@@ -56,7 +56,7 @@ int zem_mem_store_u32le(zem_buf_t *mem, uint32_t addr, uint32_t v) {
   mem->bytes[addr + 1] = (uint8_t)((v >> 8) & 0xffu);
   mem->bytes[addr + 2] = (uint8_t)((v >> 16) & 0xffu);
   mem->bytes[addr + 3] = (uint8_t)((v >> 24) & 0xffu);
-  zem_trace_emit_mem(stderr, "mem_write", addr, 4, (uint64_t)v);
+  zem_trace_emit_mem(zem_trace_out(), "mem_write", addr, 4, (uint64_t)v);
   return 1;
 }
 
@@ -70,7 +70,7 @@ int zem_mem_load_u64le(const zem_buf_t *mem, uint32_t addr, uint64_t *out) {
          ((uint64_t)mem->bytes[addr + 5] << 40) |
          ((uint64_t)mem->bytes[addr + 6] << 48) |
          ((uint64_t)mem->bytes[addr + 7] << 56);
-  zem_trace_emit_mem(stderr, "mem_read", addr, 8, (uint64_t)*out);
+  zem_trace_emit_mem(zem_trace_out(), "mem_read", addr, 8, (uint64_t)*out);
   return 1;
 }
 
@@ -84,7 +84,7 @@ int zem_mem_store_u64le(zem_buf_t *mem, uint32_t addr, uint64_t v) {
   mem->bytes[addr + 5] = (uint8_t)((v >> 40) & 0xffu);
   mem->bytes[addr + 6] = (uint8_t)((v >> 48) & 0xffu);
   mem->bytes[addr + 7] = (uint8_t)((v >> 56) & 0xffu);
-  zem_trace_emit_mem(stderr, "mem_write", addr, 8, (uint64_t)v);
+  zem_trace_emit_mem(zem_trace_out(), "mem_write", addr, 8, (uint64_t)v);
   return 1;
 }
 

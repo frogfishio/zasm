@@ -8,6 +8,9 @@
 
 #include "zem_util.h"
 
+// Trace output sink (single-threaded). If unset, use stderr.
+static FILE *g_trace_out = NULL;
+
 // Trace context for optional memory access events (single-threaded).
 static int g_trace_mem_enabled = 0;
 static size_t g_trace_mem_pc = 0;
@@ -26,6 +29,10 @@ static size_t g_step_ncall_targets = 0;
 
 static uint32_t g_step_sample_n = 0;
 static uint64_t g_step_counter = 0;
+
+void zem_trace_set_out(FILE *out) { g_trace_out = out; }
+
+FILE *zem_trace_out(void) { return g_trace_out ? g_trace_out : stderr; }
 
 void zem_trace_clear_step_filters(void) {
   g_step_pc_range = 0;

@@ -235,6 +235,7 @@ test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
+test-validation: test-zem-emit-cert-smoke
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
@@ -269,6 +270,9 @@ test-diagnostics-jsonl: zas
 
 test-zem-stdin-program: zas zem
 	sh test/zem_stdin_program.sh
+
+test-zem-emit-cert-smoke: zas zem
+	sh test/zem_emit_cert_smoke.sh
 
 test-zem-zi-write: zas zem
 	sh test/zem_zi_write.sh
@@ -712,6 +716,7 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/zem_build.o \
 	$(ZEM_BUILD)/zem_util.o \
 	$(ZEM_BUILD)/zem_trace.o \
+	$(ZEM_BUILD)/zem_cert.o \
 	$(ZEM_BUILD)/zem.o \
 	$(ZEM_BUILD)/jsonl.o
 
