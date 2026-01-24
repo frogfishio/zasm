@@ -404,7 +404,6 @@ static int emit_ok_for_step(FILE *out, const recvec_t *recs,
     emit_u32_expr(out, &r->ops[1], syms, i);
     fputs(")))", out);
     fputs(")))\n", out);
-    return 1;
   }
 
   if (strcmp(m, "SLA") == 0 || strcmp(m, "SRL") == 0 || strcmp(m, "SRA") == 0) {
