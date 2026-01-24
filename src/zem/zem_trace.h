@@ -25,6 +25,7 @@ void zem_trace_set_out(FILE *out);
 FILE *zem_trace_out(void);
 
 void zem_trace_set_mem_enabled(int enabled);
+int zem_trace_mem_enabled(void);
 void zem_trace_set_mem_context(size_t pc, int line);
 
 void zem_trace_emit_mem(FILE *out, const char *kind, uint32_t addr,

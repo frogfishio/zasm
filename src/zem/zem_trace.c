@@ -76,6 +76,8 @@ void zem_trace_set_step_sample_n(uint32_t n) { g_step_sample_n = n; }
 
 void zem_trace_set_mem_enabled(int enabled) { g_trace_mem_enabled = enabled ? 1 : 0; }
 
+int zem_trace_mem_enabled(void) { return g_trace_mem_enabled ? 1 : 0; }
+
 void zem_trace_set_mem_context(size_t pc, int line) {
   g_trace_mem_pc = pc;
   g_trace_mem_line = line;

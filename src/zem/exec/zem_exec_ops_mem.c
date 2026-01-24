@@ -189,7 +189,16 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "FILL out of bounds");
       return 1;
     }
-    memset(mem->bytes + dst, val, (size_t)len);
+
+    if (!zem_trace_mem_enabled()) {
+      memset(mem->bytes + dst, val, (size_t)len);
+    } else {
+      // Trace-friendly: emit per-byte writes.
+      for (uint32_t i = 0; i < len; i++) {
+        // Span already validated above.
+        (void)mem_store_u8(mem, dst + i, val);
+      }
+    }
     zem_watchset_note_write(watches, dst, len, (uint32_t)pc, cur_label, r->line);
     *ctx->pc = pc + 1;
     return 1;
@@ -204,7 +213,27 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "LDIR out of bounds");
       return 1;
     }
-    memmove(mem->bytes + dst, mem->bytes + src, (size_t)len);
+
+    if (!zem_trace_mem_enabled()) {
+      memmove(mem->bytes + dst, mem->bytes + src, (size_t)len);
+    } else {
+      // Trace-friendly memmove: emit per-byte reads+writes while preserving
+      // overlap semantics (direction depends on overlap).
+      const int forward = (dst < src) || (dst >= (src + len));
+      if (forward) {
+        for (uint32_t i = 0; i < len; i++) {
+          uint8_t b = 0;
+          (void)mem_load_u8(mem, src + i, &b);
+          (void)mem_store_u8(mem, dst + i, b);
+        }
+      } else {
+        for (uint32_t i = len; i > 0; i--) {
+          uint8_t b = 0;
+          (void)mem_load_u8(mem, src + (i - 1), &b);
+          (void)mem_store_u8(mem, dst + (i - 1), b);
+        }
+      }
+    }
     zem_watchset_note_write(watches, dst, len, (uint32_t)pc, cur_label, r->line);
     *ctx->pc = pc + 1;
     return 1;

@@ -24,6 +24,12 @@ int zem_cert_emit_smtlib(const char *out_smt2_path, const recvec_t *recs,
                          uint64_t program_hash, const char *semantics_id,
                          uint64_t stdin_hash, char *err, size_t errlen);
 
+// Optional guardrail for huge traces: cap the number of memory events allowed
+// to be attached to a single step (e.g. per-byte FILL/LDIR).
+//
+// If not set, a default cap is used.
+void zem_cert_set_max_mem_events_per_step(uint32_t n);
+
 #ifdef __cplusplus
 }
 #endif

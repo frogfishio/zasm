@@ -33,6 +33,28 @@ scripts/install-tools.sh
 source tools/env.sh
 ```
 
+### Optional: Certificate Solver/Proof Tools
+
+`zem --emit-cert` generates `cert.smt2` and a `prove.sh` helper.
+
+- Current default: `prove.sh` only checks UNSAT via `cvc5`.
+- External proof checking (e.g. Alethe + Carcara) is currently disabled because it has been brittle across tool versions; see `src/zem/DEFECTS.md`.
+
+On macOS (recommended) for the UNSAT check:
+
+```bash
+scripts/install-proof-tools.sh
+```
+
+Or install manually:
+
+```bash
+brew install cvc5
+```
+
+There is also an optional test `test/zem_emit_cert_prove.sh` that runs `prove.sh` locally.
+It is disabled by default; enable with `ZEM_ENABLE_PROOF_TEST=1`.
+
 Edit `tools/versions.env` if you need to update the pinned tool versions.
 
 ### Building the Toolchain

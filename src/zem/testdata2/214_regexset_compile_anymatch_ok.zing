@@ -1,0 +1,13 @@
+use Zing·Regex.
+
+main[
+  flags := flagsDefault.
+  sres := (RegexSet compile2Bytes: "bc"#utf8 b: "xx"#utf8 flags: flags).
+  _ := (sres ifOk: [ :set |
+           (anyMatch set: set hay: "abcd"#utf8) ifFalse: [ ret 2 ].
+           unit
+         ]
+         ifFail: [ :_ | ret 3 ]).
+  stdout writeBytes: "OK"#utf8.
+  ret 0.
+].

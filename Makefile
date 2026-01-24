@@ -274,6 +274,9 @@ test-zem-stdin-program: zas zem
 test-zem-emit-cert-smoke: zas zem
 	sh test/zem_emit_cert_smoke.sh
 
+test-zem-emit-cert-prove: zas zem
+	sh test/zem_emit_cert_prove.sh
+
 test-zem-zi-write: zas zem
 	sh test/zem_zi_write.sh
 

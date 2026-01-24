@@ -39,7 +39,13 @@ int zem_exec_ops_ld(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "LD A,(mem) out of bounds");
       return 1;
     }
-    regs->A = (uint64_t)(uint32_t)mem->bytes[addr];
+    uint8_t b = 0;
+    if (!mem_load_u8(mem, addr, &b)) {
+      *ctx->rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, regs, mem,
+                                 "LD A,(mem) out of bounds");
+      return 1;
+    }
+    regs->A = (uint64_t)(uint32_t)b;
     zem_regprov_note(regprov, ZEM_REG_A, (uint32_t)pc, cur_label, r->line, r->m);
     pc++;
     *ctx->pc = pc;
@@ -64,7 +70,11 @@ int zem_exec_ops_ld(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "unresolved LD store rhs");
       return 1;
     }
-    mem->bytes[addr] = (uint8_t)(v & 0xffu);
+    if (!mem_store_u8(mem, addr, (uint8_t)(v & 0xffu))) {
+      *ctx->rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, regs, mem,
+                                 "LD (mem),x out of bounds");
+      return 1;
+    }
     zem_watchset_note_write(watches, addr, 1u, (uint32_t)pc, cur_label, r->line);
     pc++;
     *ctx->pc = pc;
