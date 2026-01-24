@@ -79,6 +79,16 @@ typedef struct {
   uint64_t shake_seed;     // seed used for shake RNG (for replay)
   uint32_t shake_heap_pad; // heap pad applied before this run (bytes)
   int shake_poison_heap;   // if set, poison newly-allocated heap bytes
+
+  // Additional shake knobs (opt-in; best-effort diagnostics):
+  // - redzone adds canary bytes before/after heap allocations
+  // - quarantine/poison-free turns use-after-free into deterministic failures
+  // - io chunking forces short reads (zi_read/req_read)
+  uint32_t shake_redzone;       // bytes of redzone before/after allocations (0 disables)
+  uint32_t shake_quarantine;    // max quarantined frees tracked per run (0 disables)
+  int shake_poison_free;        // if set, poison freed regions (requires allocation tracking)
+  int shake_io_chunking;        // if set, cap zi_read to short chunks
+  uint32_t shake_io_chunk_max;  // max chunk size (bytes) when io chunking enabled
 } zem_dbg_cfg_t;
 
 typedef struct {

@@ -160,6 +160,18 @@ void shake_poison_range(const zem_dbg_cfg_t *dbg_cfg, zem_buf_t *mem,
 int heap_alloc4(zem_buf_t *mem, uint32_t *heap_top, uint32_t size,
                 uint32_t *out_ptr, const zem_dbg_cfg_t *dbg_cfg);
 
+// Shake helpers (allocation tracking / redzones / quarantine / deterministic RNG)
+void shake_state_reset_for_run(const zem_dbg_cfg_t *dbg_cfg);
+uint64_t shake_rand_u64(const zem_dbg_cfg_t *dbg_cfg, uint64_t tag);
+
+int heap_alloc4_shake(zem_buf_t *mem, uint32_t *heap_top, uint32_t size,
+                      uint32_t *out_ptr, const zem_dbg_cfg_t *dbg_cfg,
+                      int zero);
+void shake_note_free_ptr(const zem_dbg_cfg_t *dbg_cfg, zem_buf_t *mem,
+                         uint32_t ptr);
+int shake_check_access_span(const zem_dbg_cfg_t *dbg_cfg, const zem_buf_t *mem,
+                            uint32_t addr, uint32_t len);
+
 void zem_cov_merge_jsonl(uint64_t *hits, size_t nhits, const char *path);
 int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,
                         const char *stdin_source_name, const uint64_t *hits,

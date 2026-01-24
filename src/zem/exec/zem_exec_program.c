@@ -72,6 +72,9 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   const uint32_t hop_base = heap_top;
   uint32_t zi_time_ms = 0;
 
+  // Initialize shake state after heap base is finalized for this run.
+  shake_state_reset_for_run(dbg_cfg);
+
   zi_mvar_entry_t zi_mvar[ZI_MVAR_MAX];
   memset(zi_mvar, 0, sizeof(zi_mvar));
 

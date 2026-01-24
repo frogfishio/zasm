@@ -10,6 +10,34 @@
 
 #include "zem_exec_internal.h"
 
+// ---- Shake state (single-threaded; per-run reset) ----
+
+static const zem_dbg_cfg_t *g_shake_cfg = NULL;
+
+typedef struct {
+  uint32_t raw_ptr;
+  uint32_t user_ptr;
+  uint32_t user_len;
+  uint32_t rz;
+  uint8_t canary_pre;
+  uint8_t canary_post;
+  int live;
+} shake_alloc_t;
+
+enum { SHAKE_ALLOC_MAX = 4096 };
+static shake_alloc_t g_shake_allocs[SHAKE_ALLOC_MAX];
+static size_t g_shake_allocs_n = 0;
+
+typedef struct {
+  uint32_t ptr;
+  uint32_t len;
+} shake_span_t;
+
+enum { SHAKE_QUAR_MAX = 4096 };
+static shake_span_t g_shake_quar[SHAKE_QUAR_MAX];
+static uint32_t g_shake_quar_head = 0;
+static uint32_t g_shake_quar_count = 0;
+
 int g_fail_span_valid = 0;
 uint32_t g_fail_span_addr = 0;
 uint32_t g_fail_span_len = 0;
@@ -26,6 +54,15 @@ int jump_to_label(const zem_symtab_t *labels, const char *label, size_t *pc) {
 }
 
 int mem_check_span(const zem_buf_t *mem, uint32_t addr, uint32_t len) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, len) != 0) {
+      g_fail_span_valid = 1;
+      g_fail_span_addr = addr;
+      g_fail_span_len = len;
+      g_fail_span_mem_len = mem ? mem->len : 0;
+      return 0;
+    }
+  }
   int ok = zem_mem_check_span(mem, addr, len);
   if (!ok) {
     g_fail_span_valid = 1;
@@ -73,34 +110,58 @@ uint64_t ctz64(uint64_t x) { return zem_ctz64(x); }
 uint64_t popc64(uint64_t x) { return zem_popc64(x); }
 
 int mem_load_u8(const zem_buf_t *mem, uint32_t addr, uint8_t *out) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 1u) != 0) return 0;
+  }
   return zem_mem_load_u8(mem, addr, out);
 }
 
 int mem_store_u8(zem_buf_t *mem, uint32_t addr, uint8_t v) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 1u) != 0) return 0;
+  }
   return zem_mem_store_u8(mem, addr, v);
 }
 
 int mem_load_u16le(const zem_buf_t *mem, uint32_t addr, uint16_t *out) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 2u) != 0) return 0;
+  }
   return zem_mem_load_u16le(mem, addr, out);
 }
 
 int mem_store_u16le(zem_buf_t *mem, uint32_t addr, uint16_t v) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 2u) != 0) return 0;
+  }
   return zem_mem_store_u16le(mem, addr, v);
 }
 
 int mem_load_u32le(const zem_buf_t *mem, uint32_t addr, uint32_t *out) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 4u) != 0) return 0;
+  }
   return zem_mem_load_u32le(mem, addr, out);
 }
 
 int mem_store_u32le(zem_buf_t *mem, uint32_t addr, uint32_t v) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 4u) != 0) return 0;
+  }
   return zem_mem_store_u32le(mem, addr, v);
 }
 
 int mem_load_u64le(const zem_buf_t *mem, uint32_t addr, uint64_t *out) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 8u) != 0) return 0;
+  }
   return zem_mem_load_u64le(mem, addr, out);
 }
 
 int mem_store_u64le(zem_buf_t *mem, uint32_t addr, uint64_t v) {
+  if (g_shake_cfg && g_shake_cfg->shake) {
+    if (shake_check_access_span(g_shake_cfg, mem, addr, 8u) != 0) return 0;
+  }
   return zem_mem_store_u64le(mem, addr, v);
 }
 
@@ -548,6 +609,21 @@ static uint64_t splitmix64_once(uint64_t x) {
   return x ^ (x >> 31);
 }
 
+uint64_t shake_rand_u64(const zem_dbg_cfg_t *dbg_cfg, uint64_t tag) {
+  if (!dbg_cfg || !dbg_cfg->shake) return 0;
+  uint64_t x = dbg_cfg->shake_seed ^
+               ((uint64_t)dbg_cfg->shake_run * 0x9e3779b97f4a7c15ull) ^
+               (tag * 0xbf58476d1ce4e5b9ull);
+  return splitmix64_once(x);
+}
+
+void shake_state_reset_for_run(const zem_dbg_cfg_t *dbg_cfg) {
+  g_shake_cfg = dbg_cfg;
+  g_shake_allocs_n = 0;
+  g_shake_quar_head = 0;
+  g_shake_quar_count = 0;
+}
+
 static uint8_t shake_poison_byte(const zem_dbg_cfg_t *dbg_cfg) {
   if (!dbg_cfg || !dbg_cfg->shake || !dbg_cfg->shake_poison_heap) return 0u;
   uint64_t x = dbg_cfg->shake_seed ^
@@ -564,6 +640,244 @@ void shake_poison_range(const zem_dbg_cfg_t *dbg_cfg, zem_buf_t *mem,
   if (!mem || !mem->bytes || len == 0) return;
   if (!zem_mem_check_span(mem, addr, len)) return;
   memset(mem->bytes + addr, (int)shake_poison_byte(dbg_cfg), (size_t)len);
+}
+
+static void shake_fail_span(uint32_t addr, uint32_t len, size_t mem_len) {
+  g_fail_span_valid = 1;
+  g_fail_span_addr = addr;
+  g_fail_span_len = len;
+  g_fail_span_mem_len = mem_len;
+}
+
+static int spans_overlap_u32(uint32_t a0, uint32_t a1, uint32_t b0,
+                             uint32_t b1) {
+  // half-open ranges [a0,a1), [b0,b1)
+  return (a0 < b1) && (b0 < a1);
+}
+
+static int shake_redzone_check_canaries(const zem_buf_t *mem,
+                                        const shake_alloc_t *a) {
+  if (!mem || !mem->bytes || !a || !a->live) return 1;
+  if (a->rz == 0) return 1;
+
+  uint64_t user1_64 = (uint64_t)a->user_ptr + (uint64_t)a->user_len;
+  uint64_t raw1_64 = user1_64 + (uint64_t)a->rz;
+  if (raw1_64 > UINT32_MAX) return 0;
+  uint32_t raw0 = a->raw_ptr;
+  uint32_t user0 = a->user_ptr;
+  uint32_t user1 = (uint32_t)user1_64;
+  uint32_t raw1 = (uint32_t)raw1_64;
+
+  if (!zem_mem_check_span(mem, raw0, a->rz)) return 0;
+  if (!zem_mem_check_span(mem, user1, a->rz)) return 0;
+
+  for (uint32_t i = 0; i < a->rz; i++) {
+    if (mem->bytes[raw0 + i] != a->canary_pre) return 0;
+  }
+  for (uint32_t i = 0; i < a->rz; i++) {
+    if (mem->bytes[user1 + i] != a->canary_post) return 0;
+  }
+  (void)user0;
+  (void)raw1;
+  return 1;
+}
+
+int heap_alloc4_shake(zem_buf_t *mem, uint32_t *heap_top, uint32_t size,
+                      uint32_t *out_ptr, const zem_dbg_cfg_t *dbg_cfg,
+                      int zero) {
+  if (!mem || !heap_top || !out_ptr) return 0;
+  if (size == 0) return 0;
+
+  uint32_t rz = 0;
+  if (dbg_cfg && dbg_cfg->shake && dbg_cfg->shake_redzone) {
+    rz = dbg_cfg->shake_redzone;
+  }
+
+  uint64_t total64 = (uint64_t)size + (uint64_t)rz + (uint64_t)rz;
+  if (total64 > UINT32_MAX) return 0;
+  uint32_t total = (uint32_t)total64;
+
+  uint32_t raw_ptr = *heap_top;
+  uint64_t new_top64 = (uint64_t)raw_ptr + (uint64_t)total;
+  if (new_top64 > SIZE_MAX) return 0;
+  size_t new_top = (size_t)new_top64;
+  size_t new_top_aligned = (new_top + 3u) & ~3u;
+
+  if (!mem_grow_zero(mem, new_top_aligned)) return 0;
+
+  // Preserve existing shake semantics: poisoning happens after zero-growth.
+  if (dbg_cfg && dbg_cfg->shake_poison_heap && new_top_aligned <= UINT32_MAX &&
+      (uint64_t)raw_ptr <= (uint64_t)new_top_aligned) {
+    shake_poison_range(dbg_cfg, mem, raw_ptr,
+                       (uint32_t)((uint32_t)new_top_aligned - raw_ptr));
+  }
+
+  uint32_t user_ptr = raw_ptr + rz;
+  *out_ptr = user_ptr;
+  *heap_top = (uint32_t)new_top_aligned;
+
+  // Track allocations for shake features (redzones and/or quarantine/poison-free).
+  if (dbg_cfg && dbg_cfg->shake &&
+      (dbg_cfg->shake_redzone || dbg_cfg->shake_quarantine || dbg_cfg->shake_poison_free) &&
+      g_shake_allocs_n < SHAKE_ALLOC_MAX) {
+    shake_alloc_t *a = &g_shake_allocs[g_shake_allocs_n++];
+    a->raw_ptr = raw_ptr;
+    a->user_ptr = user_ptr;
+    a->user_len = size;
+    a->rz = rz;
+    a->canary_pre = 0;
+    a->canary_post = 0;
+    a->live = 1;
+
+    // Optional redzones: set canaries after any poisoning.
+    if (rz && mem->bytes && zem_mem_check_span(mem, raw_ptr, total)) {
+      uint64_t tag = ((uint64_t)user_ptr << 32) ^ (uint64_t)size;
+      uint8_t pre = (uint8_t)(shake_rand_u64(dbg_cfg, tag ^ 0x72657a6full) & 0xffu);
+      uint8_t post = (uint8_t)(shake_rand_u64(dbg_cfg, tag ^ 0x706f7374ull) & 0xffu);
+      if (!pre) pre = 0xa5u;
+      if (!post) post = 0x5au;
+      a->canary_pre = pre;
+      a->canary_post = post;
+      memset(mem->bytes + raw_ptr, (int)pre, (size_t)rz);
+      memset(mem->bytes + user_ptr + size, (int)post, (size_t)rz);
+    }
+  }
+
+  (void)zero;
+
+  return 1;
+}
+
+void shake_note_free_ptr(const zem_dbg_cfg_t *dbg_cfg, zem_buf_t *mem,
+                         uint32_t ptr) {
+  if (!dbg_cfg || !dbg_cfg->shake) return;
+  if (ptr == 0) return;
+
+  uint32_t quar_max = dbg_cfg->shake_quarantine;
+  if (quar_max > SHAKE_QUAR_MAX) quar_max = SHAKE_QUAR_MAX;
+
+  for (size_t i = 0; i < g_shake_allocs_n; i++) {
+    shake_alloc_t *a = &g_shake_allocs[i];
+    if (!a->live) continue;
+    if (a->user_ptr != ptr) continue;
+
+    a->live = 0;
+
+    // Poison the user region on free (best-effort).
+    if (dbg_cfg->shake_poison_free && mem && mem->bytes && a->user_len &&
+        zem_mem_check_span(mem, a->user_ptr, a->user_len)) {
+      uint8_t b = (uint8_t)(shake_rand_u64(dbg_cfg, ((uint64_t)ptr << 1) ^ 0x66726565ull) &
+                            0xffu);
+      if (!b) b = 0xddu;
+      memset(mem->bytes + a->user_ptr, (int)b, (size_t)a->user_len);
+    }
+
+    // Quarantine the freed region to surface use-after-free.
+    if (quar_max) {
+      uint32_t slot = 0;
+      if (g_shake_quar_count < quar_max) {
+        slot = g_shake_quar_count++;
+      } else {
+        slot = (g_shake_quar_head % quar_max);
+        g_shake_quar_head++;
+      }
+      g_shake_quar[slot].ptr = a->user_ptr;
+      g_shake_quar[slot].len = a->user_len;
+    }
+    return;
+  }
+
+  // Fallback: if we can't find the allocation (e.g. non-standard allocator
+  // paths), still quarantine/poison a small span to surface obvious UAF.
+  if (quar_max && mem && mem->bytes && ptr < mem->len) {
+    uint32_t maxlen = 64u;
+    uint32_t avail = (uint32_t)((mem->len - (size_t)ptr) > UINT32_MAX
+                                    ? UINT32_MAX
+                                    : (uint32_t)(mem->len - (size_t)ptr));
+    uint32_t qlen = (avail < maxlen) ? avail : maxlen;
+    if (qlen) {
+      if (dbg_cfg->shake_poison_free && zem_mem_check_span(mem, ptr, qlen)) {
+        uint8_t b = (uint8_t)(shake_rand_u64(dbg_cfg, ((uint64_t)ptr << 1) ^ 0x66726565ull) &
+                              0xffu);
+        if (!b) b = 0xddu;
+        memset(mem->bytes + ptr, (int)b, (size_t)qlen);
+      }
+      uint32_t slot = 0;
+      if (g_shake_quar_count < quar_max) {
+        slot = g_shake_quar_count++;
+      } else {
+        slot = (g_shake_quar_head % quar_max);
+        g_shake_quar_head++;
+      }
+      g_shake_quar[slot].ptr = ptr;
+      g_shake_quar[slot].len = qlen;
+    }
+  }
+}
+
+int shake_check_access_span(const zem_dbg_cfg_t *dbg_cfg, const zem_buf_t *mem,
+                            uint32_t addr, uint32_t len) {
+  if (!dbg_cfg || !dbg_cfg->shake) return 0;
+  if (len == 0) return 0;
+
+  uint32_t quar_max = dbg_cfg->shake_quarantine;
+  if (quar_max > SHAKE_QUAR_MAX) quar_max = SHAKE_QUAR_MAX;
+
+  uint64_t a1_64 = (uint64_t)addr + (uint64_t)len;
+  if (a1_64 > UINT32_MAX) {
+    shake_fail_span(addr, len, mem ? mem->len : 0);
+    return -1;
+  }
+  uint32_t a0 = addr;
+  uint32_t a1 = (uint32_t)a1_64;
+
+  // Quarantine: any touch into a freed region faults.
+  if (quar_max && g_shake_quar_count) {
+    uint32_t n = g_shake_quar_count;
+    if (n > quar_max) n = quar_max;
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t p = g_shake_quar[i].ptr;
+      uint32_t l = g_shake_quar[i].len;
+      if (!l) continue;
+      uint64_t q1_64 = (uint64_t)p + (uint64_t)l;
+      if (q1_64 > UINT32_MAX) continue;
+      if (spans_overlap_u32(a0, a1, p, (uint32_t)q1_64)) {
+        shake_fail_span(addr, len, mem ? mem->len : 0);
+        return -1;
+      }
+    }
+  }
+
+  // Redzones: detect both direct redzone touches and prior canary clobber.
+  if (dbg_cfg->shake_redzone && g_shake_allocs_n && mem && mem->bytes) {
+    for (size_t i = 0; i < g_shake_allocs_n; i++) {
+      const shake_alloc_t *al = &g_shake_allocs[i];
+      if (!al->rz) continue;
+      if (al->live && !shake_redzone_check_canaries(mem, al)) {
+        shake_fail_span(al->user_ptr, al->user_len, mem->len);
+        return -1;
+      }
+
+      uint64_t user1_64 = (uint64_t)al->user_ptr + (uint64_t)al->user_len;
+      if (user1_64 > UINT32_MAX) continue;
+      uint32_t user0 = al->user_ptr;
+      uint32_t user1 = (uint32_t)user1_64;
+      uint32_t pre0 = al->raw_ptr;
+      uint32_t pre1 = user0;
+      uint32_t post0 = user1;
+      uint64_t post1_64 = (uint64_t)user1 + (uint64_t)al->rz;
+      if (post1_64 > UINT32_MAX) continue;
+      uint32_t post1 = (uint32_t)post1_64;
+
+      if (spans_overlap_u32(a0, a1, pre0, pre1) ||
+          spans_overlap_u32(a0, a1, post0, post1)) {
+        shake_fail_span(addr, len, mem->len);
+        return -1;
+      }
+    }
+  }
+
+  return 0;
 }
 
 int heap_alloc4(zem_buf_t *mem, uint32_t *heap_top, uint32_t size,

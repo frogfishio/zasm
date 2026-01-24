@@ -52,30 +52,15 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       *ctx->pc = pc + 1;
       return 1;
     }
-    uint32_t ptr = heap_top;
-    uint64_t new_top64 = (uint64_t)heap_top + (uint64_t)(uint32_t)size;
-    if (new_top64 > SIZE_MAX) {
+    uint32_t ptr = 0;
+    if (!heap_alloc4_shake(mem, &heap_top, (uint32_t)size, &ptr, dbg_cfg, 1)) {
       regs->HL = (uint64_t)(uint32_t)ZI_E_OOM;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);
+      if (ctx->heap_top) *ctx->heap_top = heap_top;
       *ctx->pc = pc + 1;
       return 1;
     }
-    size_t new_top = (size_t)new_top64;
-    size_t new_top_aligned = (new_top + 3u) & ~3u;
-    if (!mem_grow_zero(mem, new_top_aligned)) {
-      regs->HL = (uint64_t)(uint32_t)ZI_E_OOM;
-      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
-                       r->m);
-      *ctx->pc = pc + 1;
-      return 1;
-    }
-    if (dbg_cfg && dbg_cfg->shake_poison_heap && new_top_aligned <= UINT32_MAX &&
-        (uint64_t)ptr <= (uint64_t)new_top_aligned) {
-      shake_poison_range(dbg_cfg, mem, ptr,
-                         (uint32_t)((uint32_t)new_top_aligned - ptr));
-    }
-    heap_top = (uint32_t)new_top_aligned;
     regs->HL = (uint64_t)ptr;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
@@ -86,6 +71,7 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
 
   if (strcmp(callee, "zi_free") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
+    shake_note_free_ptr(dbg_cfg, mem, (uint32_t)regs->HL);
     regs->HL = (uint64_t)ZI_OK;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
@@ -541,26 +527,19 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   if (strcmp(callee, "_alloc") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t size = (uint32_t)regs->HL;
-    uint32_t ptr = heap_top;
-    uint64_t new_top64 = (uint64_t)heap_top + (uint64_t)size;
-    if (new_top64 > SIZE_MAX) {
-      regs->HL = 0;
+    if (size == 0) {
+      regs->HL = (uint64_t)heap_top;
+      if (ctx->heap_top) *ctx->heap_top = heap_top;
       *ctx->pc = pc + 1;
       return 1;
     }
-    size_t new_top = (size_t)new_top64;
-    size_t new_top_aligned = (new_top + 3u) & ~3u;
-    if (!mem_grow_zero(mem, new_top_aligned)) {
+    uint32_t ptr = 0;
+    if (!heap_alloc4_shake(mem, &heap_top, size, &ptr, dbg_cfg, 1)) {
       regs->HL = 0;
+      if (ctx->heap_top) *ctx->heap_top = heap_top;
       *ctx->pc = pc + 1;
       return 1;
     }
-    if (dbg_cfg && dbg_cfg->shake_poison_heap && new_top_aligned <= UINT32_MAX &&
-        (uint64_t)ptr <= (uint64_t)new_top_aligned) {
-      shake_poison_range(dbg_cfg, mem, ptr,
-                         (uint32_t)((uint32_t)new_top_aligned - ptr));
-    }
-    heap_top = (uint32_t)new_top_aligned;
     regs->HL = (uint64_t)ptr;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
@@ -571,6 +550,7 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
 
   if (strcmp(callee, "_free") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
+    shake_note_free_ptr(dbg_cfg, mem, (uint32_t)regs->HL);
     *ctx->pc = pc + 1;
     return 1;
   }

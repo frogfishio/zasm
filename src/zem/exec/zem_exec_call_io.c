@@ -58,10 +58,19 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       *ctx->pc = pc + 1;
       return 1;
     }
-    int32_t n = req_read(0, mem->bytes + ptr, (size_t)cap);
+    uint32_t eff_cap = cap;
+    if (dbg_cfg && dbg_cfg->shake && dbg_cfg->shake_io_chunking && cap) {
+      uint32_t max = dbg_cfg->shake_io_chunk_max ? dbg_cfg->shake_io_chunk_max : 64u;
+      if (max == 0) max = 1u;
+      uint32_t upper = (cap < max) ? cap : max;
+      uint64_t tag = ((uint64_t)pc << 32) ^ ((uint64_t)ptr << 1) ^ (uint64_t)cap ^ 0x696eull;
+      uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
+      eff_cap = chunk;
+    }
+    int32_t n = req_read(0, mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
       uint32_t wlen = (uint32_t)n;
-      if (wlen > cap) wlen = cap;
+      if (wlen > eff_cap) wlen = eff_cap;
       zem_watchset_note_write(watches, ptr, wlen, (uint32_t)pc, cur_label,
                               r->line);
     }
@@ -146,10 +155,20 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       *ctx->pc = pc + 1;
       return 1;
     }
-    int32_t n = req_read(handle, mem->bytes + ptr, (size_t)cap);
+    uint32_t eff_cap = cap;
+    if (dbg_cfg && dbg_cfg->shake && dbg_cfg->shake_io_chunking && cap) {
+      uint32_t max = dbg_cfg->shake_io_chunk_max ? dbg_cfg->shake_io_chunk_max : 64u;
+      if (max == 0) max = 1u;
+      uint32_t upper = (cap < max) ? cap : max;
+      uint64_t tag = ((uint64_t)pc << 32) ^ ((uint64_t)handle_u << 24) ^
+                     ((uint64_t)ptr << 1) ^ (uint64_t)cap ^ 0x72656164ull;
+      uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
+      eff_cap = chunk;
+    }
+    int32_t n = req_read(handle, mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
       uint32_t wlen = (uint32_t)n;
-      if (wlen > cap) wlen = cap;
+      if (wlen > eff_cap) wlen = eff_cap;
       zem_watchset_note_write(watches, ptr, wlen, (uint32_t)pc, cur_label,
                               r->line);
     }

@@ -252,6 +252,7 @@ test-validation: test-zem-rep-render-from-report
 test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
 test-validation: test-zem-shake-smoke
+test-validation: test-zem-shake-redzone test-zem-shake-quarantine test-zem-shake-io-chunking
 
 # Experimental / local-only debloat playground (large fixture).
 # Not included in test-all/test-validation.
@@ -286,6 +287,15 @@ test-zem-zi-enum-alloc: zas zem
 
 test-zem-shake-smoke: zas zem
 	sh test/zem_shake_smoke.sh
+
+test-zem-shake-redzone: zas zem
+	sh test/zem_shake_redzone.sh
+
+test-zem-shake-quarantine: zas zem
+	sh test/zem_shake_quarantine.sh
+
+test-zem-shake-io-chunking: zas zem
+	sh test/zem_shake_io_chunking.sh
 
 test-zem-zi-proc-env: zas zem
 	sh test/zem_zi_proc_env.sh

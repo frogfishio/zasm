@@ -95,7 +95,9 @@ static void print_help(FILE *out) {
       "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
       "      [--sniff] [--sniff-fatal]\n",
       "      [--shake [--shake-iters N] [--shake-seed S] [--shake-start N]\n",
-      "              [--shake-heap-pad N] [--shake-heap-pad-max N] [--shake-poison-heap]]\n",
+      "              [--shake-heap-pad N] [--shake-heap-pad-max N] [--shake-poison-heap]\n",
+      "              [--shake-redzone N] [--shake-quarantine N] [--shake-poison-free]\n",
+      "              [--shake-io-chunking] [--shake-io-chunk-max N]]\n",
       "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n",
       "\n",
       "Info:\n",
@@ -178,6 +180,11 @@ static void print_help(FILE *out) {
       "  --shake-heap-pad N   Fixed heap-base padding per run (bytes; useful for replay)\n",
       "  --shake-heap-pad-max N  Random heap-base padding per run: [0..N] bytes\n",
       "  --shake-poison-heap  Poison newly-allocated heap bytes (surfaces uninit reads)\n",
+      "  --shake-redzone N    Add N-byte redzones around zi_alloc/_alloc allocations\n",
+      "  --shake-quarantine N Track up to N freed spans; fault on access (UAF surfacing)\n",
+      "  --shake-poison-free  Poison freed regions (best-effort; pairs well with quarantine)\n",
+      "  --shake-io-chunking  Force short reads for zi_read/req_read/_in\n",
+      "  --shake-io-chunk-max N Max short-read chunk size (default: 64)\n",
       "  --break-pc N        Break when pc (record index) == N\n",
       "  --break-label L     Break at label L (first instruction after label record)\n",
       "  --debug             Interactive CLI debugger (break/step/regs/bt)\n",
@@ -271,6 +278,11 @@ int main(int argc, char **argv) {
   int shake_heap_pad_set = 0;
   uint32_t shake_heap_pad_max = 0;
   int shake_poison_heap = 0;
+  uint32_t shake_redzone = 0;
+  uint32_t shake_quarantine = 0;
+  int shake_poison_free = 0;
+  int shake_io_chunking = 0;
+  uint32_t shake_io_chunk_max = 64;
   int shake_seed_set = 0;
   uint64_t shake_seed = 0;
 
@@ -597,6 +609,50 @@ int main(int argc, char **argv) {
       shake = 1;
       continue;
     }
+    if (strcmp(argv[i], "--shake-redzone") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-redzone requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-redzone value");
+      shake_redzone = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-quarantine") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-quarantine requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-quarantine value");
+      shake_quarantine = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-poison-free") == 0) {
+      shake_poison_free = 1;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-io-chunking") == 0) {
+      shake_io_chunking = 1;
+      shake = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--shake-io-chunk-max") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--shake-io-chunk-max requires a number");
+      }
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i]) return zem_failf("bad --shake-io-chunk-max value");
+      if (v == 0) return zem_failf("--shake-io-chunk-max must be >= 1");
+      shake_io_chunk_max = (uint32_t)v;
+      shake = 1;
+      continue;
+    }
     if (strcmp(argv[i], "--debug") == 0) {
       dbg.enabled = 1;
       dbg.start_paused = 1;
@@ -847,6 +903,11 @@ int main(int argc, char **argv) {
       run_dbg.shake_run = run;
       run_dbg.shake_seed = shake_seed;
       run_dbg.shake_poison_heap = shake_poison_heap;
+      run_dbg.shake_redzone = shake_redzone;
+      run_dbg.shake_quarantine = shake_quarantine;
+      run_dbg.shake_poison_free = shake_poison_free;
+      run_dbg.shake_io_chunking = shake_io_chunking;
+      run_dbg.shake_io_chunk_max = shake_io_chunk_max;
 
       uint32_t pad = 0;
       if (shake_heap_pad_set) {
@@ -867,9 +928,18 @@ int main(int argc, char **argv) {
                 " heap_pad=%u\n",
                 run, shake_seed, pad);
         fprintf(stderr,
-                "zem: shake: replay: --shake --shake-iters 1 --shake-start %u "
-                "--shake-seed 0x%016" PRIx64 " --shake-heap-pad %u%s\n",
-                run, shake_seed, pad, shake_poison_heap ? " --shake-poison-heap" : "");
+          "zem: shake: replay: --shake --shake-iters 1 --shake-start %u "
+          "--shake-seed 0x%016" PRIx64 " --shake-heap-pad %u",
+          run, shake_seed, pad);
+        if (shake_poison_heap) fprintf(stderr, " --shake-poison-heap");
+        if (shake_redzone) fprintf(stderr, " --shake-redzone %u", shake_redzone);
+        if (shake_quarantine) fprintf(stderr, " --shake-quarantine %u", shake_quarantine);
+        if (shake_poison_free) fprintf(stderr, " --shake-poison-free");
+        if (shake_io_chunking) fprintf(stderr, " --shake-io-chunking");
+        if (shake_io_chunking && shake_io_chunk_max != 64u) {
+          fprintf(stderr, " --shake-io-chunk-max %u", shake_io_chunk_max);
+        }
+        fprintf(stderr, "\n");
         rc = run_rc;
         break;
       }
