@@ -11,7 +11,108 @@ static uint64_t cg_now_ns(void) {
   return (t * (uint64_t)tb.numer) / (uint64_t)tb.denom;
 }
 
-static cg_profile_t *g_prof;
+typedef struct {
+  const char *key;
+  symtab_entry *val;
+} symtab_map_entry_t;
+
+typedef struct {
+  symtab_map_entry_t *entries;
+  size_t cap; /* power of two */
+  size_t len;
+} symtab_map_t;
+
+typedef struct {
+  cg_profile_t *prof;
+  symtab_map_t *symmap;
+} cg_ctx_t;
+
+static uint64_t hash64_fnv1a_str(const char *s) {
+  uint64_t h = 1469598103934665603ull;
+  if (!s) return h;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)(*p);
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static void symtab_map_free(symtab_map_t *m) {
+  if (!m) return;
+  free(m->entries);
+  m->entries = NULL;
+  m->cap = 0;
+  m->len = 0;
+}
+
+static void symtab_map_rehash(symtab_map_t *m, size_t new_cap) {
+  if (!m) return;
+  symtab_map_entry_t *old = m->entries;
+  size_t old_cap = m->cap;
+
+  symtab_map_entry_t *neu = (symtab_map_entry_t *)calloc(new_cap, sizeof(symtab_map_entry_t));
+  if (!neu) {
+    /* Disable map on OOM; callers will fall back to list scans. */
+    symtab_map_free(m);
+    return;
+  }
+
+  m->entries = neu;
+  m->cap = new_cap;
+  m->len = 0;
+
+  if (old) {
+    for (size_t i = 0; i < old_cap; i++) {
+      if (!old[i].key) continue;
+      const char *key = old[i].key;
+      symtab_entry *val = old[i].val;
+      uint64_t h = hash64_fnv1a_str(key);
+      size_t mask = new_cap - 1;
+      size_t pos = (size_t)h & mask;
+      while (neu[pos].key) pos = (pos + 1) & mask;
+      neu[pos] = (symtab_map_entry_t){ key, val };
+      m->len++;
+    }
+    free(old);
+  }
+}
+
+static void symtab_map_ensure(symtab_map_t *m) {
+  if (!m) return;
+  if (m->cap == 0) {
+    symtab_map_rehash(m, 256);
+    return;
+  }
+  if ((m->len + 1) * 10 >= m->cap * 7) symtab_map_rehash(m, m->cap * 2);
+}
+
+static symtab_entry *symtab_map_get(const symtab_map_t *m, const char *key) {
+  if (!m || m->cap == 0 || !key) return NULL;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) return m->entries[pos].val;
+    pos = (pos + 1) & mask;
+  }
+  return NULL;
+}
+
+static void symtab_map_put_if_absent(symtab_map_t *m, const char *key, symtab_entry *val) {
+  if (!m || !key || !val) return;
+  symtab_map_ensure(m);
+  if (m->cap == 0) return;
+
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) return;
+    pos = (pos + 1) & mask;
+  }
+  m->entries[pos] = (symtab_map_entry_t){ key, val };
+  m->len++;
+}
 
 /* Lightweight utilities */
 static char *dupstr(const char *s) {
@@ -32,14 +133,23 @@ static void symtab_free(symtab_entry *s) {
   }
 }
 
-static symtab_entry *symtab_add(symtab_entry **root, const char *name, size_t off) {
-  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
+static symtab_entry *symtab_add(cg_ctx_t *ctx, symtab_entry **root, const char *name, size_t off) {
+  const uint64_t t0 = (ctx && ctx->prof) ? cg_now_ns() : 0;
   if (!root || !name) return NULL;
-  for (symtab_entry *s = *root; s; s = s->next) {
-    if (s->name && strcmp(s->name, name) == 0) {
+  if (ctx && ctx->symmap && ctx->symmap->cap) {
+    symtab_entry *s = symtab_map_get(ctx->symmap, name);
+    if (s) {
       if (off != (size_t)-1) s->off = off;
-      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+      if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
       return s;
+    }
+  } else {
+    for (symtab_entry *s = *root; s; s = s->next) {
+      if (s->name && strcmp(s->name, name) == 0) {
+        if (off != (size_t)-1) s->off = off;
+        if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
+        return s;
+      }
     }
   }
   symtab_entry *e = (symtab_entry *)calloc(1, sizeof(symtab_entry));
@@ -49,31 +159,46 @@ static symtab_entry *symtab_add(symtab_entry **root, const char *name, size_t of
   e->off = off;
   e->next = *root;
   *root = e;
-  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+  if (ctx && ctx->symmap) symtab_map_put_if_absent(ctx->symmap, e->name, e);
+  if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
   return e;
 }
 
-static void symtab_update(symtab_entry *root, const char *name, size_t off) {
-  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
-  for (symtab_entry *s = root; s; s = s->next) {
-    if (s->name && strcmp(s->name, name) == 0) {
+static void symtab_update(cg_ctx_t *ctx, symtab_entry *root, const char *name, size_t off) {
+  const uint64_t t0 = (ctx && ctx->prof) ? cg_now_ns() : 0;
+  if (ctx && ctx->symmap && ctx->symmap->cap) {
+    symtab_entry *s = symtab_map_get(ctx->symmap, name);
+    if (s) {
       s->off = off;
-      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+      if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
       return;
     }
+  } else {
+    for (symtab_entry *s = root; s; s = s->next) {
+      if (s->name && strcmp(s->name, name) == 0) {
+        s->off = off;
+        if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
+        return;
+      }
+    }
   }
-  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+  if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
 }
 
-static int symtab_has(symtab_entry *root, const char *name) {
-  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
+static int symtab_has(cg_ctx_t *ctx, symtab_entry *root, const char *name) {
+  const uint64_t t0 = (ctx && ctx->prof) ? cg_now_ns() : 0;
+  if (ctx && ctx->symmap && ctx->symmap->cap) {
+    const int ok = symtab_map_get(ctx->symmap, name) != NULL;
+    if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
+    return ok;
+  }
   for (symtab_entry *s = root; s; s = s->next) {
     if (s->name && strcmp(s->name, name) == 0) {
-      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+      if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
       return 1;
     }
   }
-  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+  if (ctx && ctx->prof) ctx->prof->symtab_ns += cg_now_ns() - t0;
   return 0;
 }
 
@@ -133,9 +258,9 @@ void cg_free(cg_blob_t *out) {
   memset(out, 0, sizeof(*out));
 }
 
-static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const char *sym, uint32_t line, size_t ir_id) {
+static void add_reloc(cg_blob_t *out, cg_profile_t *prof, uint32_t instr_off, uint32_t type, const char *sym, uint32_t line, size_t ir_id) {
   if (!out || !sym) return;
-  const uint64_t t0 = (out->profile_enabled && g_prof) ? cg_now_ns() : 0;
+  const uint64_t t0 = prof ? cg_now_ns() : 0;
   cg_reloc_t *r = (cg_reloc_t *)calloc(1, sizeof(cg_reloc_t));
   if (!r) return;
   r->instr_off = instr_off;
@@ -146,12 +271,12 @@ static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const c
   r->next = out->relocs;
   out->relocs = r;
   out->reloc_count++;
-  if (out->profile_enabled && g_prof) g_prof->reloc_ns += cg_now_ns() - t0;
+  if (prof) prof->reloc_ns += cg_now_ns() - t0;
 }
 
-static void add_pc_map(cg_blob_t *out, uint32_t off, size_t ir_id, uint32_t line) {
+static void add_pc_map(cg_blob_t *out, cg_profile_t *prof, uint32_t off, size_t ir_id, uint32_t line) {
   if (!out) return;
-  const uint64_t t0 = (out->profile_enabled && g_prof) ? cg_now_ns() : 0;
+  const uint64_t t0 = prof ? cg_now_ns() : 0;
   cg_pc_map_t *p = (cg_pc_map_t *)calloc(1, sizeof(cg_pc_map_t));
   if (!p) return;
   p->off = off;
@@ -160,7 +285,7 @@ static void add_pc_map(cg_blob_t *out, uint32_t off, size_t ir_id, uint32_t line
   p->next = out->pc_map;
   out->pc_map = p;
   out->pc_map_count++;
-  if (out->profile_enabled && g_prof) g_prof->pcmap_ns += cg_now_ns() - t0;
+  if (prof) prof->pcmap_ns += cg_now_ns() - t0;
 }
 
 /* ARM64 encodings */
@@ -235,7 +360,8 @@ static int fits_imm12_signed(long long v) {
   return v >= -2048 && v <= 2047;
 }
 
-static symtab_entry *find_sym(symtab_entry *root, const char *name) {
+static symtab_entry *find_sym(cg_ctx_t *ctx, symtab_entry *root, const char *name) {
+  if (ctx && ctx->symmap && ctx->symmap->cap) return symtab_map_get(ctx->symmap, name);
   for (symtab_entry *s = root; s; s = s->next) {
     if (s->name && strcmp(s->name, name) == 0) return s;
   }
@@ -297,12 +423,12 @@ static void emit_mov_imm64(uint32_t *w, size_t *pcw, uint8_t rd, uint64_t imm) {
   if (!emitted) w[(*pcw)++] = enc_movz(rd,0,0);
 }
 
-static void emit_adrp_add(cg_blob_t *out,uint32_t *w,size_t *pcw,int rd,const char *sym, uint32_t line, size_t ir_id){
+static void emit_adrp_add(cg_blob_t *out, cg_profile_t *prof, uint32_t *w, size_t *pcw, int rd, const char *sym, uint32_t line, size_t ir_id) {
   size_t off = (*pcw)*4;
   w[(*pcw)++] = 0x90000000u | (uint32_t)rd; /* ADRP rd, sym@PAGE */
-  add_reloc(out,(uint32_t)off,0,sym,line,ir_id);
+  add_reloc(out, prof, (uint32_t)off, 0, sym, line, ir_id);
   w[(*pcw)++] = 0x91000000u | ((uint32_t)rd<<5) | (uint32_t)rd; /* ADD rd, rd, sym@PAGEOFF */
-  add_reloc(out,(uint32_t)(off+4),1,sym,line,ir_id);
+  add_reloc(out, prof, (uint32_t)(off+4), 1, sym, line, ir_id);
 }
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
@@ -312,11 +438,14 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   out->profile_enabled = profile_enabled;
   cg_profile_t *prof = out->profile_enabled ? &out->prof : NULL;
   if (prof) memset(prof, 0, sizeof(*prof));
-  g_prof = prof;
+  symtab_map_t symmap = {0};
+  cg_ctx_t ctx = { .prof = prof, .symmap = &symmap };
+  /* Best-effort: if this fails, we fall back to list scans. */
+  symtab_map_ensure(&symmap);
   const uint64_t t_total0 = prof ? cg_now_ns() : 0;
-  symtab_add(&out->syms,"lembeh_handle",0);
-#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); g_prof = NULL; cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
-#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); g_prof = NULL; cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+  symtab_add(&ctx, &out->syms, "lembeh_handle", 0);
+#define CG_FAIL(ctx_entry, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+#define CG_FAILF(ctx_entry, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
 
   /* Collect labels and call targets for function boundary detection. */
   seen_sym_t *call_targets = NULL;
@@ -335,7 +464,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
-      symtab_add(&out->syms, e->u.label.name ? e->u.label.name : "", (size_t)-1);
+      symtab_add(&ctx, &out->syms, e->u.label.name ? e->u.label.name : "", (size_t)-1);
       seen_add(&label_list, &n_labels, &c_labels, e->u.label.name ? e->u.label.name : "", e->loc.line);
       continue;
     }
@@ -345,14 +474,14 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         case IR_DIR_DW:
         case IR_DIR_STR:
           data_len += e->u.dir.data_len;
-          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)-1);
+          if (e->u.dir.name) symtab_add(&ctx, &out->syms, e->u.dir.name, (size_t)-1);
           break;
         case IR_DIR_RESB:
           data_len += e->u.dir.reserve_len;
-          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)-1);
+          if (e->u.dir.name) symtab_add(&ctx, &out->syms, e->u.dir.name, (size_t)-1);
           break;
         case IR_DIR_EQU:
-          if (e->u.dir.name) symtab_add(&out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
+          if (e->u.dir.name) symtab_add(&ctx, &out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
           break;
         case IR_DIR_PUBLIC:
           break;
@@ -371,8 +500,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         ir_op_t *op = &e->u.instr.ops[i];
         if (op->kind == IR_OP_MEM && op->mem_base) {
           int base = map_reg(op->mem_base);
-          if (base < 0 && !symtab_has(out->syms, op->mem_base)) {
-            symtab_add(&out->syms, op->mem_base, (size_t)-1);
+          if (base < 0 && !symtab_has(&ctx, out->syms, op->mem_base)) {
+            symtab_add(&ctx, &out->syms, op->mem_base, (size_t)-1);
             data_len += 8; /* default slot */
           }
         }
@@ -436,7 +565,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           in_func = 1;
           func_has_prologue = 0;
         }
-        symtab_update(out->syms, e->u.label.name, pcw*4);
+        symtab_update(&ctx, out->syms, e->u.label.name, pcw*4);
       }
       if (prof) prof->pass2_labels_ns += cg_now_ns() - t_e0;
       continue;
@@ -449,19 +578,19 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         case IR_DIR_STR:
           if (e->u.dir.data_len && e->u.dir.data) {
             memcpy(out->data + data_off, e->u.dir.data, e->u.dir.data_len);
-            if (e->u.dir.name) symtab_update(out->syms, e->u.dir.name, sym_off);
+            if (e->u.dir.name) symtab_update(&ctx, out->syms, e->u.dir.name, sym_off);
             data_off += e->u.dir.data_len;
           }
           break;
         case IR_DIR_RESB:
           if (e->u.dir.reserve_len) {
             memset(out->data + data_off, 0, e->u.dir.reserve_len);
-            if (e->u.dir.name) symtab_update(out->syms, e->u.dir.name, sym_off);
+            if (e->u.dir.name) symtab_update(&ctx, out->syms, e->u.dir.name, sym_off);
             data_off += e->u.dir.reserve_len;
           }
           break;
         case IR_DIR_EQU:
-          if (e->u.dir.name) symtab_update(out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
+          if (e->u.dir.name) symtab_update(&ctx, out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
           break;
         default:
           break;
@@ -482,7 +611,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     }
 
     /* Record map entry for this IR instruction. */
-    add_pc_map(out, (uint32_t)(pcw*4), e->id, (uint32_t)e->loc.line);
+    add_pc_map(out, prof, (uint32_t)(pcw*4), e->id, (uint32_t)e->loc.line);
 
     if (strcmp(m,"RET")==0) {
       if (func_has_prologue) {
@@ -494,74 +623,78 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       continue;
     }
 
-      if (strcmp(m,"CALL")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
+    if (strcmp(m,"CALL")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
       /* Marshal arguments into x0-x7, spill rest on stack (16-byte aligned). */
-      size_t arg_words = nops>1 ? nops-1 : 0;
+      size_t arg_words = nops > 1 ? nops - 1 : 0;
       size_t gp_regs = 8;
-      size_t to_spill = arg_words>gp_regs ? arg_words-gp_regs : 0;
+      size_t to_spill = arg_words > gp_regs ? arg_words - gp_regs : 0;
       if (to_spill) {
-        size_t spill_bytes = to_spill*8;
+        size_t spill_bytes = to_spill * 8;
         /* align to 16 */
         if (spill_bytes & 0xF) spill_bytes = (spill_bytes + 0xF) & ~0xFULL;
         if (spill_bytes <= 4095) {
           w[pcw++] = enc_sub_imm(1, 31, 31, (uint16_t)spill_bytes); /* sp -= spill_bytes */
         } else {
-          emit_mov_imm64(w,&pcw,7,spill_bytes);
+          emit_mov_imm64(w, &pcw, 7, spill_bytes);
           w[pcw++] = enc_sub_reg(1, 31, 31, 7);
         }
       }
       for (size_t i = 1; i < nops; i++) {
         ir_op_t *arg = &ops[i];
-        if (i-1 < gp_regs) {
-          uint8_t reg = (uint8_t)(i-1);
-        if (arg->kind == IR_OP_NUM) {
-          emit_mov_imm64(w, &pcw, reg, (uint64_t)arg->unum);
-        } else if (arg->kind == IR_OP_SYM) {
-          int rmap = map_reg(arg->sym);
-          if (rmap >= 0) {
-            w[pcw++] = enc_add_imm(1, reg, (uint8_t)rmap, 0);
-          } else {
-            emit_adrp_add(out, w, &pcw, reg, arg->sym, (uint32_t)e->loc.line, e->id);
-          }
-        } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
+        if (i - 1 < gp_regs) {
+          uint8_t reg = (uint8_t)(i - 1);
+          if (arg->kind == IR_OP_NUM) {
+            emit_mov_imm64(w, &pcw, reg, (uint64_t)arg->unum);
+          } else if (arg->kind == IR_OP_SYM) {
+            int rmap = map_reg(arg->sym);
+            if (rmap >= 0) {
+              w[pcw++] = enc_add_imm(1, reg, (uint8_t)rmap, 0);
+            } else {
+              emit_adrp_add(out, prof, w, &pcw, reg, arg->sym, (uint32_t)e->loc.line, e->id);
+            }
+          } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
             if (base < 0) { CG_FAIL(e, "CALL arg mem base must be register"); }
             w[pcw++] = enc_add_imm(1, reg, (uint8_t)base, 0);
-          } else { CG_FAIL(e, "unsupported CALL arg"); }
+          } else {
+            CG_FAIL(e, "unsupported CALL arg");
+          }
         } else {
-          size_t spill_index = i-1-gp_regs;
-          size_t spill_off = spill_index*8;
+          size_t spill_index = i - 1 - gp_regs;
+          size_t spill_off = spill_index * 8;
           uint8_t tmp = 6;
           if (arg->kind == IR_OP_NUM) {
-            emit_mov_imm64(w,&pcw,tmp,(uint64_t)arg->unum);
+            emit_mov_imm64(w, &pcw, tmp, (uint64_t)arg->unum);
           } else if (arg->kind == IR_OP_SYM) {
-            emit_adrp_add(out,w,&pcw,tmp,arg->sym,(uint32_t)e->loc.line,e->id);
+            emit_adrp_add(out, prof, w, &pcw, tmp, arg->sym, (uint32_t)e->loc.line, e->id);
           } else if (arg->kind == IR_OP_MEM && arg->mem_base) {
             int base = map_reg(arg->mem_base);
             if (base < 0) { CG_FAIL(e, "CALL spill mem base must be register"); }
             w[pcw++] = enc_add_imm(1, tmp, (uint8_t)base, 0);
-          } else { CG_FAIL(e, "unsupported CALL spill arg"); }
-          if (spill_off/8 < 4096) {
-            uint16_t imm12 = (uint16_t)(spill_off/8);
+          } else {
+            CG_FAIL(e, "unsupported CALL spill arg");
+          }
+          if (spill_off / 8 < 4096) {
+            uint16_t imm12 = (uint16_t)(spill_off / 8);
             w[pcw++] = enc_str_x_imm(tmp, 31, imm12); /* store to sp+spill_off */
           } else {
             uint8_t addr = 7;
-            emit_mov_imm64(w,&pcw,addr,(uint64_t)spill_off);
+            emit_mov_imm64(w, &pcw, addr, (uint64_t)spill_off);
             w[pcw++] = enc_add_reg(1, addr, 31, addr);
             w[pcw++] = enc_str_x_imm(tmp, addr, 0);
           }
         }
       }
       w[pcw] = enc_bl_placeholder();
-      add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym,(uint32_t)e->loc.line,e->id);
+      add_reloc(out, prof, (uint32_t)(pcw*4), 2, ops[0].sym, (uint32_t)e->loc.line, e->id);
       pcw++;
       if (to_spill) {
-        size_t spill_bytes = to_spill*8;
+        size_t spill_bytes = to_spill * 8;
         if (spill_bytes & 0xF) spill_bytes = (spill_bytes + 0xF) & ~0xFULL;
         if (spill_bytes <= 4095) {
           w[pcw++] = enc_add_imm(1, 31, 31, (uint16_t)spill_bytes); /* sp += spill_bytes */
         } else {
-          emit_mov_imm64(w,&pcw,7,spill_bytes);
+          emit_mov_imm64(w, &pcw, 7, spill_bytes);
           w[pcw++] = enc_add_reg(1, 31, 31, 7);
         }
       }
@@ -570,18 +703,18 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
     if (strcmp(m,"JR")==0 && nops>=1 && ops[0].kind==IR_OP_SYM) {
       if (nops==1) {
-        symtab_entry *target = find_sym(out->syms, ops[0].sym);
+        symtab_entry *target = find_sym(&ctx, out->syms, ops[0].sym);
         if (target && target->off != (size_t)-1 && branch_rel_ok((int64_t)target->off - (int64_t)(pcw*4))) {
           int64_t disp = (int64_t)target->off - (int64_t)(pcw*4);
           int32_t imm26 = (int32_t)(disp/4);
           w[pcw++] = enc_b_placeholder() | ((uint32_t)imm26 & 0x03FFFFFFu);
         } else {
           w[pcw] = enc_b_placeholder();
-          add_reloc(out,(uint32_t)(pcw*4),2, ops[0].sym,(uint32_t)e->loc.line,e->id);
+          add_reloc(out, prof, (uint32_t)(pcw*4), 2, ops[0].sym, (uint32_t)e->loc.line, e->id);
           pcw++;
         }
       } else if (nops==2 && ops[1].kind==IR_OP_SYM) {
-        symtab_entry *target = find_sym(out->syms, ops[1].sym);
+        symtab_entry *target = find_sym(&ctx, out->syms, ops[1].sym);
         if (!target) { CG_FAILF(e, "JR target '%s' missing", ops[1].sym ? ops[1].sym : "(null)"); }
         int64_t disp = (int64_t)target->off - (int64_t)(pcw*4);
         int32_t imm19 = (int32_t)(disp/4);
@@ -591,7 +724,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           /* skip over the reloc branch if condition false (skip 1 instruction -> imm19=2 because PC-relative) */
           w[pcw++] = enc_b_cond(inv, 2);
           w[pcw] = enc_b_placeholder();
-          add_reloc(out,(uint32_t)(pcw*4),2, ops[1].sym,(uint32_t)e->loc.line,e->id);
+          add_reloc(out, prof, (uint32_t)(pcw*4), 2, ops[1].sym, (uint32_t)e->loc.line, e->id);
           pcw++;
         } else {
           uint8_t cond = cond_from_sym(ops[0].sym);
@@ -717,9 +850,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           /* register move */
           w[pcw++] = enc_add_reg(1, (uint8_t)rd, 31, (uint8_t)rs);
         } else if (strcmp(m,"LD")==0) {
-          emit_adrp_add(out,w,&pcw,rd,ops[1].sym,(uint32_t)e->loc.line,e->id); /* load address */
+          emit_adrp_add(out, prof, w, &pcw, rd, ops[1].sym, (uint32_t)e->loc.line, e->id); /* load address */
         } else {
-          emit_adrp_add(out,w,&pcw,rd,ops[1].sym,(uint32_t)e->loc.line,e->id);
+          emit_adrp_add(out, prof, w, &pcw, rd, ops[1].sym, (uint32_t)e->loc.line, e->id);
           if (strcmp(m,"LD8U")==0 || strcmp(m,"LD8S")==0 || strcmp(m,"LD8U64")==0 || strcmp(m,"LD8S64")==0) w[pcw++] = enc_ldr_b((uint8_t)rd,(uint8_t)rd,0);
           else if (strcmp(m,"LD16U")==0 || strcmp(m,"LD16S")==0 || strcmp(m,"LD16U64")==0 || strcmp(m,"LD16S64")==0) w[pcw++] = enc_ldr_h((uint8_t)rd,(uint8_t)rd,0);
           else if (strcmp(m,"LD32")==0 || strcmp(m,"LD32U64")==0 || strcmp(m,"LD32S64")==0) w[pcw++] = enc_ldr_w((uint8_t)rd,(uint8_t)rd,0);
@@ -740,7 +873,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         else if (strcmp(m,"LD32")==0 || strcmp(m,"LD32S64")==0 || strcmp(m,"LD32U64")==0) scale=2;
         uint8_t addr_reg = (uint8_t)((base < 0) ? rd : base);
         if (base < 0) { /* treat mem base as symbol */
-          emit_adrp_add(out,w,&pcw,addr_reg,ops[1].mem_base,(uint32_t)e->loc.line,e->id);
+          emit_adrp_add(out, prof, w, &pcw, addr_reg, ops[1].mem_base, (uint32_t)e->loc.line, e->id);
         }
         if (base >=0 && uimm12_scaled(off,scale,&imm12)) {
           if (strcmp(m,"LD8U")==0 || strcmp(m,"LD8U64")==0) w[pcw++] = enc_ldr_b((uint8_t)rd,addr_reg,imm12);
@@ -790,7 +923,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       int base_is_sym = (base < 0);
       if (base_is_sym) {
         addr_reg = 5;
-        emit_adrp_add(out,w,&pcw,addr_reg,ops[0].mem_base,(uint32_t)e->loc.line,e->id);
+        emit_adrp_add(out, prof, w, &pcw, addr_reg, ops[0].mem_base, (uint32_t)e->loc.line, e->id);
       }
       if (!uimm12_scaled(off,scale,&imm12)) {
         if (!base_is_sym) {
@@ -989,6 +1122,6 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   seen_free(label_list, n_labels);
 
   if (prof) prof->total_ns = cg_now_ns() - t_total0;
-  g_prof = NULL;
+  symtab_map_free(&symmap);
   return 0;
 }
