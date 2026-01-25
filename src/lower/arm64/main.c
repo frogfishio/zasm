@@ -3,10 +3,22 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <mach/mach_time.h>
 #include "codegen.h"
 #include "ir.h"
 #include "json_ir.h"
 #include "mach_o.h"
+
+static uint64_t now_ns(void) {
+  static mach_timebase_info_data_t tb;
+  if (tb.denom == 0) (void)mach_timebase_info(&tb);
+  const uint64_t t = mach_absolute_time();
+  return (t * (uint64_t)tb.numer) / (uint64_t)tb.denom;
+}
+
+static double ns_to_ms(uint64_t ns) {
+  return (double)ns / 1000000.0;
+}
 
 static void usage(const char *prog) {
   fprintf(stderr,
@@ -34,6 +46,7 @@ static void usage(const char *prog) {
     "  --trace-func  Function symbol to trace (default: main)\n"
     "  --trace-syms  Comma list of symbols to dump at trace breakpoints\n"
     "  --trace-regs  Comma list of registers (e.g. w0,x0) to dump\n"
+    "  --profile     Print per-phase timings to stderr\n"
     "  --strict      Promote warnings (unknown refs, auto-alloc mem bases) to errors\n\n"
     "Exit codes: 0=ok, 2=parse error, 3=codegen error, 4=emit error, 1=usage/IO\n\n"
     "License: GPLv3+\n"
@@ -72,23 +85,208 @@ static int is_reg(const char *s) {
 }
 
 typedef struct {
-  const char *name;
+  const char *key;
   size_t line;
-} sym_seen_t;
+} symset_entry_t;
 
-static int list_has(sym_seen_t *arr, size_t n, const char *name) {
-  if (!name) return 1;
-  for (size_t i = 0; i < n; i++) if (strcmp(arr[i].name, name) == 0) return 1;
+typedef struct {
+  symset_entry_t *entries;
+  size_t cap; /* always power of two */
+  size_t len;
+} symset_t;
+
+typedef struct {
+  cg_reloc_t **items;
+  size_t len;
+  size_t cap;
+} ref_vec_t;
+
+typedef struct {
+  const char *key;
+  size_t idx;
+} symidx_entry_t;
+
+typedef struct {
+  symidx_entry_t *entries;
+  size_t cap;
+  size_t len;
+} symidx_map_t;
+
+static uint64_t hash64_fnv1a_str(const char *s) {
+  uint64_t h = 1469598103934665603ull;
+  if (!s) return h;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)(*p);
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static void ref_vec_push(ref_vec_t *v, cg_reloc_t *r) {
+  if (v->len >= v->cap) {
+    v->cap = v->cap ? (v->cap * 2) : 8;
+    v->items = (cg_reloc_t **)realloc(v->items, v->cap * sizeof(cg_reloc_t *));
+  }
+  v->items[v->len++] = r;
+}
+
+static void symidx_map_free(symidx_map_t *m) {
+  free(m->entries);
+  m->entries = NULL;
+  m->cap = 0;
+  m->len = 0;
+}
+
+static void symidx_map_rehash(symidx_map_t *m, size_t new_cap) {
+  symidx_entry_t *old = m->entries;
+  size_t old_cap = m->cap;
+  symidx_entry_t *neu = (symidx_entry_t *)calloc(new_cap, sizeof(symidx_entry_t));
+  if (!neu) return;
+  m->entries = neu;
+  m->cap = new_cap;
+  m->len = 0;
+  if (old) {
+    for (size_t i = 0; i < old_cap; i++) {
+      if (!old[i].key) continue;
+      const char *key = old[i].key;
+      size_t idx_val = old[i].idx;
+      uint64_t h = hash64_fnv1a_str(key);
+      size_t mask = new_cap - 1;
+      size_t pos = (size_t)h & mask;
+      while (neu[pos].key) pos = (pos + 1) & mask;
+      neu[pos] = (symidx_entry_t){ key, idx_val };
+      m->len++;
+    }
+    free(old);
+  }
+}
+
+static void symidx_map_ensure(symidx_map_t *m) {
+  if (m->cap == 0) {
+    symidx_map_rehash(m, 64);
+    return;
+  }
+  if ((m->len + 1) * 10 >= m->cap * 7) symidx_map_rehash(m, m->cap * 2);
+}
+
+static int symidx_map_get(const symidx_map_t *m, const char *key, size_t *out_idx) {
+  if (!key || !m || m->cap == 0) return 0;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) {
+      *out_idx = m->entries[pos].idx;
+      return 1;
+    }
+    pos = (pos + 1) & mask;
+  }
   return 0;
 }
 
-static void list_add(sym_seen_t **arr, size_t *n, size_t *cap, const char *name, size_t line) {
-  if (!name || list_has(*arr, *n, name)) return;
-  if (*n >= *cap) {
-    *cap = *cap ? (*cap * 2) : 16;
-    *arr = (sym_seen_t *)realloc(*arr, (*cap) * sizeof(sym_seen_t));
+static int symidx_map_put(symidx_map_t *m, const char *key, size_t idx) {
+  if (!key) return 0;
+  symidx_map_ensure(m);
+  if (m->cap == 0) return 0;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) return 0;
+    pos = (pos + 1) & mask;
   }
-  (*arr)[(*n)++] = (sym_seen_t){name, line};
+  m->entries[pos] = (symidx_entry_t){ key, idx };
+  m->len++;
+  return 1;
+}
+
+static void symset_free(symset_t *set) {
+  free(set->entries);
+  set->entries = NULL;
+  set->cap = 0;
+  set->len = 0;
+}
+
+static void symset_rehash(symset_t *set, size_t new_cap) {
+  symset_entry_t *old = set->entries;
+  size_t old_cap = set->cap;
+
+  symset_entry_t *neu = (symset_entry_t *)calloc(new_cap, sizeof(symset_entry_t));
+  if (!neu) return;
+
+  set->entries = neu;
+  set->cap = new_cap;
+  set->len = 0;
+
+  if (old) {
+    for (size_t i = 0; i < old_cap; i++) {
+      if (!old[i].key) continue;
+      /* reinsert */
+      const char *key = old[i].key;
+      size_t line = old[i].line;
+      uint64_t h = hash64_fnv1a_str(key);
+      size_t mask = new_cap - 1;
+      size_t idx = (size_t)h & mask;
+      while (neu[idx].key) {
+        idx = (idx + 1) & mask;
+      }
+      neu[idx] = (symset_entry_t){ key, line };
+      set->len++;
+    }
+    free(old);
+  }
+}
+
+static void symset_ensure(symset_t *set) {
+  if (set->cap == 0) {
+    symset_rehash(set, 64);
+    return;
+  }
+  /* keep load factor <= ~0.7 */
+  if ((set->len + 1) * 10 >= set->cap * 7) {
+    symset_rehash(set, set->cap * 2);
+  }
+}
+
+static symset_entry_t *symset_find_slot(symset_t *set, const char *key) {
+  if (!key) return NULL;
+  if (set->cap == 0) return NULL;
+  size_t mask = set->cap - 1;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t idx = (size_t)h & mask;
+  while (set->entries[idx].key) {
+    if (strcmp(set->entries[idx].key, key) == 0) return &set->entries[idx];
+    idx = (idx + 1) & mask;
+  }
+  return &set->entries[idx];
+}
+
+static int symset_has(const symset_t *set, const char *key) {
+  if (!key) return 1;
+  if (!set || set->cap == 0) return 0;
+  size_t mask = set->cap - 1;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t idx = (size_t)h & mask;
+  while (set->entries[idx].key) {
+    if (strcmp(set->entries[idx].key, key) == 0) return 1;
+    idx = (idx + 1) & mask;
+  }
+  return 0;
+}
+
+static void symset_add(symset_t *set, const char *key, size_t line) {
+  if (!key) return;
+  symset_ensure(set);
+  if (set->cap == 0) return;
+  symset_entry_t *slot = symset_find_slot(set, key);
+  if (!slot) return;
+  if (slot->key) {
+    /* keep earliest line */
+    if (line && (!slot->line || line < slot->line)) slot->line = line;
+    return;
+  }
+  *slot = (symset_entry_t){ key, line };
+  set->len++;
 }
 
 static char *trim(char *s) {
@@ -152,14 +350,6 @@ static size_t sym_offset(const cg_blob_t *blob, const char *name, const char **s
   return 0;
 }
 
-static int str_in_list(const char **arr, size_t n, const char *s) {
-  if (!s) return 0;
-  for (size_t i = 0; i < n; i++) {
-    if (strcmp(arr[i], s) == 0) return 1;
-  }
-  return 0;
-}
-
 static void emit_json_dump(FILE *fp,
                            const cg_blob_t *blob,
                            size_t missing_count,
@@ -180,24 +370,44 @@ static void emit_json_dump(FILE *fp,
   fprintf(fp, "  ],\n");
   /* refs grouped by sym */
   fprintf(fp, "  \"refs\": {\n");
-  const char *uniq_syms[blob->reloc_count ? blob->reloc_count : 1];
+  const char **uniq_syms = NULL;
+  ref_vec_t *per_sym = NULL;
   size_t uniq_n = 0;
+  size_t uniq_cap = 0;
+  symidx_map_t map = {0};
+
   for (cg_reloc_t *r = blob->relocs; r; r = r->next) {
-    if (r->sym && !str_in_list(uniq_syms, uniq_n, r->sym)) uniq_syms[uniq_n++] = r->sym;
+    if (!r->sym) continue;
+    size_t idx = 0;
+    if (!symidx_map_get(&map, r->sym, &idx)) {
+      if (uniq_n >= uniq_cap) {
+        uniq_cap = uniq_cap ? (uniq_cap * 2) : 16;
+        uniq_syms = (const char **)realloc(uniq_syms, uniq_cap * sizeof(const char *));
+        per_sym = (ref_vec_t *)realloc(per_sym, uniq_cap * sizeof(ref_vec_t));
+        for (size_t k = uniq_n; k < uniq_cap; k++) per_sym[k] = (ref_vec_t){0};
+      }
+      idx = uniq_n++;
+      uniq_syms[idx] = r->sym;
+      symidx_map_put(&map, r->sym, idx);
+    }
+    ref_vec_push(&per_sym[idx], r);
   }
+
   for (size_t ui = 0; ui < uniq_n; ui++) {
     fprintf(fp, "    \"%s\": [", uniq_syms[ui]);
-    int first = 1;
-    for (cg_reloc_t *r = blob->relocs; r; r = r->next) {
-      if (r->sym && strcmp(r->sym, uniq_syms[ui]) == 0) {
-        if (!first) fprintf(fp, ",");
-        first = 0;
-        const char *ty2 = (r->type==0)?"ADRP_PAGE":(r->type==1)?"ADD_PAGEOFF":(r->type==2)?"BRANCH26":"?";
-        fprintf(fp, "{\"off\":%u,\"type\":\"%s\",\"line\":%u,\"ir_id\":%zu}", r->instr_off, ty2, r->line, r->ir_id);
-      }
+    for (size_t j = 0; j < per_sym[ui].len; j++) {
+      cg_reloc_t *r = per_sym[ui].items[j];
+      if (j) fprintf(fp, ",");
+      const char *ty2 = (r->type==0)?"ADRP_PAGE":(r->type==1)?"ADD_PAGEOFF":(r->type==2)?"BRANCH26":"?";
+      fprintf(fp, "{\"off\":%u,\"type\":\"%s\",\"line\":%u,\"ir_id\":%zu}", r->instr_off, ty2, r->line, r->ir_id);
     }
     fprintf(fp, "]%s\n", (ui + 1 < uniq_n) ? "," : "");
   }
+
+  for (size_t ui = 0; ui < uniq_n; ui++) free(per_sym[ui].items);
+  free(per_sym);
+  free(uniq_syms);
+  symidx_map_free(&map);
   fprintf(fp, "  },\n");
   fprintf(fp, "  \"audit\": {\"missing\":%zu,\"extra\":%zu}\n", missing_count, extra_count);
   fprintf(fp, "}\n");
@@ -272,6 +482,7 @@ int main(int argc, char **argv) {
   const char *trace_func = "main";
   const char *trace_syms = NULL;
   const char *trace_regs = NULL;
+  int profile = 0;
   int argi = 1;
 
   if (argc == 1) { usage(argv[0]); return 1; }
@@ -286,6 +497,7 @@ int main(int argc, char **argv) {
     if (strcmp(a, "--version") == 0) { show_version = 1; continue; }
     if (strcmp(a, "--tool") == 0) { tool_mode = 1; continue; }
     if (strcmp(a, "--debug") == 0 || strcmp(a,"--trace")==0) { debug = 1; continue; }
+    if (strcmp(a, "--profile") == 0) { profile = 1; continue; }
     if (strcmp(a, "--dump-syms") == 0) { dump_syms = 1; continue; }
     if (strcmp(a, "--dump-relocs") == 0) { dump_relocs = 1; continue; }
     if (strcmp(a, "--dump-layout") == 0) { dump_layout = 1; continue; }
@@ -320,16 +532,26 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < (nin ? nin : 1); i++) {
     const char *in_path = tool_mode ? inputs[i] : inputs[0];
 
+    const uint64_t t_total0 = profile ? now_ns() : 0;
+    uint64_t parse_ns = 0;
+    uint64_t audit_ns = 0;
+    uint64_t codegen_ns = 0;
+    uint64_t dumps_ns = 0;
+    uint64_t emit_ns = 0;
+
     FILE *fp = fopen(in_path, "r");
     if (!fp) { perror("open input"); rc = 1; continue; }
     ir_prog_t prog;
     ir_init(&prog);
+
+    const uint64_t t_parse0 = profile ? now_ns() : 0;
     if (json_ir_read(fp, &prog) != 0) {
       fprintf(stderr, "[lower] failed to parse IR: %s\n", in_path);
       fclose(fp);
       rc = RC_PARSE;
       continue;
     }
+    if (profile) parse_ns = now_ns() - t_parse0;
     fclose(fp);
 
     if (dump_ir) {
@@ -349,48 +571,61 @@ int main(int argc, char **argv) {
     }
 
     /* symbol audit */
-    sym_seen_t *decls = NULL, *externs = NULL, *refs = NULL;
-    size_t ndecls=0, nexterns=0, nrefs=0, cdecl=0, cext=0, cref=0;
-    for (ir_entry_t *e = prog.head; e; e = e->next) {
-      if (e->kind == IR_ENTRY_LABEL && e->u.label.name) list_add(&decls,&ndecls,&cdecl,e->u.label.name,e->loc.line);
-      if (e->kind == IR_ENTRY_DIR) {
-        if (e->u.dir.name) list_add(&decls,&ndecls,&cdecl,e->u.dir.name,e->loc.line);
-        if (e->u.dir.dir_kind == IR_DIR_EXTERN && e->u.dir.extern_as) list_add(&externs,&nexterns,&cext,e->u.dir.extern_as,e->loc.line);
+    symset_t decls = {0}, externs = {0}, refs = {0};
+    size_t missing_count = 0, extra_count = 0;
+    const int need_audit = strict || debug || json_dump || (emit_map_path != NULL);
+    if (need_audit) {
+      const uint64_t t_audit0 = profile ? now_ns() : 0;
+      for (ir_entry_t *e = prog.head; e; e = e->next) {
+        if (e->kind == IR_ENTRY_LABEL && e->u.label.name) symset_add(&decls, e->u.label.name, e->loc.line);
+        if (e->kind == IR_ENTRY_DIR) {
+          if (e->u.dir.name) symset_add(&decls, e->u.dir.name, e->loc.line);
+          if (e->u.dir.dir_kind == IR_DIR_EXTERN && e->u.dir.extern_as) symset_add(&externs, e->u.dir.extern_as, e->loc.line);
+        }
+        ir_op_t *ops = NULL; size_t opn = 0;
+        if (e->kind == IR_ENTRY_INSTR) { ops = e->u.instr.ops; opn = e->u.instr.op_count; }
+        else if (e->kind == IR_ENTRY_DIR) { ops = e->u.dir.args; opn = e->u.dir.arg_count; }
+        for (size_t j=0;j<opn;j++){
+          ir_op_t *op=&ops[j];
+          if (op->kind==IR_OP_SYM && !is_reg(op->sym)) symset_add(&refs, op->sym, e->loc.line);
+          if (op->kind==IR_OP_MEM && op->mem_base && !is_reg(op->mem_base)) symset_add(&refs, op->mem_base, e->loc.line);
+        }
       }
-      ir_op_t *ops = NULL; size_t opn = 0;
-      if (e->kind == IR_ENTRY_INSTR) { ops = e->u.instr.ops; opn = e->u.instr.op_count; }
-      else if (e->kind == IR_ENTRY_DIR) { ops = e->u.dir.args; opn = e->u.dir.arg_count; }
-      for (size_t j=0;j<opn;j++){
-        ir_op_t *op=&ops[j];
-        if (op->kind==IR_OP_SYM && !is_reg(op->sym)) list_add(&refs,&nrefs,&cref,op->sym,e->loc.line);
-        if (op->kind==IR_OP_MEM && op->mem_base && !is_reg(op->mem_base)) list_add(&refs,&nrefs,&cref,op->mem_base,e->loc.line);
+      if (debug) {
+        fprintf(stderr,"[lower][debug] counts: labels/data=%zu extern=%zu refs=%zu\n", decls.len, externs.len, refs.len);
       }
-    }
-    size_t missing_count=0, extra_count=0;
-    if (debug) {
-      fprintf(stderr,"[lower][debug] counts: labels/data=%zu extern=%zu refs=%zu\n", ndecls, nexterns, nrefs);
-    }
-    for (size_t r=0;r<nrefs;r++){
-      if (!list_has(decls,ndecls,refs[r].name) && !list_has(externs,nexterns,refs[r].name)) {
-        if (debug) fprintf(stderr,"[lower][debug] ref w/o decl: %s (line %zu)\n", refs[r].name, refs[r].line);
-        missing_count++;
+      for (size_t ri = 0; ri < refs.cap; ri++) {
+        if (!refs.entries || !refs.entries[ri].key) continue;
+        const char *name = refs.entries[ri].key;
+        if (!symset_has(&decls, name) && !symset_has(&externs, name)) {
+          if (debug) fprintf(stderr,"[lower][debug] ref w/o decl: %s (line %zu)\n", name, refs.entries[ri].line);
+          missing_count++;
+        }
       }
-    }
-    for (size_t d=0;d<ndecls;d++){
-      if (!list_has(refs,nrefs,decls[d].name) && !list_has(externs,nexterns,decls[d].name)) {
-        if (debug) fprintf(stderr,"[lower][debug] decl w/o ref: %s (line %zu)\n", decls[d].name, decls[d].line);
-        extra_count++;
+      for (size_t di = 0; di < decls.cap; di++) {
+        if (!decls.entries || !decls.entries[di].key) continue;
+        const char *name = decls.entries[di].key;
+        if (!symset_has(&refs, name) && !symset_has(&externs, name)) {
+          if (debug) fprintf(stderr,"[lower][debug] decl w/o ref: %s (line %zu)\n", name, decls.entries[di].line);
+          extra_count++;
+        }
       }
+      if (profile) audit_ns = now_ns() - t_audit0;
     }
 
-    cg_blob_t blob;
+    cg_blob_t blob = (cg_blob_t){0};
+    blob.profile_enabled = profile;
+    const uint64_t t_codegen0 = profile ? now_ns() : 0;
     if (cg_emit_arm64(&prog, &blob) != 0) {
       fprintf(stderr, "[lower] codegen failed: %s\n", in_path);
       ir_free(&prog);
-      free(decls); free(externs); free(refs);
+      symset_free(&decls);
+      symset_free(&externs);
+      symset_free(&refs);
       rc = RC_CODEGEN;
       continue;
     }
+    if (profile) codegen_ns = now_ns() - t_codegen0;
 
     /* Optional dumps */
     if (dump_syms) {
@@ -439,6 +674,7 @@ int main(int argc, char **argv) {
     }
 
     /* Optional JSON map */
+    const uint64_t t_dumps0 = profile ? now_ns() : 0;
     if (emit_map_path) {
       FILE *mp = fopen(emit_map_path, "w");
       if (!mp) {
@@ -475,7 +711,9 @@ int main(int argc, char **argv) {
       fprintf(stderr, "[lower] strict: missing %zu symbol declaration(s); aborting\n", missing_count);
       cg_free(&blob);
       ir_free(&prog);
-      free(decls); free(externs); free(refs);
+      symset_free(&decls);
+      symset_free(&externs);
+      symset_free(&refs);
       rc = RC_CODEGEN;
       continue;
     }
@@ -487,20 +725,58 @@ int main(int argc, char **argv) {
     if (json_dump) {
       emit_json_dump(stdout, &blob, missing_count, extra_count);
     }
+    if (profile) dumps_ns = now_ns() - t_dumps0;
 
+    const uint64_t t_emit0 = profile ? now_ns() : 0;
     if (macho_write_object(&prog, &blob, out_path) != 0) {
       fprintf(stderr, "[lower] Mach-O emit failed: %s\n", in_path);
       cg_free(&blob);
       ir_free(&prog);
-      free(decls); free(externs); free(refs);
+      symset_free(&decls);
+      symset_free(&externs);
+      symset_free(&refs);
       rc = RC_EMIT;
       continue;
+    }
+    if (profile) emit_ns = now_ns() - t_emit0;
+
+    if (profile) {
+      const uint64_t total_ns = now_ns() - t_total0;
+      fprintf(stderr,
+              "[lower][profile] %s: parse=%.2fms audit=%.2fms codegen=%.2fms dumps=%.2fms emit=%.2fms total=%.2fms\n",
+              in_path,
+              ns_to_ms(parse_ns),
+              ns_to_ms(audit_ns),
+              ns_to_ms(codegen_ns),
+              ns_to_ms(dumps_ns),
+              ns_to_ms(emit_ns),
+              ns_to_ms(total_ns));
+
+      if (blob.profile_enabled) {
+        fprintf(stderr,
+                "[lower][profile] %s: cg.collect=%.2fms cg.func=%.2fms cg.size=%.2fms cg.alloc=%.2fms cg.pass2=%.2fms (lbl=%.2f dir=%.2f ins=%.2f) cg.fin=%.2fms cg.symtab=%.2fms cg.reloc=%.2fms cg.pcmap=%.2fms\n",
+                in_path,
+                ns_to_ms(blob.prof.collect_syms_ns),
+                ns_to_ms(blob.prof.func_detect_ns),
+                ns_to_ms(blob.prof.instr_size_ns),
+                ns_to_ms(blob.prof.alloc_ns),
+                ns_to_ms(blob.prof.pass2_total_ns),
+                ns_to_ms(blob.prof.pass2_labels_ns),
+                ns_to_ms(blob.prof.pass2_dirs_ns),
+                ns_to_ms(blob.prof.pass2_instrs_ns),
+                ns_to_ms(blob.prof.finalize_ns),
+                ns_to_ms(blob.prof.symtab_ns),
+                ns_to_ms(blob.prof.reloc_ns),
+                ns_to_ms(blob.prof.pcmap_ns));
+      }
     }
 
     cg_free(&blob);
     ir_free(&prog);
     if (debug) fprintf(stderr,"[lower][debug] symbol audit: missing=%zu extra=%zu\n", missing_count, extra_count);
-    free(decls); free(externs); free(refs);
+    symset_free(&decls);
+    symset_free(&externs);
+    symset_free(&refs);
     fprintf(stdout, "[lower] wrote %s (from %s)\n", out_path, in_path);
   }
 

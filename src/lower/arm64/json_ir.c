@@ -196,12 +196,34 @@ static int decode_json_string(const char *js, const jsmntok_t *tok, char **out_s
   return 0;
 }
 
+static char *tok_strdup_json_string_fast(const char *js, const jsmntok_t *tok) {
+  if (!tok || tok->type != JSMN_STRING || tok->start < 0 || tok->end <= tok->start) return NULL;
+  const char *p = js + tok->start + 1;
+  const char *end = js + tok->end - 1;
+  size_t len = (size_t)(end - p);
+  if (len == 0) {
+    char *s = (char *)malloc(1);
+    if (s) s[0] = 0;
+    return s;
+  }
+  /* Fast path: no escapes */
+  if (memchr(p, '\\', len) == NULL) {
+    char *s = (char *)malloc(len + 1);
+    if (!s) return NULL;
+    memcpy(s, p, len);
+    s[len] = 0;
+    return s;
+  }
+  /* Slow path: decode escapes */
+  char *s = NULL;
+  if (decode_json_string(js, tok, &s) != 0) return NULL;
+  return s;
+}
+
 static char *tok_strdup(const char *js, const jsmntok_t *tok) {
   if (!tok) return NULL;
   if (tok->type == JSMN_STRING) {
-    char *s = NULL;
-    if (decode_json_string(js, tok, &s) != 0) return NULL;
-    return s;
+    return tok_strdup_json_string_fast(js, tok);
   }
   if (tok->start < 0 || tok->end < tok->start) return NULL;
   size_t len = (size_t)(tok->end - tok->start);
@@ -251,16 +273,6 @@ static int tok_skip(const jsmntok_t *toks, int idx) {
   return j;
 }
 
-static int find_key(const char *js, const jsmntok_t *toks, int obj_idx, const char *key) {
-  int idx = obj_idx + 1;
-  int pairs = toks[obj_idx].size / 2;
-  for (int i = 0; i < pairs; i++) {
-    if (tok_streq(js, &toks[idx], key)) return idx + 1;
-    idx = tok_skip(toks, idx + 1);
-  }
-  return -1;
-}
-
 static int parse_loc(const char *js, const jsmntok_t *toks, int loc_idx, ir_loc_t *out) {
   if (!out) return -1;
   memset(out, 0, sizeof(*out));
@@ -296,53 +308,89 @@ static int parse_loc(const char *js, const jsmntok_t *toks, int loc_idx, ir_loc_
 static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_op_t *out) {
   if (!out || toks[op_idx].type != JSMN_OBJECT) return -1;
   memset(out, 0, sizeof(*out));
-  int t_idx = find_key(js, toks, op_idx, "t");
+
+  int t_idx = -1;
+  int v_idx = -1;
+  int base_idx = -1;
+  int disp_idx = -1;
+  int loc_idx = -1;
+
+  /* Collect keys in one pass and reject unknown keys */
+  int pairs = toks[op_idx].size / 2;
+  int idx = op_idx + 1;
+  for (int i = 0; i < pairs; i++) {
+    if (tok_streq(js, &toks[idx], "t")) {
+      if (t_idx < 0) t_idx = idx + 1;
+    } else if (tok_streq(js, &toks[idx], "v")) {
+      if (v_idx < 0) v_idx = idx + 1;
+    } else if (tok_streq(js, &toks[idx], "base")) {
+      if (base_idx < 0) base_idx = idx + 1;
+    } else if (tok_streq(js, &toks[idx], "disp")) {
+      if (disp_idx < 0) disp_idx = idx + 1;
+    } else if (tok_streq(js, &toks[idx], "loc")) {
+      if (loc_idx < 0) loc_idx = idx + 1;
+    } else if (tok_streq(js, &toks[idx], "size")) {
+      /* accepted but ignored */
+    } else {
+      return -1;
+    }
+    idx = tok_skip(toks, idx + 1);
+  }
+
   if (t_idx < 0 || toks[t_idx].type != JSMN_STRING) return -1;
+
   if (tok_streq(js, &toks[t_idx], "sym")) {
-    int v_idx = find_key(js, toks, op_idx, "v");
     if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
     out->kind = IR_OP_SYM;
     out->sym = tok_strdup(js, &toks[v_idx]);
     if (!out->sym) return -1;
   } else if (tok_streq(js, &toks[t_idx], "reg")) {
-    int v_idx = find_key(js, toks, op_idx, "v");
     if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
     // Lowerer represents regs/labels as symbols internally; codegen maps known names.
     out->kind = IR_OP_SYM;
     out->sym = tok_strdup(js, &toks[v_idx]);
     if (!out->sym) return -1;
   } else if (tok_streq(js, &toks[t_idx], "lbl")) {
-    int v_idx = find_key(js, toks, op_idx, "v");
     if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
     out->kind = IR_OP_SYM;
     out->sym = tok_strdup(js, &toks[v_idx]);
     if (!out->sym) return -1;
   } else if (tok_streq(js, &toks[t_idx], "num")) {
-    int v_idx = find_key(js, toks, op_idx, "v");
+    if (v_idx < 0) return -1;
     int ok = 0;
     long long v = tok_to_int(js, &toks[v_idx], &ok);
-    if (v_idx < 0 || !ok) return -1;
+    if (!ok) return -1;
     out->kind = IR_OP_NUM;
     out->num = v;
     out->unum = (unsigned long long)v;
     out->is_unsigned = 0;
   } else if (tok_streq(js, &toks[t_idx], "str")) {
-    int v_idx = find_key(js, toks, op_idx, "v");
     if (v_idx < 0 || toks[v_idx].type != JSMN_STRING) return -1;
     out->kind = IR_OP_STR;
     out->str = tok_strdup(js, &toks[v_idx]);
     if (!out->str) return -1;
   } else if (tok_streq(js, &toks[t_idx], "mem")) {
-    int b_idx = find_key(js, toks, op_idx, "base");
     out->kind = IR_OP_MEM;
-    if (b_idx < 0) return -1;
-    if (toks[b_idx].type == JSMN_STRING) {
+    if (base_idx < 0) return -1;
+    if (toks[base_idx].type == JSMN_STRING) {
       // zasm-v1.0 encoding: base is a bare string.
-      out->mem_base = tok_strdup(js, &toks[b_idx]);
-    } else if (toks[b_idx].type == JSMN_OBJECT) {
+      out->mem_base = tok_strdup(js, &toks[base_idx]);
+    } else if (toks[base_idx].type == JSMN_OBJECT) {
       // zasm-v1.1 encoding: base is a nested {t:"reg"|"sym", v:"..."} object.
-      int bt_idx = find_key(js, toks, b_idx, "t");
-      int bv_idx = find_key(js, toks, b_idx, "v");
+      int bt_idx = -1;
+      int bv_idx = -1;
+      int bpairs = toks[base_idx].size / 2;
+      int bscan = base_idx + 1;
+      for (int bi = 0; bi < bpairs; bi++) {
+        if (tok_streq(js, &toks[bscan], "t")) {
+          if (bt_idx < 0) bt_idx = bscan + 1;
+        } else if (tok_streq(js, &toks[bscan], "v")) {
+          if (bv_idx < 0) bv_idx = bscan + 1;
+        } else {
+          return -1;
+        }
+        bscan = tok_skip(toks, bscan + 1);
+      }
       if (bt_idx < 0 || bv_idx < 0 || toks[bt_idx].type != JSMN_STRING || toks[bv_idx].type != JSMN_STRING) return -1;
       if (!tok_streq(js, &toks[bt_idx], "reg") && !tok_streq(js, &toks[bt_idx], "sym")) return -1;
       out->mem_base = tok_strdup(js, &toks[bv_idx]);
@@ -351,7 +399,6 @@ static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_o
     }
     if (!out->mem_base) return -1;
 
-    int disp_idx = find_key(js, toks, op_idx, "disp");
     if (disp_idx >= 0) {
       int ok = 0;
       long long v = tok_to_int(js, &toks[disp_idx], &ok);
@@ -363,20 +410,8 @@ static int parse_operand(const char *js, const jsmntok_t *toks, int op_idx, ir_o
     return -1;
   }
 
-  int loc_idx = find_key(js, toks, op_idx, "loc");
   if (loc_idx >= 0) {
     if (parse_loc(js, toks, loc_idx, &out->loc) != 0) return -1;
-  }
-  /* Reject unknown operand keys */
-  int pairs = toks[op_idx].size / 2;
-  int idx = op_idx + 1;
-  for (int i = 0; i < pairs; i++) {
-    if (!tok_streq(js, &toks[idx], "t") && !tok_streq(js, &toks[idx], "v") &&
-        !tok_streq(js, &toks[idx], "base") && !tok_streq(js, &toks[idx], "disp") &&
-        !tok_streq(js, &toks[idx], "size") && !tok_streq(js, &toks[idx], "loc")) {
-      return -1;
-    }
-    idx = tok_skip(toks, idx + 1);
   }
   return 0;
 }
@@ -463,6 +498,10 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
   size_t line_no = 0;
   int rc = 0;
 
+  /* Reuse token buffer across lines to avoid malloc/free churn. */
+  jsmntok_t *toks = NULL;
+  int tok_cap = 0;
+
   while ((n = getline(&line, &cap, fp)) != -1) {
     line_no++;
     if (n <= 0) continue;
@@ -472,8 +511,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     }
     if (only_ws) continue;
     /* Tokenize */
-    int tok_cap = 256;
-    jsmntok_t *toks = NULL;
+    if (tok_cap == 0) tok_cap = 256;
     int tok_count = 0;
     for (;;) {
       toks = (jsmntok_t *)realloc(toks, sizeof(jsmntok_t) * tok_cap);
@@ -484,28 +522,89 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       if (tok_count >= 0) break;
       if (tok_count == -1) { tok_cap *= 2; continue; }
       print_line_err(line_no, line, "invalid JSON");
-      free(toks);
       rc = -1;
       goto fail_line;
     }
     if (tok_count < 1 || toks[0].type != JSMN_OBJECT) {
       print_line_err(line_no, line, "expected object record");
-      free(toks);
       rc = -1;
       goto fail_line;
     }
+
+    /* Collect top-level keys in one pass */
+    int ir_idx = -1;
+    int k_idx = -1;
+    int id_idx = -1;
+    int sr_idx = -1;
+    int name_idx = -1;
+    int loc_idx = -1;
+    int m_idx = -1;
+    int ops_idx = -1;
+    int d_idx = -1;
+    int args_idx = -1;
+    int has_unknown_key = 0;
+
+    enum {
+      F_IR = 1 << 0,
+      F_K = 1 << 1,
+      F_ID = 1 << 2,
+      F_SRC_REF = 1 << 3,
+      F_NAME = 1 << 4,
+      F_LOC = 1 << 5,
+      F_M = 1 << 6,
+      F_OPS = 1 << 7,
+      F_D = 1 << 8,
+      F_ARGS = 1 << 9,
+    };
+    unsigned present = 0;
+
+    int top_pairs = toks[0].size / 2;
+    int top_idx = 1;
+    for (int i = 0; i < top_pairs; i++) {
+      if (tok_streq(line, &toks[top_idx], "ir")) {
+        present |= F_IR;
+        if (ir_idx < 0) ir_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "k")) {
+        present |= F_K;
+        if (k_idx < 0) k_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "id")) {
+        present |= F_ID;
+        if (id_idx < 0) id_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "src_ref")) {
+        present |= F_SRC_REF;
+        if (sr_idx < 0) sr_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "name")) {
+        present |= F_NAME;
+        if (name_idx < 0) name_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "loc")) {
+        present |= F_LOC;
+        if (loc_idx < 0) loc_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "m")) {
+        present |= F_M;
+        if (m_idx < 0) m_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "ops")) {
+        present |= F_OPS;
+        if (ops_idx < 0) ops_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "d")) {
+        present |= F_D;
+        if (d_idx < 0) d_idx = top_idx + 1;
+      } else if (tok_streq(line, &toks[top_idx], "args")) {
+        present |= F_ARGS;
+        if (args_idx < 0) args_idx = top_idx + 1;
+      } else {
+        has_unknown_key = 1;
+      }
+      top_idx = tok_skip(toks, top_idx + 1);
+    }
+
     /* ir version */
-    int ir_idx = find_key(line, toks, 0, "ir");
     if (ir_idx < 0 || !(tok_streq(line, &toks[ir_idx], "zasm-v1.0") || tok_streq(line, &toks[ir_idx], "zasm-v1.1"))) {
       print_line_err(line_no, line, "missing or invalid ir version");
-      free(toks);
       rc = -1;
       goto fail_line;
     }
-    int k_idx = find_key(line, toks, 0, "k");
     if (k_idx < 0 || toks[k_idx].type != JSMN_STRING) {
       print_line_err(line_no, line, "missing k field");
-      free(toks);
       rc = -1;
       goto fail_line;
     }
@@ -514,13 +613,11 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     /* Optional record id */
     size_t rec_id = 0;
     size_t src_ref = 0;
-    int id_idx = find_key(line, toks, 0, "id");
     if (id_idx >= 0 && toks[id_idx].type == JSMN_PRIMITIVE) {
       int ok = 0;
       long long v = tok_to_int(line, &toks[id_idx], &ok);
       if (ok && v >= 0) rec_id = (size_t)v;
     }
-    int sr_idx = find_key(line, toks, 0, "src_ref");
     if (sr_idx >= 0 && toks[sr_idx].type == JSMN_PRIMITIVE) {
       int ok = 0;
       long long v = tok_to_int(line, &toks[sr_idx], &ok);
@@ -531,87 +628,81 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
     if (tok_streq(line, &toks[k_idx], "meta") ||
         tok_streq(line, &toks[k_idx], "src") ||
         tok_streq(line, &toks[k_idx], "diag")) {
-      free(toks);
       continue;
     }
 
+    if (has_unknown_key) {
+      print_line_err(line_no, line, "unknown field");
+      rc = -1;
+      goto fail_line;
+    }
+
     if (tok_streq(line, &toks[k_idx], "label")) {
-      int name_idx = find_key(line, toks, 0, "name");
+      /* Allowed: ir,k,name,loc,id */
+      unsigned allowed = F_IR | F_K | F_NAME | F_LOC | F_ID;
+      if ((present & ~allowed) != 0) {
+        print_line_err(line_no, line, "unknown field");
+        rc = -1;
+        goto fail_line;
+      }
       if (name_idx < 0 || toks[name_idx].type != JSMN_STRING) {
         print_line_err(line_no, line, "label missing name");
-        free(toks);
         rc = -1;
         goto fail_line;
       }
       entry = ir_entry_new(IR_ENTRY_LABEL);
-      if (!entry) { free(toks); rc = -1; goto fail_line; }
+      if (!entry) { rc = -1; goto fail_line; }
       entry->id = rec_id;
       entry->u.label.name = tok_strdup(line, &toks[name_idx]);
-      if (!entry->u.label.name) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
-      int loc_idx = find_key(line, toks, 0, "loc");
+      if (!entry->u.label.name) { ir_entry_free(entry); rc = -1; goto fail_line; }
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
           print_line_err(line_no, line, "invalid loc");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+          ir_entry_free(entry); rc = -1; goto fail_line;
         }
-      }
-      /* Reject unknown keys */
-      int pairs = toks[0].size / 2;
-      int idx = 1;
-      for (int i = 0; i < pairs; i++) {
-        if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
-            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc") &&
-            !tok_streq(line, &toks[idx], "id")) {
-          print_line_err(line_no, line, "unknown field");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
-        }
-        idx = tok_skip(toks, idx + 1);
       }
     } else if (tok_streq(line, &toks[k_idx], "instr")) {
-      int m_idx = find_key(line, toks, 0, "m");
-      int ops_idx = find_key(line, toks, 0, "ops");
+      /* Allowed: ir,k,m,ops,loc,id,src_ref */
+      unsigned allowed = F_IR | F_K | F_M | F_OPS | F_LOC | F_ID | F_SRC_REF;
+      if ((present & ~allowed) != 0) {
+        print_line_err(line_no, line, "unknown field");
+        rc = -1;
+        goto fail_line;
+      }
       if (m_idx < 0 || toks[m_idx].type != JSMN_STRING || ops_idx < 0) {
         print_line_err(line_no, line, "instr missing m/ops");
-        free(toks); rc = -1; goto fail_line;
+        rc = -1; goto fail_line;
       }
       entry = ir_entry_new(IR_ENTRY_INSTR);
-      if (!entry) { free(toks); rc = -1; goto fail_line; }
+      if (!entry) { rc = -1; goto fail_line; }
       entry->id = rec_id;
       entry->u.instr.src_ref = src_ref;
       entry->u.instr.mnem = tok_strdup(line, &toks[m_idx]);
-      if (!entry->u.instr.mnem) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
+      if (!entry->u.instr.mnem) { ir_entry_free(entry); rc = -1; goto fail_line; }
       if (parse_operands_array(line, toks, ops_idx, &entry->u.instr.ops, &entry->u.instr.op_count) != 0) {
         print_line_err(line_no, line, "invalid instr operands");
-        ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+        ir_entry_free(entry); rc = -1; goto fail_line;
       }
-      int loc_idx = find_key(line, toks, 0, "loc");
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
           print_line_err(line_no, line, "invalid loc");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+          ir_entry_free(entry); rc = -1; goto fail_line;
         }
-      }
-      int pairs = toks[0].size / 2;
-      int idx = 1;
-      for (int i = 0; i < pairs; i++) {
-        if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
-            !tok_streq(line, &toks[idx], "m") && !tok_streq(line, &toks[idx], "ops") &&
-            !tok_streq(line, &toks[idx], "loc") &&
-            !tok_streq(line, &toks[idx], "id") && !tok_streq(line, &toks[idx], "src_ref")) {
-          print_line_err(line_no, line, "unknown field");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
-        }
-        idx = tok_skip(toks, idx + 1);
       }
     } else if (tok_streq(line, &toks[k_idx], "dir")) {
-      int d_idx = find_key(line, toks, 0, "d");
-      int args_idx = find_key(line, toks, 0, "args");
+      /* Allowed: ir,k,d,args,name,loc,id,src_ref */
+      unsigned allowed = F_IR | F_K | F_D | F_ARGS | F_NAME | F_LOC | F_ID | F_SRC_REF;
+      if ((present & ~allowed) != 0) {
+        print_line_err(line_no, line, "unknown field");
+        rc = -1;
+        goto fail_line;
+      }
       if (d_idx < 0 || toks[d_idx].type != JSMN_STRING || args_idx < 0 || toks[args_idx].type != JSMN_ARRAY) {
         print_line_err(line_no, line, "dir missing d/args");
-        free(toks); rc = -1; goto fail_line;
+        rc = -1; goto fail_line;
       }
       entry = ir_entry_new(IR_ENTRY_DIR);
-      if (!entry) { free(toks); rc = -1; goto fail_line; }
+      if (!entry) { rc = -1; goto fail_line; }
       entry->id = rec_id;
       entry->u.dir.src_ref = src_ref;
       if      (tok_streq(line, &toks[d_idx], "PUBLIC")) entry->u.dir.dir_kind = IR_DIR_PUBLIC;
@@ -623,23 +714,21 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       else if (tok_streq(line, &toks[d_idx], "EQU")) entry->u.dir.dir_kind = IR_DIR_EQU;
       else {
         print_line_err(line_no, line, "unknown directive");
-        ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+        ir_entry_free(entry); rc = -1; goto fail_line;
       }
       if (parse_operands_array(line, toks, args_idx, &entry->u.dir.args, &entry->u.dir.arg_count) != 0) {
         print_line_err(line_no, line, "invalid directive args");
-        ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+        ir_entry_free(entry); rc = -1; goto fail_line;
       }
-      int name_idx = find_key(line, toks, 0, "name");
       if (name_idx >= 0) {
-        if (toks[name_idx].type != JSMN_STRING) { print_line_err(line_no, line, "dir name must be string"); ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
+        if (toks[name_idx].type != JSMN_STRING) { print_line_err(line_no, line, "dir name must be string"); ir_entry_free(entry); rc = -1; goto fail_line; }
         entry->u.dir.name = tok_strdup(line, &toks[name_idx]);
-        if (!entry->u.dir.name) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
+        if (!entry->u.dir.name) { ir_entry_free(entry); rc = -1; goto fail_line; }
       }
-      int loc_idx = find_key(line, toks, 0, "loc");
       if (loc_idx >= 0) {
         if (parse_loc(line, toks, loc_idx, &entry->loc) != 0) {
           print_line_err(line_no, line, "invalid loc");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+          ir_entry_free(entry); rc = -1; goto fail_line;
         }
       }
       /* Expand data / metadata based on directive kind */
@@ -647,23 +736,23 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
         case IR_DIR_PUBLIC:
           if (entry->u.dir.arg_count < 1 || entry->u.dir.args[0].kind != IR_OP_SYM || !entry->u.dir.args[0].sym) {
             print_line_err(line_no, line, "PUBLIC requires sym arg");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           if (entry->u.dir.name == NULL) {
             entry->u.dir.name = dup_cstr(entry->u.dir.args[0].sym);
-            if (!entry->u.dir.name) { ir_entry_free(entry); free(toks); rc = -1; goto fail_line; }
+            if (!entry->u.dir.name) { ir_entry_free(entry); rc = -1; goto fail_line; }
           }
           if (strcmp(entry->u.dir.name, "lembeh_handle") == 0) prog->has_public_lembeh = 1;
           break;
         case IR_DIR_EXTERN:
           if (entry->u.dir.arg_count < 2 || entry->u.dir.args[0].kind != IR_OP_STR || entry->u.dir.args[1].kind != IR_OP_STR) {
             print_line_err(line_no, line, "EXTERN requires module/field strings");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           entry->u.dir.extern_module = dup_cstr(entry->u.dir.args[0].str);
           entry->u.dir.extern_field = dup_cstr(entry->u.dir.args[1].str);
           if (!entry->u.dir.extern_module || !entry->u.dir.extern_field) {
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           if (entry->u.dir.arg_count >= 3) {
             if (entry->u.dir.args[2].kind == IR_OP_STR) {
@@ -672,33 +761,33 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
               entry->u.dir.extern_as = dup_cstr(entry->u.dir.args[2].sym);
             }
             if (entry->u.dir.extern_as == NULL) {
-              ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+              ir_entry_free(entry); rc = -1; goto fail_line;
             }
           }
           break;
         case IR_DIR_DB:
           if (append_bytes_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
             print_line_err(line_no, line, "DB args invalid");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           break;
         case IR_DIR_DW:
           if (append_words_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
             print_line_err(line_no, line, "DW args invalid");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           break;
         case IR_DIR_RESB:
           if (entry->u.dir.arg_count != 1 || entry->u.dir.args[0].kind != IR_OP_NUM || entry->u.dir.args[0].num < 0) {
             print_line_err(line_no, line, "RESB requires one non-negative num");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           entry->u.dir.reserve_len = (size_t)entry->u.dir.args[0].num;
           break;
         case IR_DIR_STR:
           if (append_bytes_from_args(entry->u.dir.args, entry->u.dir.arg_count, &entry->u.dir.data, &entry->u.dir.data_len) != 0) {
             print_line_err(line_no, line, "STR args invalid");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           entry->u.dir.has_equ_value = 1;
           entry->u.dir.equ_value = (long long)entry->u.dir.data_len;
@@ -706,41 +795,28 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
         case IR_DIR_EQU:
           if (entry->u.dir.arg_count != 1 || entry->u.dir.args[0].kind != IR_OP_NUM) {
             print_line_err(line_no, line, "EQU requires one num");
-            ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
+            ir_entry_free(entry); rc = -1; goto fail_line;
           }
           entry->u.dir.has_equ_value = 1;
           entry->u.dir.equ_value = entry->u.dir.args[0].num;
           break;
       }
-      int pairs = toks[0].size / 2;
-      int idx = 1;
-      for (int i = 0; i < pairs; i++) {
-        if (!tok_streq(line, &toks[idx], "ir") && !tok_streq(line, &toks[idx], "k") &&
-            !tok_streq(line, &toks[idx], "d") && !tok_streq(line, &toks[idx], "args") &&
-            !tok_streq(line, &toks[idx], "name") && !tok_streq(line, &toks[idx], "loc") &&
-            !tok_streq(line, &toks[idx], "id") && !tok_streq(line, &toks[idx], "src_ref")) {
-          print_line_err(line_no, line, "unknown field");
-          ir_entry_free(entry); free(toks); rc = -1; goto fail_line;
-        }
-        idx = tok_skip(toks, idx + 1);
-      }
     } else {
       print_line_err(line_no, line, "unknown k kind");
-      free(toks); rc = -1; goto fail_line;
+      rc = -1; goto fail_line;
     }
 
     if (entry) {
       ir_append_entry(prog, entry);
     }
-    free(toks);
     continue;
 
 fail_line:
     /* On failure, loop will exit after cleanup below. */
     rc = -1;
-    if (toks) free(toks);
     break;
   }
   if (line) free(line);
+  if (toks) free(toks);
   return rc;
 }

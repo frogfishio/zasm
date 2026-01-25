@@ -2,6 +2,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <mach/mach_time.h>
+
+static uint64_t cg_now_ns(void) {
+  static mach_timebase_info_data_t tb;
+  if (tb.denom == 0) (void)mach_timebase_info(&tb);
+  const uint64_t t = mach_absolute_time();
+  return (t * (uint64_t)tb.numer) / (uint64_t)tb.denom;
+}
+
+static cg_profile_t *g_prof;
 
 /* Lightweight utilities */
 static char *dupstr(const char *s) {
@@ -23,10 +33,12 @@ static void symtab_free(symtab_entry *s) {
 }
 
 static symtab_entry *symtab_add(symtab_entry **root, const char *name, size_t off) {
+  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
   if (!root || !name) return NULL;
   for (symtab_entry *s = *root; s; s = s->next) {
     if (s->name && strcmp(s->name, name) == 0) {
       if (off != (size_t)-1) s->off = off;
+      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
       return s;
     }
   }
@@ -37,22 +49,31 @@ static symtab_entry *symtab_add(symtab_entry **root, const char *name, size_t of
   e->off = off;
   e->next = *root;
   *root = e;
+  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
   return e;
 }
 
 static void symtab_update(symtab_entry *root, const char *name, size_t off) {
+  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
   for (symtab_entry *s = root; s; s = s->next) {
     if (s->name && strcmp(s->name, name) == 0) {
       s->off = off;
+      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
       return;
     }
   }
+  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
 }
 
 static int symtab_has(symtab_entry *root, const char *name) {
+  const uint64_t t0 = g_prof ? cg_now_ns() : 0;
   for (symtab_entry *s = root; s; s = s->next) {
-    if (s->name && strcmp(s->name, name) == 0) return 1;
+    if (s->name && strcmp(s->name, name) == 0) {
+      if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
+      return 1;
+    }
   }
+  if (g_prof) g_prof->symtab_ns += cg_now_ns() - t0;
   return 0;
 }
 
@@ -114,6 +135,7 @@ void cg_free(cg_blob_t *out) {
 
 static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const char *sym, uint32_t line, size_t ir_id) {
   if (!out || !sym) return;
+  const uint64_t t0 = (out->profile_enabled && g_prof) ? cg_now_ns() : 0;
   cg_reloc_t *r = (cg_reloc_t *)calloc(1, sizeof(cg_reloc_t));
   if (!r) return;
   r->instr_off = instr_off;
@@ -124,10 +146,12 @@ static void add_reloc(cg_blob_t *out, uint32_t instr_off, uint32_t type, const c
   r->next = out->relocs;
   out->relocs = r;
   out->reloc_count++;
+  if (out->profile_enabled && g_prof) g_prof->reloc_ns += cg_now_ns() - t0;
 }
 
 static void add_pc_map(cg_blob_t *out, uint32_t off, size_t ir_id, uint32_t line) {
   if (!out) return;
+  const uint64_t t0 = (out->profile_enabled && g_prof) ? cg_now_ns() : 0;
   cg_pc_map_t *p = (cg_pc_map_t *)calloc(1, sizeof(cg_pc_map_t));
   if (!p) return;
   p->off = off;
@@ -136,6 +160,7 @@ static void add_pc_map(cg_blob_t *out, uint32_t off, size_t ir_id, uint32_t line
   p->next = out->pc_map;
   out->pc_map = p;
   out->pc_map_count++;
+  if (out->profile_enabled && g_prof) g_prof->pcmap_ns += cg_now_ns() - t0;
 }
 
 /* ARM64 encodings */
@@ -282,16 +307,24 @@ static void emit_adrp_add(cg_blob_t *out,uint32_t *w,size_t *pcw,int rd,const ch
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   if (!ir || !out) return -1;
+  const int profile_enabled = out->profile_enabled;
   memset(out,0,sizeof(*out));
+  out->profile_enabled = profile_enabled;
+  cg_profile_t *prof = out->profile_enabled ? &out->prof : NULL;
+  if (prof) memset(prof, 0, sizeof(*prof));
+  g_prof = prof;
+  const uint64_t t_total0 = prof ? cg_now_ns() : 0;
   symtab_add(&out->syms,"lembeh_handle",0);
-#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
-#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+#define CG_FAIL(ctx, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); g_prof = NULL; cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
+#define CG_FAILF(ctx, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); g_prof = NULL; cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
 
   /* Collect labels and call targets for function boundary detection. */
   seen_sym_t *call_targets = NULL;
   size_t n_calls = 0, c_calls = 0;
   seen_sym_t *label_list = NULL;
   size_t n_labels = 0, c_labels = 0;
+
+  const uint64_t t_collect0 = prof ? cg_now_ns() : 0;
 
   /* Sizing pass */
   size_t code_words = 0;
@@ -346,8 +379,10 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       }
     }
   }
+  if (prof) prof->collect_syms_ns = cg_now_ns() - t_collect0;
 
   /* Determine function entry labels: first label, labels named "main", labels prefixed with "fn_", and labels that are CALL targets. */
+  const uint64_t t_func0 = prof ? cg_now_ns() : 0;
   for (size_t i = 0; i < n_labels; i++) {
     int is_func = 0;
     if (!first_label_seen) { is_func = 1; first_label_seen = 1; }
@@ -357,15 +392,19 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     if (is_func) func_count++;
   }
   if (func_count == 0 && any_instr) func_count = 1;
+  if (prof) prof->func_detect_ns = cg_now_ns() - t_func0;
 
   /* Prologues add 2 words each; RET is budgeted at 2 words already. */
   code_words += func_count * 2;
 
   /* Second sizing loop for instructions. */
+  const uint64_t t_size0 = prof ? cg_now_ns() : 0;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_INSTR) code_words += estimate_instr_words(e);
   }
+  if (prof) prof->instr_size_ns = cg_now_ns() - t_size0;
 
+  const uint64_t t_alloc0 = prof ? cg_now_ns() : 0;
   out->code_len = code_words ? code_words*4 : 4;
   out->data_len = data_len;
   out->data_off = out->code_len;
@@ -373,6 +412,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   out->data = (unsigned char *)calloc(1,data_len?data_len:1);
   if (!out->code || !out->data) { CG_FAIL(NULL, "out of memory"); }
   uint32_t *w = (uint32_t *)out->code;
+  if (prof) prof->alloc_ns = cg_now_ns() - t_alloc0;
 
   /* Second pass */
   size_t pcw = 0;
@@ -381,7 +421,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   int func_has_prologue = 0;
   int func_seen = 0;
 
+  const uint64_t t_pass20 = prof ? cg_now_ns() : 0;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
+    const uint64_t t_e0 = prof ? cg_now_ns() : 0;
     if (e->kind == IR_ENTRY_LABEL) {
       if (e->u.label.name) {
         int is_func = 0;
@@ -396,6 +438,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         }
         symtab_update(out->syms, e->u.label.name, pcw*4);
       }
+      if (prof) prof->pass2_labels_ns += cg_now_ns() - t_e0;
       continue;
     }
     if (e->kind == IR_ENTRY_DIR) {
@@ -423,6 +466,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         default:
           break;
       }
+      if (prof) prof->pass2_dirs_ns += cg_now_ns() - t_e0;
       continue;
     }
 
@@ -918,9 +962,18 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     }
 
     CG_FAIL(e, "unsupported mnemonic");
+
+    /* unreachable */
+  }
+
+  if (prof) {
+    prof->pass2_total_ns = cg_now_ns() - t_pass20;
+    const uint64_t non_instr = prof->pass2_labels_ns + prof->pass2_dirs_ns;
+    prof->pass2_instrs_ns = (prof->pass2_total_ns > non_instr) ? (prof->pass2_total_ns - non_instr) : 0;
   }
 
   /* Place any auto-reserved symbols that lacked offsets. */
+  const uint64_t t_fin0 = prof ? cg_now_ns() : 0;
   for (symtab_entry *s = out->syms; s; s = s->next) {
     if (s->off == (size_t)-1) {
       s->off = out->code_len + data_off;
@@ -930,8 +983,12 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
       data_off += 8;
     }
   }
+  if (prof) prof->finalize_ns = cg_now_ns() - t_fin0;
 
   seen_free(call_targets, n_calls);
   seen_free(label_list, n_labels);
+
+  if (prof) prof->total_ns = cg_now_ns() - t_total0;
+  g_prof = NULL;
   return 0;
 }

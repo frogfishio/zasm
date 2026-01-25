@@ -15,6 +15,100 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+typedef struct {
+  const char *key;
+  int val;
+} symmap_entry_t;
+
+typedef struct {
+  symmap_entry_t *entries;
+  size_t cap; /* power of two */
+  size_t len;
+} symmap_t;
+
+static uint64_t hash64_fnv1a_str(const char *s) {
+  uint64_t h = 1469598103934665603ull;
+  if (!s) return h;
+  for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+    h ^= (uint64_t)(*p);
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static void symmap_free(symmap_t *m) {
+  free(m->entries);
+  m->entries = NULL;
+  m->cap = 0;
+  m->len = 0;
+}
+
+static void symmap_rehash(symmap_t *m, size_t new_cap) {
+  symmap_entry_t *old = m->entries;
+  size_t old_cap = m->cap;
+
+  symmap_entry_t *neu = (symmap_entry_t *)calloc(new_cap, sizeof(symmap_entry_t));
+  if (!neu) return;
+
+  m->entries = neu;
+  m->cap = new_cap;
+  m->len = 0;
+
+  if (old) {
+    for (size_t i = 0; i < old_cap; i++) {
+      if (!old[i].key) continue;
+      const char *key = old[i].key;
+      int val = old[i].val;
+      uint64_t h = hash64_fnv1a_str(key);
+      size_t mask = new_cap - 1;
+      size_t pos = (size_t)h & mask;
+      while (neu[pos].key) pos = (pos + 1) & mask;
+      neu[pos] = (symmap_entry_t){ key, val };
+      m->len++;
+    }
+    free(old);
+  }
+}
+
+static void symmap_ensure(symmap_t *m) {
+  if (m->cap == 0) {
+    symmap_rehash(m, 256);
+    return;
+  }
+  if ((m->len + 1) * 10 >= m->cap * 7) symmap_rehash(m, m->cap * 2);
+}
+
+static int symmap_get(const symmap_t *m, const char *key, int *out_val) {
+  if (!m || m->cap == 0 || !key) return 0;
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) {
+      if (out_val) *out_val = m->entries[pos].val;
+      return 1;
+    }
+    pos = (pos + 1) & mask;
+  }
+  return 0;
+}
+
+static void symmap_put_if_absent(symmap_t *m, const char *key, int val) {
+  if (!key) return;
+  symmap_ensure(m);
+  if (m->cap == 0) return;
+
+  uint64_t h = hash64_fnv1a_str(key);
+  size_t mask = m->cap - 1;
+  size_t pos = (size_t)h & mask;
+  while (m->entries[pos].key) {
+    if (strcmp(m->entries[pos].key, key) == 0) return;
+    pos = (pos + 1) & mask;
+  }
+  m->entries[pos] = (symmap_entry_t){ key, val };
+  m->len++;
+}
+
 static void *xcalloc(size_t n, size_t sz) {
   void *p = calloc(n, sz);
   return p;
@@ -32,31 +126,6 @@ static uint32_t intern_str(char *strtab, size_t *strsz, const char *name) {
   memcpy(strtab + *strsz, name, len + 1);
   *strsz += len + 1;
   return off;
-}
-
-static int sym_index_of(const ir_prog_t *ir, const cg_blob_t *blob, size_t local_count, size_t public_count, const char *name) {
-  if (!name) return -1;
-  size_t idx = 0;
-  for (symtab_entry *s = blob->syms; s; s = s->next, idx++) {
-    if (s->name && sym_is(s->name, name)) return (int)idx;
-  }
-  size_t base = local_count;
-  idx = 0;
-  for (ir_entry_t *e = ir->head; e; e = e->next) {
-    if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_PUBLIC && e->u.dir.name) {
-      if (sym_is(e->u.dir.name, name)) return (int)(base + idx);
-      idx++;
-    }
-  }
-  base += public_count;
-  idx = 0;
-  for (ir_entry_t *e = ir->head; e; e = e->next) {
-    if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_EXTERN && e->u.dir.extern_as) {
-      if (sym_is(e->u.dir.extern_as, name)) return (int)(base + idx);
-      idx++;
-    }
-  }
-  return -1;
 }
 
 static int resolve_reloc_encoding(uint32_t cg_type, uint8_t *macho_r_type, uint8_t *macho_pcrel) {
@@ -84,6 +153,14 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
 #define FAIL(...) do { snprintf(err, sizeof err, __VA_ARGS__); goto fail; } while (0)
   if (!ir || !blob || !out_path) return -1;
 
+  symmap_t sym_index = {0};
+
+  char *strtab = NULL;
+  uint32_t *local_strx = NULL;
+  uint32_t *public_strx = NULL;
+  uint32_t *extern_strx = NULL;
+  uint8_t *buf = NULL;
+
   /* Collect PUBLIC (exports) and EXTERN (imports). */
   size_t public_count = 0, extern_count = 0;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
@@ -105,20 +182,23 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
     if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_PUBLIC && e->u.dir.name) strcap += strlen(e->u.dir.name) + 2;
     if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_EXTERN && e->u.dir.extern_as) strcap += strlen(e->u.dir.extern_as) + 2;
   }
-  char *strtab = (char *)xcalloc(strcap, 1);
+  strtab = (char *)xcalloc(strcap, 1);
   if (!strtab) return -1;
   size_t strsz = 1; /* strtab[0]=0 */
 
   /* Map locals to string offsets */
-  uint32_t *local_strx = (uint32_t *)xcalloc(local_count ? local_count : 1, sizeof(uint32_t));
+  local_strx = (uint32_t *)xcalloc(local_count ? local_count : 1, sizeof(uint32_t));
   size_t li = 0;
   for (symtab_entry *s = blob->syms; s; s = s->next) {
-    local_strx[li++] = intern_str(strtab, &strsz, s->name ? s->name : "");
+    if (!s->name) continue;
+    local_strx[li] = intern_str(strtab, &strsz, s->name);
+    symmap_put_if_absent(&sym_index, s->name, (int)li);
+    li++;
   }
 
   /* PUBLIC and EXTERN string offsets */
-  uint32_t *public_strx = (uint32_t *)xcalloc(public_count ? public_count : 1, sizeof(uint32_t));
-  uint32_t *extern_strx = (uint32_t *)xcalloc(extern_count ? extern_count : 1, sizeof(uint32_t));
+  public_strx = (uint32_t *)xcalloc(public_count ? public_count : 1, sizeof(uint32_t));
+  extern_strx = (uint32_t *)xcalloc(extern_count ? extern_count : 1, sizeof(uint32_t));
   size_t pi = 0, ei = 0;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_PUBLIC && e->u.dir.name) {
@@ -128,12 +208,14 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
       tmp[0] = '_';
       memcpy(tmp + 1, e->u.dir.name, len + 1);
       public_strx[pi++] = intern_str(strtab, &strsz, tmp);
+      symmap_put_if_absent(&sym_index, e->u.dir.name, (int)(local_count + (pi - 1)));
     } else if (e->kind == IR_ENTRY_DIR && e->u.dir.dir_kind == IR_DIR_EXTERN && e->u.dir.extern_as) {
       size_t len = strlen(e->u.dir.extern_as);
       char *tmp = (char *)alloca(len + 2);
       tmp[0] = '_';
       memcpy(tmp + 1, e->u.dir.extern_as, len + 1);
       extern_strx[ei++] = intern_str(strtab, &strsz, tmp);
+      symmap_put_if_absent(&sym_index, e->u.dir.extern_as, (int)(local_count + public_count + (ei - 1)));
     }
   }
 
@@ -165,7 +247,7 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
   size_t file_size = stroff + strsz;
   if (file_size == 0 || text_off >= file_size || data_off >= file_size) FAIL("invalid layout (size/off overflow)");
 
-  uint8_t *buf = (uint8_t *)xcalloc(file_size, 1);
+  buf = (uint8_t *)xcalloc(file_size, 1);
   if (!buf) { free(strtab); free(local_strx); free(public_strx); free(extern_strx); return -1; }
   uint8_t *p = buf;
 
@@ -272,8 +354,10 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
     for (cg_reloc_t *r = blob->relocs; r; r = r->next) {
       uint8_t r_type = 0, pcr = 0;
       if (!resolve_reloc_encoding(r->type, &r_type, &pcr)) FAIL("unsupported reloc type %u (line %u)", r->type, r->line);
-      int si = sym_index_of(ir, blob, local_count, public_count, r->sym);
-      if (si < 0) FAIL("reloc against unknown symbol '%s' (line %u)", r->sym ? r->sym : "(null)", r->line);
+      int si = -1;
+      if (!symmap_get(&sym_index, r->sym, &si) || si < 0) {
+        FAIL("reloc against unknown symbol '%s' (line %u)", r->sym ? r->sym : "(null)", r->line);
+      }
       struct relocation_info ri = {0};
       ri.r_address = r->instr_off;
       ri.r_extern = 1;
@@ -297,6 +381,7 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
   size_t sidx = 0;
   /* locals */
   for (symtab_entry *s = blob->syms; s; s = s->next) {
+    if (!s->name) continue;
     if (s->off == (size_t)-1) FAIL("local symbol '%s' missing offset", s->name ? s->name : "(anon)");
     nl[sidx].n_un.n_strx = local_strx[sidx];
     nl[sidx].n_type = N_SECT;
@@ -362,6 +447,7 @@ int macho_write_object(const ir_prog_t *ir, const cg_blob_t *blob, const char *o
   free(local_strx);
   free(public_strx);
   free(extern_strx);
+  symmap_free(&sym_index);
   free(buf);
   return 0;
 
@@ -370,6 +456,7 @@ fail:
   free(local_strx);
   free(public_strx);
   free(extern_strx);
+  symmap_free(&sym_index);
   free(buf);
   if (err[0]) fprintf(stderr, "[lower] Mach-O emit: %s\n", err);
 #undef FAIL

@@ -29,6 +29,22 @@ typedef struct cg_pc_map {
   struct cg_pc_map *next;
 } cg_pc_map_t;
 
+typedef struct {
+  uint64_t total_ns;
+  uint64_t collect_syms_ns;
+  uint64_t func_detect_ns;
+  uint64_t instr_size_ns;
+  uint64_t alloc_ns;
+  uint64_t pass2_total_ns;
+  uint64_t pass2_labels_ns;
+  uint64_t pass2_dirs_ns;
+  uint64_t pass2_instrs_ns;
+  uint64_t finalize_ns;
+  uint64_t symtab_ns;
+  uint64_t reloc_ns;
+  uint64_t pcmap_ns;
+} cg_profile_t;
+
 /* Codegen output blob consumed by Mach-O writer. */
 typedef struct {
   unsigned char *code;
@@ -41,6 +57,8 @@ typedef struct {
   uint32_t reloc_count;
   cg_pc_map_t *pc_map;    /* mapping from code offsets to IR ids/lines */
   uint32_t pc_map_count;
+  int profile_enabled;
+  cg_profile_t prof;
 } cg_blob_t;
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out);
