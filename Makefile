@@ -102,8 +102,9 @@ ZAS_OBJ := \
 
 ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded-internal-declaration
 
+
 .PHONY: \
-	all clean zas zld zrun zlnt zop zxc zxc-lib zir lower dirs install \
+	all clean zas zld zrun zlnt zop zxc zxc-lib zir lower dirs install install-devtools \
 	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
   zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
@@ -124,14 +125,13 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
+build: zas zld zrun zlnt zop zxc zir zem lower
 
 pipeline: build
 	./scripts/pipeline.sh --skip-build
 
-install: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
+install: zas zld zrun zlnt zop zxc zir zem lower
 	@mkdir -p $(DESTDIR)$(BINDIR)
-	@cp tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
@@ -141,6 +141,10 @@ install: zas zld zrun zlnt zop zxc zir zem lower zasm-bin-wrap
 	@install -m 0755 $(BIN)/zir $(DESTDIR)$(BINDIR)/zir
 	@install -m 0755 $(BIN)/zem $(DESTDIR)$(BINDIR)/zem
 	@install -m 0755 $(BIN)/lower $(DESTDIR)$(BINDIR)/lower
+
+install-devtools: zasm-bin-wrap
+	@mkdir -p $(DESTDIR)$(BINDIR)
+	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
 	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
@@ -233,6 +237,7 @@ test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
 test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
+test-validation: test-zir-canon-assign-ids
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
 test-validation: test-zem-emit-cert-smoke
@@ -258,6 +263,7 @@ test-validation: test-zem-ir-v11-parser-robust
 test-validation: test-zem-break-src-file-line
 test-validation: test-zem-ir-id-debug-events
 test-validation: test-zem-ir-id-coverage
+test-validation: test-zem-coverage-merge-ir-id
 
 # Experimental / local-only debloat playground (large fixture).
 # Not included in test-all/test-validation.
@@ -344,6 +350,9 @@ test-zem-ir-id-debug-events: zem
 test-zem-ir-id-coverage: zem
 	sh test/zem_ir_id_coverage.sh
 
+test-zem-coverage-merge-ir-id: zem
+	sh test/zem_coverage_merge_ir_id.sh
+
 test-zem-caps: zem
 	sh test/zem_caps.sh
 
@@ -390,6 +399,9 @@ test-zxc-cli: zxc
 
 test-zir: zir zop
 	sh test/zir_smoke.sh
+
+test-zir-canon-assign-ids: zir
+	sh test/zir_canon_assign_ids.sh
 
 test-asm-suite: test-asm test-runtime test-validation test-fuzz-zld
 
@@ -801,6 +813,7 @@ ZIR_SRC := \
 
 ZIR_OBJ := \
   $(ZIR_BUILD)/main.o \
+	$(ZIR_BUILD)/canon.o \
   $(ZIR_BUILD)/jsonl.o
 
 $(ZIR_BUILD)/%.o: src/zir/%.c $(VERSION_HEADER) | dirs

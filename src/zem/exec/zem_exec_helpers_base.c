@@ -372,21 +372,139 @@ static int zem_cov_parse_u64_field(const char *line, const char *key, uint64_t *
   return 1;
 }
 
-void zem_cov_merge_jsonl(uint64_t *hits, size_t nhits, const char *path) {
+static int zem_cov_parse_i64_field(const char *line, const char *key, int64_t *out) {
+  if (!line || !key || !out) return 0;
+  const char *p = strstr(line, key);
+  if (!p) return 0;
+  p += strlen(key);
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p == ':') p++;
+  while (*p == ' ' || *p == '\t') p++;
+  char *end = NULL;
+  long long v = strtoll(p, &end, 10);
+  if (!end || end == p) return 0;
+  *out = (int64_t)v;
+  return 1;
+}
+
+typedef struct {
+  long key;
+  uint32_t pc;
+  uint8_t used;
+} zem_cov_id_pc_ent_t;
+
+static uint64_t zem_cov_hash_u64(uint64_t x) {
+  // SplitMix64 finalizer.
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ull;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebull;
+  x ^= x >> 31;
+  return x;
+}
+
+static zem_cov_id_pc_ent_t *zem_cov_build_id_to_pc_map(const recvec_t *recs,
+                                                       size_t *out_cap) {
+  if (out_cap) *out_cap = 0;
+  if (!recs || recs->n == 0) return NULL;
+
+  size_t n_ids = 0;
+  for (size_t pc = 0; pc < recs->n; pc++) {
+    const record_t *r = &recs->v[pc];
+    if (r->k != JREC_INSTR) continue;
+    if (r->id < 0) continue;
+    n_ids++;
+  }
+  if (n_ids == 0) return NULL;
+
+  size_t cap = 1;
+  while (cap < (n_ids * 2u)) cap <<= 1u;
+  zem_cov_id_pc_ent_t *tab =
+      (zem_cov_id_pc_ent_t *)calloc(cap, sizeof(zem_cov_id_pc_ent_t));
+  if (!tab) return NULL;
+
+  for (size_t pc = 0; pc < recs->n; pc++) {
+    const record_t *r = &recs->v[pc];
+    if (r->k != JREC_INSTR) continue;
+    if (r->id < 0) continue;
+
+    uint64_t h = zem_cov_hash_u64((uint64_t)(int64_t)r->id);
+    size_t idx = (size_t)(h & (cap - 1u));
+    for (;;) {
+      if (!tab[idx].used) {
+        tab[idx].used = 1;
+        tab[idx].key = r->id;
+        tab[idx].pc = (uint32_t)pc;
+        break;
+      }
+      if (tab[idx].key == r->id) {
+        // First wins (stable).
+        break;
+      }
+      idx = (idx + 1u) & (cap - 1u);
+    }
+  }
+
+  if (out_cap) *out_cap = cap;
+  return tab;
+}
+
+static int zem_cov_lookup_pc_by_id(const zem_cov_id_pc_ent_t *tab, size_t cap,
+                                   long id, uint32_t *out_pc) {
+  if (!tab || cap == 0 || !out_pc) return 0;
+  uint64_t h = zem_cov_hash_u64((uint64_t)(int64_t)id);
+  size_t idx = (size_t)(h & (cap - 1u));
+  for (;;) {
+    if (!tab[idx].used) return 0;
+    if (tab[idx].key == id) {
+      *out_pc = tab[idx].pc;
+      return 1;
+    }
+    idx = (idx + 1u) & (cap - 1u);
+  }
+}
+
+void zem_cov_merge_jsonl(const recvec_t *recs, uint64_t *hits, size_t nhits,
+                         const char *path) {
   if (!hits || nhits == 0 || !path || !*path) return;
+
+  size_t idmap_cap = 0;
+  zem_cov_id_pc_ent_t *idmap = zem_cov_build_id_to_pc_map(recs, &idmap_cap);
+
   FILE *f = fopen(path, "rb");
-  if (!f) return;
+  if (!f) {
+    free(idmap);
+    return;
+  }
   char line[4096];
   while (fgets(line, (int)sizeof(line), f)) {
     if (!strstr(line, "\"k\":\"zem_cov_rec\"")) continue;
-    uint64_t pc = 0;
     uint64_t count = 0;
-    if (!zem_cov_parse_u64_field(line, "\"pc\"", &pc)) continue;
     if (!zem_cov_parse_u64_field(line, "\"count\"", &count)) continue;
+
+    // Prefer stable ir_id when present.
+    int64_t ir_id = -1;
+    if (idmap && zem_cov_parse_i64_field(line, "\"ir_id\"", &ir_id) &&
+        ir_id >= 0) {
+      uint32_t pc_u32 = 0;
+      if (zem_cov_lookup_pc_by_id(idmap, idmap_cap, (long)ir_id, &pc_u32)) {
+        uint64_t pc = (uint64_t)pc_u32;
+        if (pc < nhits) {
+          hits[pc] += count;
+          continue;
+        }
+      }
+    }
+
+    // Fallback to legacy pc merge.
+    uint64_t pc = 0;
+    if (!zem_cov_parse_u64_field(line, "\"pc\"", &pc)) continue;
     if (pc >= nhits) continue;
     hits[pc] += count;
   }
   fclose(f);
+
+  free(idmap);
 }
 
 int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,

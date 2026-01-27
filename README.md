@@ -196,6 +196,12 @@ The `(HL, DE)` = `(ptr, len)` slice convention enables:
 
 ## Quick Start
 
+## Deliverables =
+
+For end users, zasm is delivered as **self-contained compiled binaries** (e.g. `bin/<platform>/*`, with convenience symlinks under `bin/`). ==
+
+The repository may contain scripts used for development, testing, or internal workflows; they are not part of the user-facing product surface.
+
 ### Build
 
 ```sh

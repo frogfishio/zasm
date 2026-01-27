@@ -93,7 +93,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       goto done;
     }
     if (cov_merge && *cov_merge) {
-      zem_cov_merge_jsonl(cov_hits, recs->n, cov_merge);
+      zem_cov_merge_jsonl(recs, cov_hits, recs->n, cov_merge);
     }
   }
 

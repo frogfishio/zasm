@@ -106,9 +106,11 @@ static void print_help(FILE *out) {
       "              [--shake-heap-pad N] [--shake-heap-pad-max N] [--shake-poison-heap]\n",
       "              [--shake-redzone N] [--shake-quarantine N] [--shake-poison-free]\n",
       "              [--shake-io-chunking] [--shake-io-chunk-max N]]\n",
-      "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [-- <guest-arg>...]\n",
+  "      [--inherit-env] [--clear-env] [--env KEY=VAL]... [--params <guest-arg>...]\n",
       "\n",
       "Info:\n",
+      "  --help            Print this help and exit\n",
+      "  --version         Print version and exit\n",
       "  --caps            Print loaded host capabilities and registered selectors\n",
       "  --strip MODE       Rewrite IR JSONL using a coverage profile (no execution)\n",
       "                    MODE: uncovered-ret | uncovered-delete\n",
@@ -122,7 +124,8 @@ static void print_help(FILE *out) {
       "  --rep-max-report N Emit up to N zem_rep_ngram records (top repeated n-grams)\n",
       "  --rep-coverage-jsonl PATH Optional coverage JSONL to enrich bloat score\n",
       "  --rep-diag         Print one-line bloat_diag summary to stdout\n",
-      "  --                Stop option parsing; remaining args become guest argv\n",
+  "  --params          Stop option parsing; remaining args become guest argv\n",
+  "  --                Alias for --params\n",
       "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
       "  --clear-env        Clear the env snapshot (default: empty)\n",
       "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n",
@@ -360,11 +363,12 @@ int main(int argc, char **argv) {
   uint64_t shake_seed = 0;
 
   for (int i = 1; i < argc; i++) {
-    if (strcmp(argv[i], "--") == 0) {
+    if (strcmp(argv[i], "--") == 0 || strcmp(argv[i], "--params") == 0) {
+      const char *which = argv[i];
       // Remaining args become guest argv.
       for (int j = i + 1; j < argc; j++) {
         if (proc.argc >= (uint32_t)(sizeof(proc.argv) / sizeof(proc.argv[0]))) {
-          return zem_failf("too many guest args (after --)");
+          return zem_failf("too many guest args (after %s)", which);
         }
         proc.argv[proc.argc++] = argv[j];
       }

@@ -4,6 +4,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "jsonl.h"
+#include "canon.h"
 #include "version.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,6 +134,7 @@ static void print_help(void) {
           "\n"
           "Usage:\n"
           "  zir [--verbose] [--json]\n"
+          "  zir --canon [--assign-ids]\n"
           "  zir --tool -o <output.jsonl> <input.jsonl>...\n"
           "\n"
           "Options:\n"
@@ -140,6 +142,8 @@ static void print_help(void) {
           "  --version     Show version information\n"
           "  --tool        Enable filelist + -o output mode\n"
           "  -o <path>     Write opcode JSONL to a file (tool mode only)\n"
+          "  --canon       Canonicalize IR JSONL and write to stdout\n"
+          "  --assign-ids  With --canon: fill missing instr ids deterministically\n"
           "  --verbose     Emit debug-friendly diagnostics to stderr\n"
           "  --json        Emit diagnostics as JSON lines (stderr)\n"
           "  --allow-extern-prim  Accept EXTERN directives for host primitives (_in/_out/...)\n"
@@ -693,6 +697,8 @@ static int instr_size_hint(const record_t* r, const symtab_t* syms, char* err, s
 
 int main(int argc, char** argv) {
   int tool_mode = 0;
+  int canon_mode = 0;
+  int assign_ids = 0;
   const char* out_path = NULL;
   const char* inputs[256];
   int ninputs = 0;
@@ -709,6 +715,14 @@ int main(int argc, char** argv) {
     }
     if (strcmp(arg, "--tool") == 0) {
       tool_mode = 1;
+      continue;
+    }
+    if (strcmp(arg, "--canon") == 0) {
+      canon_mode = 1;
+      continue;
+    }
+    if (strcmp(arg, "--assign-ids") == 0) {
+      assign_ids = 1;
       continue;
     }
     if (strcmp(arg, "--verbose") == 0) {
@@ -752,8 +766,13 @@ int main(int argc, char** argv) {
       diag_emit("error", NULL, 0, "--tool requires -o <output>");
       return 2;
     }
-  } else if (ninputs > 0 || out_path) {
+  } else if (!canon_mode && (ninputs > 0 || out_path)) {
     diag_emit("error", NULL, 0, "file inputs and -o require --tool");
+    return 2;
+  }
+
+  if (assign_ids && !canon_mode) {
+    diag_emit("error", NULL, 0, "--assign-ids requires --canon");
     return 2;
   }
 
@@ -810,6 +829,17 @@ int main(int argc, char** argv) {
     }
   }
   free(line);
+
+  if (canon_mode) {
+    char err[256];
+    if (zir_canon_write(stdout, &recs, assign_ids, err, sizeof(err)) != 0) {
+      diag_emit("error", NULL, 0, "canon failed: %s", err[0] ? err : "unknown error");
+      recvec_free(&recs);
+      return 2;
+    }
+    recvec_free(&recs);
+    return 0;
+  }
 
   symtab_t syms;
   symtab_init(&syms);

@@ -5,6 +5,8 @@
 
 IR JSONL emulator + debugger for ZASM IR v1.1.
 
+`zem` is a self-contained compiled tool. Using it does not require Python or any scripting runtime.
+
 `zem` executes ZASM IR JSONL directly (the output of `zas`, and an input to tools like `zld`/`zir`). It is also used as a developer-experience tool: it can trace execution, expose a CLI debugger, and emit machine-readable debugger stop events suitable for feeding into external tooling (e.g. a DAP adapter).
 
 ## Usage
@@ -98,10 +100,11 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 
 Guest argv:
 
-- Use `--` to stop option parsing; remaining args become guest argv.
+- Use `--params` to stop option parsing; remaining args become guest argv.
+  - `--` is accepted as an alias for `--params`.
 
 ```sh
-bin/zem /tmp/program.jsonl -- hello world
+bin/zem /tmp/program.jsonl --params hello world
 ```
 
 Environment snapshot:
