@@ -105,6 +105,14 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
         return 1;
       }
       *dst = v;
+
+      // Concolic-lite: value is not from stdin.
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        ctx->reg_stdin_valid[rid] = 0;
+        ctx->reg_stdin_off[rid] = 0;
+      }
+
       note_reg_write_ptr(regprov, regs, dst, (uint32_t)pc, cur_label, r->line,
                          r->m);
       *ctx->pc = pc + 1;
@@ -142,6 +150,20 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       else if (op == ZEM_OP_LD8U) *dst = (uint64_t)(uint32_t)b;
       else if (op == ZEM_OP_LD8S64) *dst = (uint64_t)(int64_t)(int8_t)b;
       else *dst = (uint64_t)b;
+
+      // Concolic-lite: if this load came from stdin-mapped memory, taint the
+      // destination register with the corresponding stdin offset.
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        uint32_t stdin_off = 0;
+        if (zem_exec_stdin_lookup(ctx, addr, &stdin_off)) {
+          ctx->reg_stdin_valid[rid] = 1;
+          ctx->reg_stdin_off[rid] = stdin_off;
+        } else {
+          ctx->reg_stdin_valid[rid] = 0;
+          ctx->reg_stdin_off[rid] = 0;
+        }
+      }
     } else if (op == ZEM_OP_LD16U || op == ZEM_OP_LD16S || op == ZEM_OP_LD16U64 ||
                op == ZEM_OP_LD16S64) {
       uint16_t w = 0;
@@ -154,6 +176,12 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       else if (op == ZEM_OP_LD16U) *dst = (uint64_t)(uint32_t)w;
       else if (op == ZEM_OP_LD16S64) *dst = (uint64_t)(int64_t)(int16_t)w;
       else *dst = (uint64_t)w;
+
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        ctx->reg_stdin_valid[rid] = 0;
+        ctx->reg_stdin_off[rid] = 0;
+      }
     } else if (op == ZEM_OP_LD32 || op == ZEM_OP_LD32U64 || op == ZEM_OP_LD32S64) {
       uint32_t w = 0;
       if (!mem_load_u32le(mem, addr, &w)) {
@@ -164,6 +192,12 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       if (op == ZEM_OP_LD32) *dst = (uint64_t)w;
       else if (op == ZEM_OP_LD32S64) *dst = (uint64_t)(int64_t)(int32_t)w;
       else *dst = (uint64_t)w;
+
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        ctx->reg_stdin_valid[rid] = 0;
+        ctx->reg_stdin_off[rid] = 0;
+      }
     } else {
       uint64_t w = 0;
       if (!mem_load_u64le(mem, addr, &w)) {
@@ -172,6 +206,12 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
         return 1;
       }
       *dst = w;
+
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        ctx->reg_stdin_valid[rid] = 0;
+        ctx->reg_stdin_off[rid] = 0;
+      }
     }
 
     note_reg_write_ptr(regprov, regs, dst, (uint32_t)pc, cur_label, r->line,
@@ -287,6 +327,12 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "CP expects reg, x");
       return 1;
     }
+    // Concolic-lite: reset CP taint summary.
+    ctx->cmp_lhs_stdin_valid = 0;
+    ctx->cmp_lhs_stdin_off = 0;
+    ctx->cmp_rhs_is_imm_u32 = 0;
+    ctx->cmp_rhs_imm_u32 = 0;
+
     uint32_t lhs = 0;
     if (!op_to_u32(syms, regs, &r->ops[0], &lhs)) {
       *ctx->rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, regs, mem,
@@ -299,6 +345,21 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "unresolved CP rhs");
       return 1;
     }
+
+    // Best-effort: if lhs is a register currently tainted by stdin and rhs is
+    // an immediate constant, remember it for JR unlock suggestions.
+    {
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid) && ctx->reg_stdin_valid[rid]) {
+        ctx->cmp_lhs_stdin_valid = 1;
+        ctx->cmp_lhs_stdin_off = ctx->reg_stdin_off[rid];
+      }
+      if (r->ops[1].t == JOP_NUM) {
+        ctx->cmp_rhs_is_imm_u32 = 1;
+        ctx->cmp_rhs_imm_u32 = rhs;
+      }
+    }
+
     regs->last_cmp_lhs = (uint64_t)lhs;
     regs->last_cmp_rhs = (uint64_t)rhs;
     zem_regprov_note(regprov, ZEM_REG_CMP_LHS, (uint32_t)pc, cur_label, r->line,

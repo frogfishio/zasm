@@ -262,6 +262,8 @@ test-validation: test-zem-sniff-zi-argv-copy-bad-args
 test-validation: test-zem-sniff-zi-alloc-bad-args
 test-validation: test-zem-sniff-zi-str-concat-bad-args
 test-validation: test-zem-diag-ret-trunc-ld32s64
+test-validation: test-zem-fuzz-smoke
+test-validation: test-zem-fuzz-unlock-smoke
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
 test-validation: test-zem-rep-scan
@@ -370,6 +372,12 @@ test-zem-sniff-zi-str-concat-bad-args: zas zem
 
 test-zem-diag-ret-trunc-ld32s64: zas zem
 	sh test/zem_diag_ret_trunc_ld32s64.sh
+
+test-zem-fuzz-smoke: zas zem
+	sh test/zem_fuzz_smoke.sh
+
+test-zem-fuzz-unlock-smoke: zas zem
+	sh test/zem_fuzz_unlock_smoke.sh
 
 test-zem-coverage-smoke: zas zem
 	sh test/zem_coverage_smoke.sh
@@ -769,6 +777,7 @@ ZEM_HOST_LIBCAP_EXEC := $(ZEM_HOST_BUILD)/libzingcap_exec.a
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
 	$(ZEM_BUILD)/zem_debug.o \
+	$(ZEM_BUILD)/zem_fuzz.o \
 	$(ZEM_BUILD)/zem_srcmap.o \
 	$(ZEM_BUILD)/exec/zem_exec_program.o \
 	$(ZEM_BUILD)/exec/zem_exec_helpers_base.o \
@@ -802,10 +811,11 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/ztriage.o \
 	$(ZEM_BUILD)/zduel.o
 
-$(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
+
+$(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) src/zem/zem_types.h | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@
 
-$(ZEM_BUILD)/exec/%.o: src/zem/exec/%.c $(VERSION_HEADER) | dirs
+$(ZEM_BUILD)/exec/%.o: src/zem/exec/%.c $(VERSION_HEADER) src/zem/zem_types.h | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -Isrc/zem/exec -c $< -o $@
 
 $(ZEM_BUILD)/jsonl.o: src/zld/jsonl.c | dirs

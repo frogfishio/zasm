@@ -3,6 +3,30 @@
 
 #include "zem_exec_internal.h"
 
+static void zem_unlock_suggest(const zem_dbg_cfg_t *dbg_cfg, uint32_t pc,
+                               uint32_t stdin_off, uint8_t value) {
+  if (!dbg_cfg || !dbg_cfg->fuzz_suggest || !dbg_cfg->fuzz_suggest_n) return;
+  if (dbg_cfg->fuzz_suggest_cap == 0) return;
+  size_t n = *dbg_cfg->fuzz_suggest_n;
+  if (n >= dbg_cfg->fuzz_suggest_cap) return;
+  zem_fuzz_suggestion_t s;
+  s.pc = pc;
+  s.stdin_off = stdin_off;
+  s.value = value;
+  dbg_cfg->fuzz_suggest[n] = s;
+  *dbg_cfg->fuzz_suggest_n = n + 1;
+}
+
+static void zem_unlock_trace(const zem_dbg_cfg_t *dbg_cfg, uint32_t pc,
+           const char *cond, int take, uint32_t stdin_off,
+           uint32_t rhs_u32, uint8_t suggest_u8) {
+  if (!dbg_cfg || !dbg_cfg->fuzz_unlock_trace) return;
+  if (!cond) cond = "?";
+  fprintf(stderr,
+    "zem: unlock: pc=%u cond=%s take=%d stdin_off=%u rhs=%u suggest=%u\n",
+    pc, cond, take ? 1 : 0, stdin_off, rhs_u32, (unsigned)suggest_u8);
+}
+
 int zem_exec_ops_jr(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   if (!ctx || !r) return 0;
   if (op != ZEM_OP_JR) return 0;
@@ -49,6 +73,62 @@ int zem_exec_ops_jr(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
                                  "unknown JR condition %s", cond);
       return 1;
     }
+
+    // Concolic-lite unlocker: when enabled, emit a best-effort stdin-byte edit
+    // that would flip this branch.
+    const zem_dbg_cfg_t *dbg_cfg = ctx->dbg_cfg;
+    if (dbg_cfg && dbg_cfg->fuzz_unlock && ctx->cmp_lhs_stdin_valid &&
+        ctx->cmp_rhs_is_imm_u32) {
+      const uint32_t stdin_off = ctx->cmp_lhs_stdin_off;
+      const uint32_t rhs = ctx->cmp_rhs_imm_u32;
+      const int rhs_is_u8 = (rhs <= 255u);
+
+      if (str_ieq(cond, "eq") && rhs_is_u8) {
+        uint8_t v = (uint8_t)rhs;
+        if (take) v = (uint8_t)((v + 1u) & 0xffu);
+        zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+        zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+      } else if (str_ieq(cond, "ne") && rhs_is_u8) {
+        uint8_t v = (uint8_t)rhs;
+        if (!take) v = (uint8_t)(v ^ 1u);
+        zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+        zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+      } else if ((str_ieq(cond, "ltu") ||
+                  (str_ieq(cond, "lt") && a_u <= 255u && b_u <= 255u)) &&
+                 rhs_is_u8) {
+        // Flip: want !(a < rhs)
+        if (take) {
+          uint8_t v = (uint8_t)rhs;
+          zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+          zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+        } else {
+          if (rhs > 0u) {
+            uint8_t v = (uint8_t)((rhs - 1u) & 0xffu);
+            zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+            zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+          }
+        }
+      } else if ((str_ieq(cond, "leu") ||
+                  (str_ieq(cond, "le") && a_u <= 255u && b_u <= 255u)) &&
+                 rhs_is_u8) {
+        // Flip: want !(a <= rhs)
+        if (take) {
+          if (rhs < 255u) {
+            uint8_t v = (uint8_t)((rhs + 1u) & 0xffu);
+            zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+            zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+          }
+        } else {
+          uint8_t v = (uint8_t)rhs;
+          zem_unlock_suggest(dbg_cfg, (uint32_t)pc, stdin_off, v);
+          zem_unlock_trace(dbg_cfg, (uint32_t)pc, cond, take, stdin_off, rhs, v);
+        }
+      } else {
+        (void)a_s;
+        (void)b_s;
+      }
+    }
+
     if (take) {
       size_t new_pc = pc;
       if (!jump_to_label(ctx->labels, label, &new_pc)) {

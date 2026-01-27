@@ -343,6 +343,69 @@ Useful flags:
 - `--shake-heap-pad N` / `--shake-heap-pad-max N` vary the base heap address (alignment-safe padding).
 - `--shake-poison-heap` fills newly allocated heap bytes with deterministic non-zero data to surface zero-init assumptions.
 
+### Fuzzing (coverage-guided stdin)
+
+`zem` includes a simple in-process, coverage-guided fuzzer for programs that read from guest stdin.
+
+Key properties:
+
+- Single binary (no external fuzzers/tools).
+- Deterministic by default (seeded RNG).
+- Mutates only guest stdin bytes.
+
+Basic usage:
+
+```sh
+bin/zem --fuzz --fuzz-iters 1000 --fuzz-len 64 --fuzz-mutations 4 --fuzz-seed 1 \
+  --fuzz-out /tmp/zem.best.bin \
+  --fuzz-crash-out /tmp/zem.crash.bin \
+  /tmp/program.jsonl
+```
+
+Notes:
+
+- `--fuzz` requires exactly one program input file (not stream mode / `-`).
+- If you pass `--stdin PATH`, that file is used as the seed input (and also makes replay easy).
+- If you omit `--fuzz-len`, it defaults to the `--stdin` file size when provided, otherwise `64`.
+- `--fuzz-out` writes the best coverage input found so far.
+- `--fuzz-crash-out` writes the first failing input found (if any).
+
+Replay workflow:
+
+```sh
+# Fuzz:
+bin/zem --fuzz --fuzz-iters 10000 --fuzz-crash-out /tmp/crash.bin /tmp/program.jsonl
+
+# Replay the failure:
+bin/zem --stdin /tmp/crash.bin /tmp/program.jsonl
+```
+
+When a crash is found and `--fuzz-crash-out` is set, `zem` prints a one-line repro command.
+
+#### Concolic-lite branch unlocker
+
+For some programs, random mutation stalls on hard-to-guess branches. Enable the unlocker:
+
+```sh
+bin/zem --fuzz --fuzz-unlock --fuzz-unlock-tries 4 --fuzz-mutations 4 /tmp/program.jsonl
+```
+
+To see one-line predicate traces when the unlocker emits suggestions, add:
+
+```sh
+bin/zem --fuzz --fuzz-unlock-trace /tmp/program.jsonl
+```
+
+This prints lines like `zem: unlock: pc=... cond=... take=... stdin_off=... rhs=... suggest=...` to stderr.
+
+The unlocker is best-effort and currently strongest for branches that compare a single stdin byte against an immediate constant (e.g. `CP A, #66` followed by `JR eq,label`).
+
+To test the unlocker in isolation (no random mutation), set:
+
+```sh
+bin/zem --fuzz --fuzz-mutations 0 --fuzz-unlock /tmp/program.jsonl
+```
+
 ## Debugger REPL quickstart
 
 Run, then interact:

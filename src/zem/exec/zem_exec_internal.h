@@ -5,6 +5,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "zem_exec.h"   // public API: zem_exec_program
 #include "zem_types.h"  // record_t/recvec_t/zem_dbg_cfg_t/etc
@@ -55,6 +56,24 @@ typedef struct {
   // Optional: captured stdin read cursor (bytes already captured in proc).
   uint32_t *stdin_pos;
 
+  // Internal-only: best-effort mapping from stdin offsets to guest memory.
+  // Recorded on reads from stdin into memory via _in/zi_read/req_read.
+  // Used by the fuzz "unlocker" to relate CP/JR comparisons back to input bytes.
+  uint32_t stdin_spans_mem_base[32];
+  uint32_t stdin_spans_len[32];
+  uint32_t stdin_spans_in_base[32];
+  size_t stdin_spans_n;
+
+  // Internal-only: best-effort stdin provenance for registers.
+  int reg_stdin_valid[ZEM_REG__COUNT];
+  uint32_t reg_stdin_off[ZEM_REG__COUNT];
+
+  // Internal-only: last CP taint summary (consumed by JR unlocker).
+  int cmp_lhs_stdin_valid;
+  uint32_t cmp_lhs_stdin_off;
+  int cmp_rhs_is_imm_u32;
+  uint32_t cmp_rhs_imm_u32;
+
   // Tables / run state
   const char **pc_labels;
   zem_op_t *ops;
@@ -88,6 +107,66 @@ typedef struct {
   // Error propagation: handlers set *rc and return handled.
   int *rc;
 } zem_exec_ctx_t;
+
+static inline int zem_exec_regid_from_sym(const char *s, zem_regid_t *out) {
+  if (!s || !out) return 0;
+  if (strcmp(s, "HL") == 0) {
+    *out = ZEM_REG_HL;
+    return 1;
+  }
+  if (strcmp(s, "DE") == 0) {
+    *out = ZEM_REG_DE;
+    return 1;
+  }
+  if (strcmp(s, "BC") == 0) {
+    *out = ZEM_REG_BC;
+    return 1;
+  }
+  if (strcmp(s, "IX") == 0) {
+    *out = ZEM_REG_IX;
+    return 1;
+  }
+  if (strcmp(s, "A") == 0) {
+    *out = ZEM_REG_A;
+    return 1;
+  }
+  return 0;
+}
+
+static inline void zem_exec_stdin_note_span(zem_exec_ctx_t *ctx, uint32_t mem_ptr,
+                                           uint32_t nbytes, uint32_t stdin_off) {
+  if (!ctx || nbytes == 0) return;
+  size_t i = ctx->stdin_spans_n;
+  if (i >= (sizeof(ctx->stdin_spans_mem_base) / sizeof(ctx->stdin_spans_mem_base[0]))) {
+    // Drop if out of space; best-effort only.
+    return;
+  }
+  ctx->stdin_spans_mem_base[i] = mem_ptr;
+  ctx->stdin_spans_len[i] = nbytes;
+  ctx->stdin_spans_in_base[i] = stdin_off;
+  ctx->stdin_spans_n = i + 1;
+}
+
+static inline int zem_exec_stdin_lookup(const zem_exec_ctx_t *ctx, uint32_t mem_addr,
+                                        uint32_t *stdin_off_out) {
+  if (stdin_off_out) *stdin_off_out = 0;
+  if (!ctx || !stdin_off_out) return 0;
+
+  // Search newest spans first.
+  for (size_t i = ctx->stdin_spans_n; i > 0; i--) {
+    size_t j = i - 1;
+    const uint32_t base = ctx->stdin_spans_mem_base[j];
+    const uint32_t len = ctx->stdin_spans_len[j];
+    const uint32_t in_base = ctx->stdin_spans_in_base[j];
+    if (len == 0) continue;
+    if (mem_addr < base) continue;
+    const uint32_t off = mem_addr - base;
+    if (off >= len) continue;
+    *stdin_off_out = in_base + off;
+    return 1;
+  }
+  return 0;
+}
 
 // ---- Handlers (return 1 if handled and the caller should continue) ----
 

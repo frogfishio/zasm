@@ -469,12 +469,21 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   }
 
 done:
+  if (cov_enabled && cov_hits && dbg_cfg && dbg_cfg->coverage_take_hits && dbg_cfg->coverage_take_n) {
+    *dbg_cfg->coverage_take_hits = cov_hits;
+    *dbg_cfg->coverage_take_n = recs ? recs->n : 0;
+    cov_hits = NULL;
+  }
+
   if (cov_enabled && cov_hits) {
     const uint32_t blackholes_n = dbg_cfg ? dbg_cfg->coverage_blackholes_n : 0;
-    int cov_rc = zem_cov_write_jsonl(recs, pc_srcs, stdin_source_name, cov_hits,
-                                    recs->n, cov_out, debug_events_only,
-                                    blackholes_n);
-    if (cov_rc != 0 && rc == 0) rc = cov_rc;
+    const int no_emit = (dbg_cfg && dbg_cfg->coverage_no_emit);
+    if (!no_emit) {
+      int cov_rc = zem_cov_write_jsonl(recs, pc_srcs, stdin_source_name, cov_hits,
+                                      recs->n, cov_out, debug_events_only,
+                                      blackholes_n);
+      if (cov_rc != 0 && rc == 0) rc = cov_rc;
+    }
   }
   if (cov_hits) free(cov_hits);
   g_fail_regprov = NULL;

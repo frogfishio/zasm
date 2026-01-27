@@ -27,6 +27,7 @@
 #include "zem_exec.h"
 #include "zem_host.h"
 #include "zem_cert.h"
+#include "zem_fuzz.h"
 #include "zem_hash.h"
 #include "zem_rep.h"
 #include "zem_strip.h"
@@ -101,6 +102,8 @@ static void print_help(FILE *out) {
       "      [--trace-jsonl-out PATH]\n",
       "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
       "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
+  "      [--fuzz --fuzz-iters N [--fuzz-len N] [--fuzz-mutations N] [--fuzz-seed S]\n",
+  "            [--fuzz-out PATH] [--fuzz-crash-out PATH] [--fuzz-print-every N] [--fuzz-continue]]\n",
       "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
       "      [--rep-scan --rep-n N --rep-mode MODE --rep-out PATH [--rep-coverage-jsonl PATH] [--rep-diag]]\n",
       "      [--stdin PATH] [--emit-cert DIR] [--cert-max-mem-events N]\n",
@@ -191,6 +194,18 @@ static void print_help(FILE *out) {
       "  --trace-sample N    Emit 1 out of every N step events (deterministic)\n",
       "  --trace-mem         Emit memory read/write JSONL events to stderr\n",
       "  --stdin PATH        Use PATH as guest stdin (captured for replay/certs)\n",
+      "  --fuzz              Run a simple in-process coverage-guided stdin fuzzer\n",
+      "  --fuzz-iters N      Number of mutated runs (default: 1000)\n",
+      "  --fuzz-len N        Fixed stdin length in bytes (default: stdin file size, else 64)\n",
+      "  --fuzz-mutations N  Byte flips per iteration (default: 4)\n",
+      "  --fuzz-unlock       Enable a concolic-lite branch unlocker for stdin\n",
+      "  --fuzz-unlock-tries N Max unlock attempts per iteration (default: 4)\n",
+      "  --fuzz-unlock-trace Emit one-line predicate traces for unlock suggestions\n",
+      "  --fuzz-seed S       RNG seed (default: 1; accepts 0x.. too)\n",
+      "  --fuzz-out PATH     Write best-found stdin input to PATH\n",
+      "  --fuzz-crash-out PATH Write first crashing stdin input to PATH\n",
+      "  --fuzz-print-every N Print progress every N iterations (default: 0)\n",
+      "  --fuzz-continue     Keep fuzzing after a failing run\n",
       "  --emit-cert DIR     Emit a trace-validity certificate (SMT-LIB) into DIR\n",
       "  --sniff             Proactively warn about suspicious runtime patterns\n",
       "  --sniff-fatal       Like --sniff but stop execution on detection\n",
@@ -400,6 +415,21 @@ int main(int argc, char **argv) {
   const char *stdin_path = NULL;
   uint8_t *stdin_bytes = NULL;
   size_t stdin_len = 0;
+
+  int fuzz = 0;
+  uint32_t fuzz_iters = 1000;
+  uint32_t fuzz_len = 0;
+  int fuzz_len_set = 0;
+  uint32_t fuzz_mutations = 4;
+  int fuzz_unlock = 0;
+  uint32_t fuzz_unlock_tries = 4;
+  int fuzz_unlock_trace = 0;
+  uint64_t fuzz_seed = 1;
+  int fuzz_seed_set = 0;
+  const char *fuzz_out = NULL;
+  const char *fuzz_crash_out = NULL;
+  uint32_t fuzz_print_every = 0;
+  int fuzz_continue = 0;
 
   uint32_t cert_max_mem_events = 0;
   int cert_max_mem_events_set = 0;
@@ -694,6 +724,93 @@ int main(int argc, char **argv) {
         return zem_failf("--stdin requires a path");
       }
       stdin_path = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz") == 0) {
+      fuzz = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-iters") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-iters requires a number");
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i] || v == 0 || v > (unsigned long)UINT32_MAX) {
+        return zem_failf("bad --fuzz-iters value");
+      }
+      fuzz_iters = (uint32_t)v;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-len") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-len requires a number");
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i] || v == 0 || v > (unsigned long)UINT32_MAX) {
+        return zem_failf("bad --fuzz-len value");
+      }
+      fuzz_len = (uint32_t)v;
+      fuzz_len_set = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-mutations") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-mutations requires a number");
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i] || v > (unsigned long)UINT32_MAX) {
+        return zem_failf("bad --fuzz-mutations value");
+      }
+      fuzz_mutations = (uint32_t)v;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-unlock") == 0) {
+      fuzz_unlock = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-unlock-trace") == 0) {
+      fuzz_unlock = 1;
+      fuzz_unlock_trace = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-unlock-tries") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-unlock-tries requires a number");
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i] || v == 0 || v > (unsigned long)UINT32_MAX) {
+        return zem_failf("bad --fuzz-unlock-tries value");
+      }
+      fuzz_unlock_tries = (uint32_t)v;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-seed") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-seed requires a value");
+      char *end = NULL;
+      uint64_t v = strtoull(argv[++i], &end, 0);
+      if (!end || end == argv[i]) return zem_failf("bad --fuzz-seed value");
+      fuzz_seed = v;
+      fuzz_seed_set = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-out") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-out requires a path");
+      fuzz_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-crash-out") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-crash-out requires a path");
+      fuzz_crash_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-print-every") == 0) {
+      if (i + 1 >= argc) return zem_failf("--fuzz-print-every requires a number");
+      char *end = NULL;
+      unsigned long v = strtoul(argv[++i], &end, 10);
+      if (!end || end == argv[i] || v > (unsigned long)UINT32_MAX) {
+        return zem_failf("bad --fuzz-print-every value");
+      }
+      fuzz_print_every = (uint32_t)v;
+      continue;
+    }
+    if (strcmp(argv[i], "--fuzz-continue") == 0) {
+      fuzz_continue = 1;
       continue;
     }
     if (strcmp(argv[i], "--emit-cert") == 0) {
@@ -1024,6 +1141,14 @@ int main(int argc, char **argv) {
     return zem_failf("--rep-scan cannot be combined with --strip");
   }
 
+  if (fuzz) {
+    if (emit_cert_dir) return zem_failf("--fuzz cannot be combined with --emit-cert");
+    if (dbg.enabled || dbg.debug_events || dbg.debug_events_only) {
+      return zem_failf("--fuzz cannot be combined with --debug/--debug-events");
+    }
+    if (shake) return zem_failf("--fuzz cannot be combined with --shake");
+  }
+
   if (shake) {
     if (emit_cert_dir) {
       return zem_failf("--emit-cert cannot be combined with --shake (use replayable single-run flags)");
@@ -1090,6 +1215,35 @@ int main(int argc, char **argv) {
     return rc;
   }
 
+  // If --stdin was provided, capture guest stdin from the file for this run.
+  // (This is also used as the seed input in --fuzz mode.)
+  if (stdin_path && *stdin_path) {
+    int ok = slurp_path(stdin_path, &stdin_bytes, &stdin_len);
+    if (!ok) {
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      free((void *)pc_srcs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("failed to read --stdin file: %s (%s)", stdin_path,
+                       strerror(errno));
+    }
+    if (stdin_len > UINT32_MAX) {
+      free(stdin_bytes);
+      stdin_bytes = NULL;
+      stdin_len = 0;
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      free((void *)pc_srcs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("--stdin too large");
+    }
+    proc.stdin_bytes = stdin_bytes;
+    proc.stdin_len = (uint32_t)stdin_len;
+    if (!stdin_source_name) stdin_source_name = stdin_path;
+  }
+
   if (emit_cert_dir) {
     if (program_uses_stdin && !stdin_path) {
       zem_buf_free(&mem);
@@ -1099,31 +1253,30 @@ int main(int argc, char **argv) {
       return zem_failf("--emit-cert needs guest stdin captured, but program IR used stdin; pass IR as a file and use --stdin PATH");
     }
 
-    int ok = 0;
-    if (stdin_path) {
-      ok = slurp_path(stdin_path, &stdin_bytes, &stdin_len);
-    } else {
-      ok = slurp_stream(stdin, &stdin_bytes, &stdin_len);
+    // If stdin wasn't already captured via --stdin, capture from host stdin.
+    if (!proc.stdin_bytes) {
+      int ok = slurp_stream(stdin, &stdin_bytes, &stdin_len);
+      if (!ok) {
+        zem_buf_free(&mem);
+        zem_symtab_free(&syms);
+        recvec_free(&recs);
+        if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+        return zem_failf("failed to capture stdin for cert");
+      }
+      if (stdin_len > UINT32_MAX) {
+        free(stdin_bytes);
+        stdin_bytes = NULL;
+        stdin_len = 0;
+        zem_buf_free(&mem);
+        zem_symtab_free(&syms);
+        recvec_free(&recs);
+        if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+        return zem_failf("stdin capture too large");
+      }
+      proc.stdin_bytes = stdin_bytes;
+      proc.stdin_len = (uint32_t)stdin_len;
+      if (!stdin_source_name) stdin_source_name = "stdin";
     }
-    if (!ok) {
-      zem_buf_free(&mem);
-      zem_symtab_free(&syms);
-      recvec_free(&recs);
-      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
-      return zem_failf("failed to capture stdin for cert");
-    }
-    if (stdin_len > UINT32_MAX) {
-      free(stdin_bytes);
-      stdin_bytes = NULL;
-      stdin_len = 0;
-      zem_buf_free(&mem);
-      zem_symtab_free(&syms);
-      recvec_free(&recs);
-      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
-      return zem_failf("stdin capture too large");
-    }
-    proc.stdin_bytes = stdin_bytes;
-    proc.stdin_len = (uint32_t)stdin_len;
   }
 
   zem_symtab_t labels;
@@ -1149,6 +1302,77 @@ int main(int argc, char **argv) {
       telemetry("zem", 3, "failed", 6);
     }
     return zem_failf("OOM building srcmap");
+  }
+
+  if (fuzz) {
+    if (ninputs != 1 || (inputs[0] && strcmp(inputs[0], "-") == 0)) {
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      free((void *)pc_srcs);
+      free(stdin_bytes);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return zem_failf("--fuzz requires exactly one program input file (not '-')");
+    }
+
+    if (!fuzz_len_set) {
+      if (proc.stdin_bytes) {
+        fuzz_len = proc.stdin_len;
+        fuzz_len_set = 1;
+      } else {
+        fuzz_len = 64;
+        fuzz_len_set = 1;
+      }
+    }
+    if (fuzz_len == 0) fuzz_len = 64;
+
+    if (!fuzz_seed_set) fuzz_seed = 1;
+
+    zem_fuzz_cfg_t cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.iters = fuzz_iters;
+    cfg.len = fuzz_len;
+    cfg.mutations = fuzz_mutations;
+    cfg.seed = fuzz_seed;
+    cfg.print_every = fuzz_print_every;
+    cfg.unlock = fuzz_unlock;
+    cfg.unlock_tries = fuzz_unlock_tries;
+    cfg.unlock_trace = fuzz_unlock_trace;
+    cfg.program_path = inputs[0];
+    cfg.out_path = fuzz_out;
+    cfg.crash_out_path = fuzz_crash_out;
+    cfg.continue_on_fail = fuzz_continue;
+
+    const uint8_t *seed_in = proc.stdin_bytes;
+    uint32_t seed_in_len = proc.stdin_len;
+    if (!seed_in) {
+      seed_in = NULL;
+      seed_in_len = 0;
+    }
+
+    const char *fuzz_stdin_name = stdin_source_name ? stdin_source_name : "<fuzz>";
+    int fuzz_rc = zem_fuzz_run(&recs, &mem, &syms, &labels, &srcmap, pc_srcs,
+                               &proc, &dbg, seed_in, seed_in_len,
+                               fuzz_stdin_name, &cfg);
+
+    if (dbg_script && dbg_script != stdin) fclose(dbg_script);
+    if (trace_jsonl_fp && trace_jsonl_fp != stderr && trace_jsonl_fp != stdout) fclose(trace_jsonl_fp);
+    zem_srcmap_free(&srcmap);
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    free(stdin_bytes);
+
+    if (fuzz_rc != 0) {
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return fuzz_rc;
+    }
+    if (!dbg.debug_events_only) telemetry("zem", 3, "done", 4);
+    return 0;
   }
 
   for (size_t bi = 0; bi < nbreak_labels; bi++) {

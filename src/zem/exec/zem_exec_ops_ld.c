@@ -46,6 +46,19 @@ int zem_exec_ops_ld(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       return 1;
     }
     regs->A = (uint64_t)(uint32_t)b;
+
+    // Concolic-lite: if this load came from stdin-mapped memory, taint A.
+    {
+      uint32_t stdin_off = 0;
+      if (zem_exec_stdin_lookup(ctx, addr, &stdin_off)) {
+        ctx->reg_stdin_valid[ZEM_REG_A] = 1;
+        ctx->reg_stdin_off[ZEM_REG_A] = stdin_off;
+      } else {
+        ctx->reg_stdin_valid[ZEM_REG_A] = 0;
+        ctx->reg_stdin_off[ZEM_REG_A] = 0;
+      }
+    }
+
     zem_regprov_note(regprov, ZEM_REG_A, (uint32_t)pc, cur_label, r->line, r->m);
     pc++;
     *ctx->pc = pc;
@@ -95,6 +108,16 @@ int zem_exec_ops_ld(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       return 1;
     }
     *dst = (uint64_t)v;
+
+    // Concolic-lite: assume non-memory LD clears stdin provenance.
+    {
+      zem_regid_t rid;
+      if (zem_exec_regid_from_sym(r->ops[0].s, &rid)) {
+        ctx->reg_stdin_valid[rid] = 0;
+        ctx->reg_stdin_off[rid] = 0;
+      }
+    }
+
     note_reg_write_ptr(regprov, regs, dst, (uint32_t)pc, cur_label, r->line, r->m);
     pc++;
     *ctx->pc = pc;

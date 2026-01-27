@@ -83,6 +83,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
       eff_cap = chunk;
     }
+    uint32_t stdin_before = (ctx->stdin_pos ? *ctx->stdin_pos : 0u);
     int32_t n = req_read_maybe_captured(ctx->proc, ctx->stdin_pos, 0,
                                         mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
@@ -90,6 +91,9 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       if (wlen > eff_cap) wlen = eff_cap;
       zem_watchset_note_write(watches, ptr, wlen, (uint32_t)pc, cur_label,
                               r->line);
+
+      // Concolic-lite: remember where stdin bytes landed.
+      zem_exec_stdin_note_span(ctx, ptr, wlen, stdin_before);
     }
     regs->HL = (uint64_t)(uint32_t)n;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -230,6 +234,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       uint32_t chunk = (uint32_t)(shake_rand_u64(dbg_cfg, tag) % (uint64_t)upper) + 1u;
       eff_cap = chunk;
     }
+    uint32_t stdin_before = (ctx->stdin_pos ? *ctx->stdin_pos : 0u);
     int32_t n = req_read_maybe_captured(ctx->proc, ctx->stdin_pos, handle,
                                         mem->bytes + ptr, (size_t)eff_cap);
     if (n > 0) {
@@ -237,6 +242,11 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       if (wlen > eff_cap) wlen = eff_cap;
       zem_watchset_note_write(watches, ptr, wlen, (uint32_t)pc, cur_label,
                               r->line);
+
+      // Concolic-lite: only track stdin handle 0.
+      if (handle == 0) {
+        zem_exec_stdin_note_span(ctx, ptr, wlen, stdin_before);
+      }
     }
     regs->HL = (uint64_t)(uint32_t)n;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,

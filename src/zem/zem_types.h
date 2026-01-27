@@ -20,6 +20,14 @@ typedef struct {
   uint64_t last_cmp_rhs;
 } zem_regs_t;
 
+// Internal-only: concolic-lite branch unlocker suggestion.
+// Best-effort hint: "set stdin[stdin_off] = value".
+typedef struct {
+  uint32_t pc;        // PC of the conditional JR that produced this hint
+  uint32_t stdin_off; // byte offset in captured stdin
+  uint8_t value;      // suggested byte value
+} zem_fuzz_suggestion_t;
+
 typedef enum {
   ZEM_REG_HL = 0,
   ZEM_REG_DE = 1,
@@ -56,6 +64,24 @@ typedef struct {
   const char *coverage_out;   // output path (JSONL); NULL => no file output
   const char *coverage_merge; // input path (JSONL) to merge into this run
   uint32_t coverage_blackholes_n; // if >0, print top-N uncovered labels to stderr
+  // Internal-only: suppress coverage JSONL output/summary work.
+  int coverage_no_emit;
+  // Internal-only: if set, zem_exec_program will transfer ownership of its
+  // cov_hits buffer to the caller by writing through these pointers.
+  uint64_t **coverage_take_hits;
+  size_t *coverage_take_n;
+
+  // Internal-only: concolic-lite "unlocker". If enabled, the executor will
+  // emit best-effort mutation hints for stdin bytes that appear in CP/JR
+  // comparisons.
+  int fuzz_unlock;
+  // Internal-only: when fuzz_unlock is enabled, emit one-line predicate traces
+  // on stderr as suggestions are generated.
+  int fuzz_unlock_trace;
+  zem_fuzz_suggestion_t *fuzz_suggest;
+  size_t fuzz_suggest_cap;
+  size_t *fuzz_suggest_n;
+
   FILE *repl_in;
   int repl_no_prompt;
   int debug_events;
