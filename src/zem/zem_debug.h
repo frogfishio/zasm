@@ -9,6 +9,8 @@
 
 #include "zem_types.h"
 
+#include "zem_srcmap.h"
+
 int zem_dbg_cfg_add_break_pc(zem_dbg_cfg_t *dbg, uint32_t pc);
 
 void zem_dbg_print_regs(FILE *out, const zem_regs_t *r);
@@ -25,6 +27,7 @@ void zem_dbg_emit_stop_event(FILE *out, dbg_stop_reason_t reason,
                              const recvec_t *recs,
                              const char *const *pc_labels, size_t pc,
                              const char *const *pc_srcs,
+                             const zem_srcmap_t *srcmap,
                              const char *stdin_source_name,
                              const zem_regs_t *regs, const uint32_t *stack,
                              size_t sp,

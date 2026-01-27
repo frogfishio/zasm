@@ -11,6 +11,7 @@
 
 #include "zem_debug.h"
 #include "zem_mem.h"
+#include "zem_srcmap.h"
 #include "zem_util.h"
 
 static int str_ieq(const char *a, const char *b) { return zem_str_ieq(a, b); }
@@ -450,9 +451,55 @@ static void dbg_emit_source_obj(FILE *out, const char *src_path,
   fputs("}", out);
 }
 
+static void dbg_emit_src_ref_obj(FILE *out, const record_t *r,
+                                 const zem_srcmap_t *srcmap) {
+  if (!out) return;
+
+  fputs("{\"ref\":", out);
+  if (!r || r->src_ref < 0 || r->src_ref > (long)UINT32_MAX) {
+    fputs("null", out);
+    fputs(",\"src\":null}", out);
+    return;
+  }
+  fprintf(out, "%ld", r->src_ref);
+
+  const zem_src_entry_t *e = srcmap ? zem_srcmap_get(srcmap, (uint32_t)r->src_ref) : NULL;
+  fputs(",\"src\":", out);
+  if (!e) {
+    fputs("null}", out);
+    return;
+  }
+
+  fputs("{\"id\":", out);
+  fprintf(out, "%" PRIu32, e->id);
+  fputs(",\"file\":", out);
+  if (e->file && *e->file) {
+    zem_json_escape(out, e->file);
+  } else {
+    fputs("null", out);
+  }
+  fputs(",\"line\":", out);
+  if (e->line >= 0)
+    fprintf(out, "%" PRIi32, e->line);
+  else
+    fputs("null", out);
+  fputs(",\"col\":", out);
+  if (e->col >= 0)
+    fprintf(out, "%" PRIi32, e->col);
+  else
+    fputs("null", out);
+  fputs(",\"text\":", out);
+  if (e->text && *e->text)
+    zem_json_escape(out, e->text);
+  else
+    fputs("null", out);
+  fputs("}}", out);
+}
+
 static void dbg_emit_frame_entry(FILE *out, const recvec_t *recs,
                                  const char *const *pc_labels,
                                  const char *const *pc_srcs,
+                                 const zem_srcmap_t *srcmap,
                                  const char *stdin_source_name, uint32_t id,
                                  size_t pc) {
   if (!out || !recs) return;
@@ -465,6 +512,12 @@ static void dbg_emit_frame_entry(FILE *out, const recvec_t *recs,
   fprintf(out, "%" PRIu32, id);
   fputs(",\"pc\":", out);
   fprintf(out, "%zu", pc);
+  fputs(",\"ir_id\":", out);
+  if (r && r->id >= 0) {
+    fprintf(out, "%ld", r->id);
+  } else {
+    fputs("null", out);
+  }
   fputs(",\"name\":", out);
   if (name && *name)
     zem_json_escape(out, name);
@@ -489,6 +542,8 @@ static void dbg_emit_frame_entry(FILE *out, const recvec_t *recs,
     fputs("null", out);
   fputs(",\"source\":", out);
   dbg_emit_source_obj(out, src_path, stdin_source_name);
+  fputs(",\"src_ref\":", out);
+  dbg_emit_src_ref_obj(out, r, srcmap);
   fputs("}", out);
 }
 
@@ -551,6 +606,7 @@ void zem_dbg_emit_stop_event(FILE *out, dbg_stop_reason_t reason,
                              const recvec_t *recs,
                              const char *const *pc_labels, size_t pc,
                              const char *const *pc_srcs,
+                             const zem_srcmap_t *srcmap,
                              const char *stdin_source_name,
                              const zem_regs_t *regs, const uint32_t *stack,
                              size_t sp,
@@ -571,6 +627,12 @@ void zem_dbg_emit_stop_event(FILE *out, dbg_stop_reason_t reason,
   fputs(",\"frame\":{\"pc\":", out);
   fprintf(out, "%zu", pc);
   fputs(",\"id\":0", out);
+  fputs(",\"ir_id\":", out);
+  if (r && r->id >= 0) {
+    fprintf(out, "%ld", r->id);
+  } else {
+    fputs("null", out);
+  }
   fputs(",\"label\":", out);
   if (label)
     zem_json_escape(out, label);
@@ -600,6 +662,8 @@ void zem_dbg_emit_stop_event(FILE *out, dbg_stop_reason_t reason,
   }
   fputs(",\"source\":", out);
   dbg_emit_source_obj(out, src_path, stdin_source_name);
+  fputs(",\"src_ref\":", out);
+  dbg_emit_src_ref_obj(out, r, srcmap);
   fputs("}", out);
 
   fputs(",\"pc\":", out);
@@ -645,15 +709,16 @@ void zem_dbg_emit_stop_event(FILE *out, dbg_stop_reason_t reason,
   // callers (retpc) from top-of-stack to bottom-of-stack.
   fputs(",\"frames\":[", out);
   // frame 0: current
-  dbg_emit_frame_entry(out, recs, pc_labels, pc_srcs, stdin_source_name, 0,
-                       pc);
+  dbg_emit_frame_entry(out, recs, pc_labels, pc_srcs, srcmap,
+                       stdin_source_name, 0, pc);
 
   if (stack && sp) {
     for (size_t i = 0; i < sp; i++) {
       const uint32_t retpc = stack[sp - 1 - i];
       fputc(',', out);
-      dbg_emit_frame_entry(out, recs, pc_labels, pc_srcs, stdin_source_name,
-                           (uint32_t)(i + 1), (size_t)retpc);
+      dbg_emit_frame_entry(out, recs, pc_labels, pc_srcs, srcmap,
+                           stdin_source_name, (uint32_t)(i + 1),
+                           (size_t)retpc);
     }
   }
   fputs("]", out);

@@ -300,7 +300,7 @@ int zem_jump_to_label(const zem_symtab_t *labels, const char *label, size_t *pc)
   if (!zem_symtab_get(labels, label, &ignored_is_ptr, &idx)) {
     return 0;
   }
-  *pc = (size_t)idx + 1; // execute after the label record
+  *pc = (size_t)idx; // first instruction pc associated with this label
   return 1;
 }
 

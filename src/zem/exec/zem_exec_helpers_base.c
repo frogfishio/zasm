@@ -503,6 +503,12 @@ int zem_cov_write_jsonl(const recvec_t *recs, const char *const *pc_srcs,
 
       fputs("{\"k\":\"zem_cov_rec\",\"pc\":", out);
       fprintf(out, "%zu", pc);
+      fputs(",\"ir_id\":", out);
+      if (r->id >= 0) {
+        fprintf(out, "%ld", r->id);
+      } else {
+        fputs("null", out);
+      }
       fputs(",\"count\":", out);
       fprintf(out, "%" PRIu64, hits[pc]);
       fputs(",\"label\":", out);

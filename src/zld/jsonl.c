@@ -40,6 +40,18 @@ void record_free(record_t* r) {
   if (r->label) free(r->label);
   if (r->section) free(r->section);
 
+  if (r->producer) free(r->producer);
+  if (r->unit) free(r->unit);
+  if (r->ts) free(r->ts);
+
+  if (r->src_file) free(r->src_file);
+  if (r->src_text) free(r->src_text);
+
+  if (r->level) free(r->level);
+  if (r->msg) free(r->msg);
+  if (r->code) free(r->code);
+  if (r->help) free(r->help);
+
   for (size_t i = 0; i < r->nops; i++) operand_free(&r->ops[i]);
   free(r->ops);
 
@@ -63,6 +75,134 @@ void recvec_free(recvec_t* r) {
 static const char* skip_ws(const char* p) {
   while (*p && (*p==' '||*p=='\t'||*p=='\r'||*p=='\n')) p++;
   return p;
+}
+
+static long parse_json_int(const char** p, int* ok);
+
+static int skip_json_value(const char** p);
+
+static int parse_json_string_slice(const char** p, const char** out_start, size_t* out_len) {
+  const char* s = *p;
+  if (*s != '"') return 0;
+  s++;
+  const char* start = s;
+  while (*s) {
+    unsigned char c = (unsigned char)*s++;
+    if (c == '\\') {
+      if (*s) s++;
+      continue;
+    }
+    if (c == '"') {
+      if (out_start) *out_start = start;
+      if (out_len) *out_len = (size_t)((s - 1) - start);
+      *p = s;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int skip_json_string_raw(const char** p) {
+  const char* start = NULL;
+  size_t len = 0;
+  return parse_json_string_slice(p, &start, &len);
+}
+
+static int skip_json_array(const char** p) {
+  const char* s = skip_ws(*p);
+  if (*s != '[') return 0;
+  s++;
+  s = skip_ws(s);
+  if (*s == ']') { *p = s + 1; return 1; }
+  while (*s) {
+    const char* tp = s;
+    if (!skip_json_value(&tp)) return 0;
+    s = skip_ws(tp);
+    if (*s == ',') { s++; s = skip_ws(s); continue; }
+    if (*s == ']') { *p = s + 1; return 1; }
+    return 0;
+  }
+  return 0;
+}
+
+static int skip_json_object(const char** p) {
+  const char* s = skip_ws(*p);
+  if (*s != '{') return 0;
+  s++;
+  s = skip_ws(s);
+  if (*s == '}') { *p = s + 1; return 1; }
+  while (*s) {
+    const char* tp = s;
+    if (!skip_json_string_raw(&tp)) return 0;
+    tp = skip_ws(tp);
+    if (*tp != ':') return 0;
+    tp++;
+    if (!skip_json_value(&tp)) return 0;
+    s = skip_ws(tp);
+    if (*s == ',') { s++; s = skip_ws(s); continue; }
+    if (*s == '}') { *p = s + 1; return 1; }
+    return 0;
+  }
+  return 0;
+}
+
+static int skip_json_value(const char** p) {
+  const char* s = skip_ws(*p);
+  if (!*s) return 0;
+  if (*s == '"') {
+    if (!skip_json_string_raw(&s)) return 0;
+    *p = s;
+    return 1;
+  }
+  if (*s == '{') {
+    if (!skip_json_object(&s)) return 0;
+    *p = s;
+    return 1;
+  }
+  if (*s == '[') {
+    if (!skip_json_array(&s)) return 0;
+    *p = s;
+    return 1;
+  }
+  if (*s == '-' || isdigit((unsigned char)*s)) {
+    int ok = 0;
+    (void)parse_json_int(&s, &ok);
+    if (!ok) return 0;
+    *p = s;
+    return 1;
+  }
+  if (strncmp(s, "true", 4) == 0) { *p = s + 4; return 1; }
+  if (strncmp(s, "false", 5) == 0) { *p = s + 5; return 1; }
+  if (strncmp(s, "null", 4) == 0) { *p = s + 4; return 1; }
+  return 0;
+}
+
+// Find a field value pointer within a JSON object (depth-1 only), tolerant of
+// whitespace and key order.
+static const char* json_find_field_value(const char* obj, const char* key) {
+  if (!obj || !key) return NULL;
+  const char* s = skip_ws(obj);
+  if (*s != '{') return NULL;
+  s++;
+  const size_t keylen = strlen(key);
+  while (*s) {
+    s = skip_ws(s);
+    if (*s == '}') return NULL;
+    if (*s != '"') return NULL;
+    const char* kstart = NULL;
+    size_t klen = 0;
+    if (!parse_json_string_slice(&s, &kstart, &klen)) return NULL;
+    s = skip_ws(s);
+    if (*s != ':') return NULL;
+    s++;
+    s = skip_ws(s);
+    if (klen == keylen && strncmp(kstart, key, keylen) == 0) return s;
+    if (!skip_json_value(&s)) return NULL;
+    s = skip_ws(s);
+    if (*s == ',') { s++; continue; }
+    if (*s == '}') return NULL;
+  }
+  return NULL;
 }
 
 // parse JSON string starting at opening quote; returns heap string; advances *p past closing quote
@@ -112,36 +252,29 @@ static long parse_json_int(const char** p, int* ok) {
   return neg ? -v : v;
 }
 
-// find substring key pattern and return pointer just after it, else NULL
-static const char* find_key(const char* line, const char* keypat) {
-  const char* p = strstr(line, keypat);
-  if (!p) return NULL;
-  return p + strlen(keypat);
-}
-
 // IR version tagging is mandatory; this is our compatibility gate for the pipeline.
 static int parse_ir_version(const char* line) {
-  const char* p = find_key(line, "\"ir\":\"");
+  const char* p = json_find_field_value(line, "ir");
   if (!p) return 0;
-  const char* end = strchr(p, '"');
-  if (!end) return 0;
-  size_t n = (size_t)(end - p);
-  if (n == strlen("zasm-v1.0") && strncmp(p, "zasm-v1.0", n) == 0) {
-    return 1;
-  }
-  if (n == strlen("zasm-v1.1") && strncmp(p, "zasm-v1.1", n) == 0) {
-    return 1;
-  }
-  return -1;
+  p = skip_ws(p);
+  char* v = parse_json_string(&p);
+  if (!v) return 0;
+  int ok = -1;
+  if (strcmp(v, "zasm-v1.0") == 0 || strcmp(v, "zasm-v1.1") == 0) ok = 1;
+  free(v);
+  return ok;
 }
 
-// parse loc.line if present: ,"loc":{"line":N}
+// parse loc.line if present (tolerant of loc object key order/whitespace)
 static int parse_loc_line(const char* line) {
-  const char* p = strstr(line, "\"loc\":{\"line\":");
-  if (!p) return -1;
-  p += strlen("\"loc\":{\"line\":");
+  const char* ploc = json_find_field_value(line, "loc");
+  if (!ploc) return -1;
+  ploc = skip_ws(ploc);
+  if (*ploc != '{') return -1;
+  const char* pline = json_find_field_value(ploc, "line");
+  if (!pline) return -1;
   int ok = 0;
-  long v = parse_json_int(&p, &ok);
+  long v = parse_json_int(&pline, &ok);
   return ok ? (int)v : -1;
 }
 
@@ -161,93 +294,83 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
   while (*p) {
     p = skip_ws(p);
     if (*p != '{') break;
-    p++;
+    const char* obj = p;
 
     operand_t op;
     memset(&op, 0, sizeof(op));
 
-    // Expect "t":"X","v":...
-    const char* pt = strstr(p, "\"t\":\"");
+    const char* pt = json_find_field_value(obj, "t");
     if (!pt) break;
-    p = pt + strlen("\"t\":\"");
-    if (strncmp(p, "sym", 3) == 0) op.t = JOP_SYM;
-    else if (strncmp(p, "reg", 3) == 0) op.t = JOP_REG;
-    else if (strncmp(p, "lbl", 3) == 0) op.t = JOP_LBL;
-    else if (strncmp(p, "num", 3) == 0) op.t = JOP_NUM;
-    else if (strncmp(p, "str", 3) == 0) op.t = JOP_STR;
-    else if (strncmp(p, "mem", 3) == 0) op.t = JOP_MEM;
+    const char* tp = pt;
+    char* ts = parse_json_string(&tp);
+    if (!ts) break;
+    if (strcmp(ts, "sym") == 0) op.t = JOP_SYM;
+    else if (strcmp(ts, "reg") == 0) op.t = JOP_REG;
+    else if (strcmp(ts, "lbl") == 0) op.t = JOP_LBL;
+    else if (strcmp(ts, "num") == 0) op.t = JOP_NUM;
+    else if (strcmp(ts, "str") == 0) op.t = JOP_STR;
+    else if (strcmp(ts, "mem") == 0) op.t = JOP_MEM;
     else op.t = JOP_NONE;
-
-    const char* tq = strchr(p, '"'); // end of t value
-    if (!tq) break;
-    p = tq + 1;
+    free(ts);
 
     if (op.t == JOP_MEM) {
-      const char* pb = strstr(p, "\"base\":");
+      const char* pb = json_find_field_value(obj, "base");
       if (!pb) break;
-      p = pb + strlen("\"base\":");
-      p = skip_ws(p);
-      if (*p == '{') {
-        p = skip_ws(p+1);
-        const char* pt2 = strstr(p, "\"t\":\"");
-        if (!pt2) break;
-        p = pt2 + strlen("\"t\":\"");
-        if (strncmp(p, "reg", 3) == 0) op.base_is_reg = 1;
-        else op.base_is_reg = 0;
-        const char* tq2 = strchr(p, '"');
-        if (!tq2) break;
-        p = tq2 + 1;
-        const char* pv2 = strstr(p, "\"v\":");
-        if (!pv2) break;
-        p = pv2 + strlen("\"v\":");
-        p = skip_ws(p);
-        char* s = parse_json_string(&p);
-        if (!s) break;
-        op.s = s;
-        const char* pd = strstr(p, "\"disp\":");
-        if (pd) {
-          const char* tmp = pd + strlen("\"disp\":");
-          int okd = 0;
-          long dv = parse_json_int(&tmp, &okd);
-          if (okd) op.disp = dv;
-        }
-        const char* ps = strstr(p, "\"size\":");
-        if (ps) {
-          const char* tmp = ps + strlen("\"size\":");
-          int oks = 0;
-          long sv = parse_json_int(&tmp, &oks);
-          if (oks) op.size = (int)sv;
-        }
-        const char* endobj = strchr(p, '}');
-        if (!endobj) break;
-        p = endobj + 1;
+      pb = skip_ws(pb);
+      if (*pb == '{') {
+        const char* pbt = json_find_field_value(pb, "t");
+        const char* pbv = json_find_field_value(pb, "v");
+        if (!pbt || !pbv) break;
+        const char* t2p = pbt;
+        char* t2 = parse_json_string(&t2p);
+        if (!t2) break;
+        op.base_is_reg = (strcmp(t2, "reg") == 0);
+        free(t2);
+        const char* v2p = pbv;
+        op.s = parse_json_string(&v2p);
+        if (!op.s) break;
+      } else if (*pb == '"') {
+        const char* v2p = pb;
+        op.s = parse_json_string(&v2p);
+        if (!op.s) break;
+        op.base_is_reg = 1; // legacy v1 base string means register
       } else {
-        char* s = parse_json_string(&p);
-        if (!s) break;
-        op.s = s;
+        break;
+      }
+      const char* pd = json_find_field_value(obj, "disp");
+      if (pd) {
+        int okd = 0;
+        long dv = parse_json_int(&pd, &okd);
+        if (okd) op.disp = dv;
+      }
+      const char* ps = json_find_field_value(obj, "size");
+      if (ps) {
+        int oks = 0;
+        long sv = parse_json_int(&ps, &oks);
+        if (oks) op.size = (int)sv;
       }
     } else {
-      const char* pv = strstr(p, "\"v\":");
+      const char* pv = json_find_field_value(obj, "v");
       if (!pv) break;
-      p = pv + strlen("\"v\":");
-      p = skip_ws(p);
+      pv = skip_ws(pv);
 
       if (op.t == JOP_NUM) {
         int ok = 0;
-        long v = parse_json_int(&p, &ok);
+        long v = parse_json_int(&pv, &ok);
         if (!ok) break;
         op.n = v;
       } else {
-        p = skip_ws(p);
-        char* s = parse_json_string(&p);
+        const char* vp = pv;
+        char* s = parse_json_string(&vp);
         if (!s) break;
         op.s = s;
       }
     }
 
-    const char* endobj = strchr(p, '}');
-    if (!endobj) break;
-    p = endobj + 1;
+    // Advance p past this object element.
+    const char* after = obj;
+    if (!skip_json_value(&after)) break;
+    p = after;
 
     /* Normalize reg/lbl to sym for downstream */
     if (op.t == JOP_REG || op.t == JOP_LBL) op.t = JOP_SYM;
@@ -274,105 +397,258 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
 int parse_jsonl_record(const char* line, record_t* out) {
   memset(out, 0, sizeof(*out));
   out->line = parse_loc_line(line);
+  out->id = -1;
+  out->src_ref = -1;
+  out->src_id = -1;
+  out->src_line = -1;
+  out->src_col = -1;
 
   int ir_ok = parse_ir_version(line);
   if (ir_ok == 0) return 10;
   if (ir_ok < 0) return 11;
 
-  const char* pk = find_key(line, "\"k\":\"");
+  const char* pk = json_find_field_value(line, "k");
   if (!pk) return 1;
-  const char* p = pk;
-  const char* end = strchr(p, '"');
-  if (!end) return 1;
-  char kind[16];
-  size_t klen = (size_t)(end - p);
-  if (klen >= sizeof(kind)) return 1;
-  memcpy(kind, p, klen);
-  kind[klen] = 0;
+  const char* p = skip_ws(pk);
+  char* kind = parse_json_string(&p);
+  if (!kind) return 1;
 
   if (strcmp(kind, "instr") == 0) {
     out->k = JREC_INSTR;
 
-    const char* pm = find_key(line, "\"m\":\"");
-    if (!pm) return 2;
-    p = pm;
-    end = strchr(p, '"');
-    if (!end) return 2;
-    out->m = (char*)malloc((size_t)(end - p) + 1);
-    memcpy(out->m, p, (size_t)(end - p));
-    out->m[end - p] = 0;
+    const char* pid = json_find_field_value(line, "id");
+    if (pid) {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (okid) out->id = v;
+    }
+    const char* psr = json_find_field_value(line, "src_ref");
+    if (psr) {
+      const char* tp = psr;
+      int okr = 0;
+      long v = parse_json_int(&tp, &okr);
+      if (okr) out->src_ref = v;
+    }
 
-    const char* pops = find_key(line, "\"ops\":");
-    if (!pops) return 2;
+    const char* pm = json_find_field_value(line, "m");
+    if (!pm) { free(kind); return 2; }
+    p = skip_ws(pm);
+    out->m = parse_json_string(&p);
+    if (!out->m) { free(kind); return 2; }
+
+    const char* pops = json_find_field_value(line, "ops");
+    if (!pops) { free(kind); return 2; }
     int ok = 0;
     out->ops = parse_operand_array(pops, &out->nops, &ok);
-    if (!ok) return 2;
+    if (!ok) { free(kind); return 2; }
     /* normalize reg/lbl -> sym for downstream emitter expectations */
     for (size_t i = 0; i < out->nops; i++) {
       if (out->ops[i].t == JOP_REG || out->ops[i].t == JOP_LBL) {
         out->ops[i].t = JOP_SYM;
       }
     }
+    free(kind);
     return 0;
   }
 
   if (strcmp(kind, "dir") == 0) {
     out->k = JREC_DIR;
 
-    const char* pd = find_key(line, "\"d\":\"");
-    if (!pd) return 3;
-    p = pd;
-    end = strchr(p, '"');
-    if (!end) return 3;
-    out->d = (char*)malloc((size_t)(end - p) + 1);
-    memcpy(out->d, p, (size_t)(end - p));
-    out->d[end - p] = 0;
-
-    const char* pn = find_key(line, "\"name\":\"");
-    if (pn) {
-      p = pn;
-      end = strchr(p, '"');
-      if (!end) return 3;
-      out->name = (char*)malloc((size_t)(end - p) + 1);
-      memcpy(out->name, p, (size_t)(end - p));
-      out->name[end - p] = 0;
+    const char* pid = json_find_field_value(line, "id");
+    if (pid) {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (okid) out->id = v;
+    }
+    const char* psr = json_find_field_value(line, "src_ref");
+    if (psr) {
+      const char* tp = psr;
+      int okr = 0;
+      long v = parse_json_int(&tp, &okr);
+      if (okr) out->src_ref = v;
     }
 
-    const char* pargs = find_key(line, "\"args\":");
-    if (!pargs) return 3;
+    const char* pd = json_find_field_value(line, "d");
+    if (!pd) { free(kind); return 3; }
+    p = skip_ws(pd);
+    out->d = parse_json_string(&p);
+    if (!out->d) { free(kind); return 3; }
+
+    const char* pn = json_find_field_value(line, "name");
+    if (pn) {
+      p = skip_ws(pn);
+      out->name = parse_json_string(&p);
+      if (!out->name) { free(kind); return 3; }
+    }
+
+    const char* pargs = json_find_field_value(line, "args");
+    if (!pargs) { free(kind); return 3; }
     int ok = 0;
     out->args = parse_operand_array(pargs, &out->nargs, &ok);
-    if (!ok) return 3;
+    if (!ok) { free(kind); return 3; }
     for (size_t i = 0; i < out->nargs; i++) {
       if (out->args[i].t == JOP_REG || out->args[i].t == JOP_LBL) {
         out->args[i].t = JOP_SYM;
       }
     }
 
-    const char* psect = find_key(line, "\"section\":\"");
+    const char* psect = json_find_field_value(line, "section");
     if (psect) {
-      p = psect;
-      end = strchr(p, '"');
-      if (!end) return 3;
-      out->section = (char*)malloc((size_t)(end - p) + 1);
-      memcpy(out->section, p, (size_t)(end - p));
-      out->section[end - p] = 0;
+      p = skip_ws(psect);
+      out->section = parse_json_string(&p);
+      if (!out->section) { free(kind); return 3; }
     }
+    free(kind);
     return 0;
   }
 
   if (strcmp(kind, "label") == 0) {
     out->k = JREC_LABEL;
-    const char* pn = find_key(line, "\"name\":\"");
-    if (!pn) return 4;
-    p = pn;
-    end = strchr(p, '"');
-    if (!end) return 4;
-    out->label = (char*)malloc((size_t)(end - p) + 1);
-    memcpy(out->label, p, (size_t)(end - p));
-    out->label[end - p] = 0;
+
+    const char* pid = json_find_field_value(line, "id");
+    if (pid) {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (okid) out->id = v;
+    }
+    const char* pn = json_find_field_value(line, "name");
+    if (!pn) { free(kind); return 4; }
+    p = skip_ws(pn);
+    out->label = parse_json_string(&p);
+    if (!out->label) { free(kind); return 4; }
+    free(kind);
     return 0;
   }
+
+  // v1.1 additive record kinds (tooling/debugging). Parse what we can and
+  // otherwise ignore; consumers may choose to use these for richer diagnostics.
+  if (strcmp(kind, "meta") == 0) {
+    out->k = JREC_META;
+    const char* pid = json_find_field_value(line, "id");
+    if (pid) {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (okid) out->id = v;
+    }
+    const char* pp = json_find_field_value(line, "producer");
+    if (pp) {
+      const char* tp = skip_ws(pp);
+      out->producer = parse_json_string(&tp);
+      if (!out->producer) { free(kind); return 5; }
+    }
+    const char* pu = json_find_field_value(line, "unit");
+    if (pu) {
+      const char* tp = skip_ws(pu);
+      out->unit = parse_json_string(&tp);
+      if (!out->unit) { free(kind); return 5; }
+    }
+    const char* pts = json_find_field_value(line, "ts");
+    if (pts) {
+      const char* tp = skip_ws(pts);
+      out->ts = parse_json_string(&tp);
+      if (!out->ts) { free(kind); return 5; }
+    }
+    free(kind);
+    return 0;
+  }
+
+  if (strcmp(kind, "src") == 0) {
+    out->k = JREC_SRC;
+    const char* pid = json_find_field_value(line, "id");
+    if (!pid) return 6;
+    {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (!okid) return 6;
+      out->src_id = v;
+    }
+
+    const char* pl = json_find_field_value(line, "line");
+    if (!pl) return 6;
+    {
+      const char* tp = pl;
+      int ok = 0;
+      long v = parse_json_int(&tp, &ok);
+      if (!ok) return 6;
+      out->src_line = v;
+    }
+
+    const char* pc = json_find_field_value(line, "col");
+    if (pc) {
+      const char* tp = pc;
+      int ok = 0;
+      long v = parse_json_int(&tp, &ok);
+      if (ok) out->src_col = v;
+    }
+
+    const char* pf = json_find_field_value(line, "file");
+    if (pf) {
+      const char* tp = skip_ws(pf);
+      out->src_file = parse_json_string(&tp);
+      if (!out->src_file) { free(kind); return 6; }
+    }
+    const char* ptxt = json_find_field_value(line, "text");
+    if (ptxt) {
+      const char* tp = skip_ws(ptxt);
+      out->src_text = parse_json_string(&tp);
+      if (!out->src_text) { free(kind); return 6; }
+    }
+    free(kind);
+    return 0;
+  }
+
+  if (strcmp(kind, "diag") == 0) {
+    out->k = JREC_DIAG;
+    const char* pid = json_find_field_value(line, "id");
+    if (pid) {
+      const char* tp = pid;
+      int okid = 0;
+      long v = parse_json_int(&tp, &okid);
+      if (okid) out->id = v;
+    }
+    const char* psr = json_find_field_value(line, "src_ref");
+    if (psr) {
+      const char* tp = psr;
+      int okr = 0;
+      long v = parse_json_int(&tp, &okr);
+      if (okr) out->src_ref = v;
+    }
+    const char* plv = json_find_field_value(line, "level");
+    if (!plv) return 7;
+    {
+      const char* tp = skip_ws(plv);
+      out->level = parse_json_string(&tp);
+      if (!out->level) return 7;
+    }
+    const char* pmsg = json_find_field_value(line, "msg");
+    if (!pmsg) return 7;
+    {
+      const char* tp = skip_ws(pmsg);
+      out->msg = parse_json_string(&tp);
+      if (!out->msg) return 7;
+    }
+    const char* pcode = json_find_field_value(line, "code");
+    if (pcode) {
+      const char* tp = skip_ws(pcode);
+      out->code = parse_json_string(&tp);
+      if (!out->code) return 7;
+    }
+    const char* phelp = json_find_field_value(line, "help");
+    if (phelp) {
+      const char* tp = skip_ws(phelp);
+      out->help = parse_json_string(&tp);
+      if (!out->help) return 7;
+    }
+    free(kind);
+    return 0;
+  }
+
+  free(kind);
 
   return 9;
 }
@@ -394,6 +670,10 @@ static int ident_ok(const char* s) {
 
 int validate_record_conform(const record_t* r, char* err, size_t errlen) {
   if (!r) return 1;
+  if (r->k == JREC_META || r->k == JREC_SRC || r->k == JREC_DIAG) {
+    // These records are for tooling/debugging; loc is not required.
+    return 0;
+  }
   if (r->line <= 0) {
     snprintf(err, errlen, "missing loc.line");
     return 1;
@@ -455,6 +735,31 @@ static int loc_present(const char* line) {
 
 int validate_record_strict(const char* line, const record_t* r, char* err, size_t errlen) {
   if (!r) return 1;
+  if (r->k == JREC_META) {
+    return 0;
+  }
+  if (r->k == JREC_SRC) {
+    if (r->src_id < 0) {
+      snprintf(err, errlen, "missing src.id");
+      return 1;
+    }
+    if (r->src_line <= 0) {
+      snprintf(err, errlen, "missing src.line");
+      return 1;
+    }
+    return 0;
+  }
+  if (r->k == JREC_DIAG) {
+    if (!sym_ok(r->level)) {
+      snprintf(err, errlen, "missing diag.level");
+      return 1;
+    }
+    if (!sym_ok(r->msg)) {
+      snprintf(err, errlen, "missing diag.msg");
+      return 1;
+    }
+    return 0;
+  }
   if (loc_present(line) && r->line <= 0) {
     snprintf(err, errlen, "invalid loc.line");
     return 1;

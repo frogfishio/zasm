@@ -18,6 +18,12 @@ static const char *rec_kind_str(rec_kind_t k) {
       return "dir";
     case JREC_LABEL:
       return "label";
+    case JREC_META:
+      return "meta";
+    case JREC_SRC:
+      return "src";
+    case JREC_DIAG:
+      return "diag";
     default:
       return "none";
   }
@@ -140,6 +146,28 @@ int zem_build_program(const char **inputs, int ninputs, recvec_t *out_recs,
   }
 
   return 0;
+}
+
+int zem_build_srcmap(const recvec_t *recs, zem_srcmap_t *out) {
+  if (!recs || !out) return 0;
+  zem_srcmap_init(out);
+
+  for (size_t i = 0; i < recs->n; i++) {
+    const record_t *r = &recs->v[i];
+    if (r->k != JREC_SRC) continue;
+    if (r->src_id < 0 || r->src_id > (long)UINT32_MAX) continue;
+
+    uint32_t id = (uint32_t)r->src_id;
+    int32_t line = (r->src_line < 0) ? -1 : (int32_t)r->src_line;
+    int32_t col = (r->src_col < 0) ? -1 : (int32_t)r->src_col;
+
+    if (!zem_srcmap_add(out, id, r->src_file, line, col, r->src_text)) {
+      zem_srcmap_free(out);
+      return 0;
+    }
+  }
+
+  return 1;
 }
 
 static int mem_align4(zem_buf_t *mem) {
@@ -335,7 +363,16 @@ int zem_build_label_index(const recvec_t *recs, zem_symtab_t *labels) {
   for (size_t i = 0; i < recs->n; i++) {
     const record_t *r = &recs->v[i];
     if (r->k != JREC_LABEL || !r->label) continue;
-    if (!zem_symtab_put(labels, r->label, 0, (uint32_t)i)) {
+    // Labels semantically attach to the next instruction record (not just the
+    // next JSONL line), so v1.1 streams can safely include meta/src/diag lines
+    // between a label and its first instruction.
+    size_t pc = i + 1;
+    while (pc < recs->n) {
+      const record_t *n = &recs->v[pc];
+      if (n->k == JREC_INSTR) break;
+      pc++;
+    }
+    if (!zem_symtab_put(labels, r->label, 0, (uint32_t)pc)) {
       return zem_build_fail_at(i, r, "OOM adding label");
     }
   }

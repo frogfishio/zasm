@@ -706,6 +706,7 @@ static void zem_diag_print_recent(FILE *out, size_t max_items) {
     fprintf(out, "  pc=%zu", e->pc);
     if (e->label) fprintf(out, " label=%s", e->label);
     if (e->r && e->r->line >= 0) fprintf(out, " line=%d", e->r->line);
+    if (e->r && e->r->id >= 0) fprintf(out, " ir_id=%ld", e->r->id);
     fputc('\n', out);
     if (e->r) {
       fputs("    ", out);
@@ -1198,6 +1199,12 @@ static int zem_exec_fail_at(size_t pc, const record_t *r,
   if (r && r->line >= 0) {
     fprintf(stderr, "line=%d\n", r->line);
   }
+  if (r && r->id >= 0) {
+    fprintf(stderr, "ir_id=%ld\n", r->id);
+  }
+  if (r && r->src_ref >= 0) {
+    fprintf(stderr, "src_ref=%ld\n", r->src_ref);
+  }
   if (regs) {
     zem_dbg_print_regs(stderr, regs);
   }
@@ -1430,6 +1437,11 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       const record_t *r = &recs->v[i];
       if (r->k != JREC_LABEL || !r->label) continue;
       size_t start_pc = i + 1;
+      while (start_pc < recs->n) {
+        const record_t *n = &recs->v[start_pc];
+        if (n->k == JREC_INSTR) break;
+        start_pc++;
+      }
       if (start_pc < recs->n) pc_labels[start_pc] = r->label;
     }
   }
@@ -1668,7 +1680,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       }
     }
 
-    if (r->k == JREC_DIR || r->k == JREC_LABEL) {
+    if (r->k == JREC_DIR || r->k == JREC_LABEL || r->k == JREC_META ||
+        r->k == JREC_SRC || r->k == JREC_DIAG) {
       pc++;
       continue;
     }

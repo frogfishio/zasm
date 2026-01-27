@@ -8,11 +8,12 @@
 #include <string.h>
 
 #include "zem_exec_internal.h"
+#include "zem_srcmap.h"
 
 int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                      const zem_symtab_t *syms, const zem_symtab_t *labels,
                      const zem_dbg_cfg_t *dbg_cfg, const char *const *pc_srcs,
-                     const zem_proc_t *proc,
+                     const zem_srcmap_t *srcmap, const zem_proc_t *proc,
                      const char *stdin_source_name) {
   int rc = 0;
   const char **pc_labels = NULL;
@@ -136,6 +137,11 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       const record_t *r = &recs->v[i];
       if (r->k != JREC_LABEL || !r->label) continue;
       size_t start_pc = i + 1;
+      while (start_pc < recs->n) {
+        const record_t *n = &recs->v[start_pc];
+        if (n->k == JREC_INSTR) break;
+        start_pc++;
+      }
       if (start_pc < recs->n) pc_labels[start_pc] = r->label;
     }
   }
@@ -358,8 +364,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (should_break) {
         if (debug_events) {
           zem_dbg_emit_stop_event(stderr, stop_reason, recs, pc_labels, pc,
-                                 pc_srcs, stdin_source_name, &regs, stack, sp,
-                                 &regprov, stop_bp_hit, stop_bp_pc,
+                                 pc_srcs, srcmap, stdin_source_name, &regs,
+                                 stack, sp, &regprov, stop_bp_hit, stop_bp_pc,
                                  stop_bp_cond, stop_bp_cond_ok,
                                  stop_bp_cond_result, &breakpoints, &watches,
                                  mem);
@@ -398,7 +404,8 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       }
     }
 
-    if (r->k == JREC_DIR || r->k == JREC_LABEL) {
+    if (r->k == JREC_DIR || r->k == JREC_LABEL || r->k == JREC_META ||
+        r->k == JREC_SRC || r->k == JREC_DIAG) {
       pc++;
       continue;
     }

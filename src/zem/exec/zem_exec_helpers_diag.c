@@ -536,6 +536,7 @@ void zem_diag_print_recent(FILE *out, size_t n) {
     fprintf(out, "  pc=%zu", e->pc);
     if (e->label) fprintf(out, " label=%s", e->label);
     if (e->r && e->r->line >= 0) fprintf(out, " line=%d", e->r->line);
+    if (e->r && e->r->id >= 0) fprintf(out, " ir_id=%ld", e->r->id);
     fputc('\n', out);
     if (e->r) {
       fputs("    ", out);

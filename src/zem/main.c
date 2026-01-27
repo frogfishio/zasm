@@ -100,7 +100,7 @@ static void print_help(FILE *out) {
       "      [--stdin PATH] [--emit-cert DIR] [--cert-max-mem-events N]\n",
       "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
       "      [--source-name NAME]\n",
-      "      [--break-pc N] [--break-label L] [<input.jsonl|->...]\n",
+      "      [--break-pc N] [--break-label L] [--break FILE:LINE] [<input.jsonl|->...]\n",
       "      [--sniff] [--sniff-fatal]\n",
       "      [--shake [--shake-iters N] [--shake-seed S] [--shake-start N]\n",
       "              [--shake-heap-pad N] [--shake-heap-pad-max N] [--shake-poison-heap]\n",
@@ -199,6 +199,7 @@ static void print_help(FILE *out) {
       "  --shake-io-chunk-max N Max short-read chunk size (default: 64)\n",
       "  --break-pc N        Break when pc (record index) == N\n",
       "  --break-label L     Break at label L (first instruction after label record)\n",
+      "  --break FILE:LINE   Break at first instruction mapped to FILE:LINE via v1.1 src/src_ref\n",
       "  --debug             Interactive CLI debugger (break/step/regs/bt)\n",
       "  --debug-script PATH Run debugger commands from PATH (no prompt; exit on EOF).\n",
       "                    Note: --debug-script - reads debugger commands from stdin;\n",
@@ -339,6 +340,8 @@ int main(int argc, char **argv) {
   const char *stdin_source_name = NULL;
   const char *break_labels[256];
   size_t nbreak_labels = 0;
+  const char *break_srcs[256];
+  size_t nbreak_srcs = 0;
   int program_uses_stdin = 0;
 
   int shake = 0;
@@ -867,6 +870,17 @@ int main(int argc, char **argv) {
       break_labels[nbreak_labels++] = argv[++i];
       continue;
     }
+    if (strcmp(argv[i], "--break") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--break requires FILE:LINE");
+      }
+      dbg.enabled = 1;
+      if (nbreak_srcs >= (sizeof(break_srcs) / sizeof(break_srcs[0]))) {
+        return zem_failf("too many source breakpoints");
+      }
+      break_srcs[nbreak_srcs++] = argv[++i];
+      continue;
+    }
     if (strcmp(argv[i], "-") == 0) {
       if (ninputs >= (int)(sizeof(inputs) / sizeof(inputs[0]))) {
         return zem_failf("too many input files");
@@ -1044,11 +1058,25 @@ int main(int argc, char **argv) {
     return rc;
   }
 
+  zem_srcmap_t srcmap;
+  if (!zem_build_srcmap(&recs, &srcmap)) {
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    if (!dbg.debug_events_only) {
+      telemetry("zem", 3, "failed", 6);
+    }
+    return zem_failf("OOM building srcmap");
+  }
+
   for (size_t bi = 0; bi < nbreak_labels; bi++) {
     size_t target_pc = 0;
     if (!zem_jump_to_label(&labels, break_labels[bi], &target_pc)) {
       (void)zem_failf("unknown break label %s", break_labels[bi]);
       zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
       zem_buf_free(&mem);
       zem_symtab_free(&syms);
       recvec_free(&recs);
@@ -1060,6 +1088,7 @@ int main(int argc, char **argv) {
     if (!zem_dbg_cfg_add_break_pc(&dbg, (uint32_t)target_pc)) {
       (void)zem_failf("too many breakpoints");
       zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
       zem_buf_free(&mem);
       zem_symtab_free(&syms);
       recvec_free(&recs);
@@ -1070,9 +1099,77 @@ int main(int argc, char **argv) {
     }
   }
 
+  for (size_t bi = 0; bi < nbreak_srcs; bi++) {
+    const char *spec = break_srcs[bi];
+    const char *colon = spec ? strrchr(spec, ':') : NULL;
+    if (!spec || !colon || colon == spec || *(colon + 1) == 0) {
+      (void)zem_failf("bad --break value (expected FILE:LINE): %s",
+                      spec ? spec : "(null)");
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return 2;
+    }
+
+    char file_buf[512];
+    size_t file_len = (size_t)(colon - spec);
+    if (file_len == 0 || file_len >= sizeof(file_buf)) {
+      (void)zem_failf("bad --break file: %s", spec);
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return 2;
+    }
+    memcpy(file_buf, spec, file_len);
+    file_buf[file_len] = 0;
+
+    char *end = NULL;
+    long line = strtol(colon + 1, &end, 10);
+    if (!end || end == (colon + 1) || line <= 0) {
+      (void)zem_failf("bad --break line: %s", spec);
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return 2;
+    }
+
+    size_t target_pc = 0;
+    if (!zem_srcmap_find_pc(&recs, &srcmap, file_buf, (int32_t)line,
+                            &target_pc)) {
+      (void)zem_failf("unknown break location %s", spec);
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return 2;
+    }
+
+    if (!zem_dbg_cfg_add_break_pc(&dbg, (uint32_t)target_pc)) {
+      (void)zem_failf("too many breakpoints");
+      zem_symtab_free(&labels);
+      zem_srcmap_free(&srcmap);
+      zem_buf_free(&mem);
+      zem_symtab_free(&syms);
+      recvec_free(&recs);
+      if (!dbg.debug_events_only) telemetry("zem", 3, "failed", 6);
+      return 2;
+    }
+  }
+
   if (!shake) {
-    rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs, &proc,
-                          stdin_source_name);
+    rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs, &srcmap,
+                          &proc, stdin_source_name);
   } else {
     // Shake harness: run repeatedly with deterministic perturbations.
     rc = 0;
@@ -1114,7 +1211,7 @@ int main(int argc, char **argv) {
       run_dbg.shake_heap_pad = pad;
 
       int run_rc = zem_exec_program(&recs, &run_mem, &syms, &labels, &run_dbg,
-                                   pc_srcs, &proc, stdin_source_name);
+                   pc_srcs, &srcmap, &proc, stdin_source_name);
       zem_buf_free(&run_mem);
       if (run_rc != 0) {
         fprintf(stderr,
@@ -1224,6 +1321,7 @@ int main(int argc, char **argv) {
     fclose(trace_jsonl_fp);
   }
 
+  zem_srcmap_free(&srcmap);
   zem_symtab_free(&labels);
   zem_buf_free(&mem);
   zem_symtab_free(&syms);

@@ -37,6 +37,12 @@ int zem_exec_fail_at(size_t pc, const record_t *r,
   if (r && r->line >= 0) {
     fprintf(stderr, "line=%d\n", r->line);
   }
+  if (r && r->id >= 0) {
+    fprintf(stderr, "ir_id=%ld\n", r->id);
+  }
+  if (r && r->src_ref >= 0) {
+    fprintf(stderr, "src_ref=%ld\n", r->src_ref);
+  }
   if (regs) {
     zem_dbg_print_regs(stderr, regs);
   }

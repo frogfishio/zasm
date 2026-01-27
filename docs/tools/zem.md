@@ -148,6 +148,7 @@ bin/zem --coverage --coverage-merge /tmp/zem.coverage.jsonl \
 Notes:
 
 - Coverage is per IR record index (`pc`). Only instruction records (`kind == instr`) are reported.
+- If the IR provides stable record ids (`id` in v1.1), coverage records also include `ir_id` for cross-tool correlation.
 - The JSONL report also includes per-label aggregates (`k == "zem_cov_label"`) to support black-hole analysis.
 - When `--debug-events-only` is used, `--coverage` requires `--coverage-out` (to keep stderr clean JSONL).
 - When `--debug-events-only` is used, `--coverage-blackholes` is rejected (since it prints a human summary to stderr).
@@ -157,6 +158,7 @@ Notes:
 - `--debug` starts the interactive CLI debugger (starts paused).
 - `--break-pc N` breaks when `pc == N` (where `pc` is the IR record index).
 - `--break-label L` breaks at label `L`.
+- `--break FILE:LINE` breaks at the first instruction mapped to `FILE:LINE` via v1.1 `src`/`src_ref`.
 - `--debug-script PATH` runs debugger commands from PATH (no prompt; exit on EOF). Use `-` for stdin.
 
 If you want to run a piped program _and_ drive the debugger with a script, put the script in a file:
@@ -176,6 +178,7 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 When `zem` fails (e.g. out-of-bounds memory access), it prints a human-oriented trap report to stderr including:
 
 - the failing IR record (`pc`, label/line if present)
+- stable record identity (`ir_id` / `src_ref`) when present in the IR
 - register dump + backtrace
 - a short “recent instruction” history
 - for instructions that dereference memory, the base register value and its provenance (where that register was last written)
@@ -252,6 +255,7 @@ Stop events have `k == "dbg_stop"` and include:
 - `frame`: stable frame object
   - `pc`: IR record index (0-based)
   - `id`: frame id (0 is the current frame)
+  - `ir_id`: stable IR record id from v1.1 `id` (or `null`)
   - `label`: label at `pc` (or `null`)
   - `line`: source line (or `null` if unavailable)
   - `col`: source column (currently always `1`)
@@ -260,6 +264,14 @@ Stop events have `k == "dbg_stop"` and include:
   - `source`: source identity object
     - `name`: display name (filename or `"<stdin>"`)
     - `path`: path if known (null for stdin)
+  - `src_ref`: v1.1 source mapping (or `null`)
+    - `ref`: numeric `src_ref` from the current record
+    - `src`: resolved source record (or `null` if not found)
+      - `id`: source record id
+      - `file`: source file path (or `null`)
+      - `line`: source line (or `null`)
+      - `col`: source column (or `null`)
+      - `text`: source line text (or `null`)
 - `sp`: call stack depth
 - `bp`: matched breakpoint metadata (or `null`)
   - `pc`: breakpoint pc
@@ -270,12 +282,14 @@ Stop events have `k == "dbg_stop"` and include:
 - `frames`: call stack frames, for DAP/tooling
   - `id`: frame id (stable within a stop event)
   - `pc`: frame pc (current frame first)
+  - `ir_id`: stable IR record id from v1.1 `id` (or `null`)
   - `name`: nearest label at-or-before `pc` (or `null`)
   - `label`: label exactly at `pc` (or `null`)
   - `line`: source line (or `null`)
   - `col`: source column (currently always `1`)
   - `m`: mnemonic at `pc` if `pc` points to an instruction (or `null`)
   - `source`: `{name,path}` as above
+  - `src_ref`: same structure as `frame.src_ref`
 - `regs`: register snapshot (`HL`, `DE`, `BC`, `IX`, `A`)
 - `regprov`: register provenance map (register -> provenance object or `null`)
 - `watches`: watch values (empty unless watches are configured)
@@ -293,13 +307,13 @@ Example (pretty-printed; actual output is one line):
   "k": "dbg_stop",
   "v": 1,
   "reason": "paused",
-  "frame": {"pc": 0, "id": 0, "label": null, "line": null, "col": 1, "kind": "dir", "d": "EXTERN"},
+  "frame": {"pc": 0, "id": 0, "ir_id": null, "label": null, "line": null, "col": 1, "kind": "dir", "d": "EXTERN"},
   "pc": 0,
   "label": null,
   "sp": 0,
   "bp": null,
   "bps": [0],
-  "frames": [{"id": 0, "pc": 0, "name": null, "label": null, "line": null, "col": 1, "m": null}],
+  "frames": [{"id": 0, "pc": 0, "ir_id": null, "name": null, "label": null, "line": null, "col": 1, "m": null}],
   "regs": {"HL": 0, "DE": 0, "BC": 0, "IX": 0, "A": 0},
   "regprov": {"HL": null, "DE": null, "BC": null, "IX": null, "A": null},
   "watches": []

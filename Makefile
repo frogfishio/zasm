@@ -254,6 +254,10 @@ test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
 test-validation: test-zem-shake-smoke
 test-validation: test-zem-shake-redzone test-zem-shake-quarantine test-zem-shake-io-chunking
+test-validation: test-zem-ir-v11-parser-robust
+test-validation: test-zem-break-src-file-line
+test-validation: test-zem-ir-id-debug-events
+test-validation: test-zem-ir-id-coverage
 
 # Experimental / local-only debloat playground (large fixture).
 # Not included in test-all/test-validation.
@@ -327,6 +331,18 @@ test-zem-rep-scan: zem
 
 test-zem-rep-render-from-report:
 	sh test/zem_rep_render_from_report.sh
+
+test-zem-ir-v11-parser-robust: zem
+	sh test/zem_ir_v11_parser_robust.sh
+
+test-zem-break-src-file-line: zem
+	sh test/zem_break_src_file_line.sh
+
+test-zem-ir-id-debug-events: zem
+	sh test/zem_ir_id_debug_events.sh
+
+test-zem-ir-id-coverage: zem
+	sh test/zem_ir_id_coverage.sh
 
 test-zem-caps: zem
 	sh test/zem_caps.sh
@@ -696,6 +712,7 @@ ZEM_HOST_LIBCAP_EXEC := $(ZEM_HOST_BUILD)/libzingcap_exec.a
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
 	$(ZEM_BUILD)/zem_debug.o \
+	$(ZEM_BUILD)/zem_srcmap.o \
 	$(ZEM_BUILD)/exec/zem_exec_program.o \
 	$(ZEM_BUILD)/exec/zem_exec_helpers_base.o \
 	$(ZEM_BUILD)/exec/zem_exec_helpers_diag.o \

@@ -8,7 +8,12 @@ typedef enum {
   JREC_NONE = 0,
   JREC_INSTR,
   JREC_DIR,
-  JREC_LABEL
+  JREC_LABEL,
+  // v1.1 additive record kinds (tooling/debugging). These must not change
+  // execution semantics; consumers typically ignore them.
+  JREC_META,
+  JREC_SRC,
+  JREC_DIAG
 } rec_kind_t;
 
 typedef enum {
@@ -34,6 +39,10 @@ typedef struct {
   rec_kind_t k;
   int line;          // optional: from loc.line if present, else -1
 
+  // v1.1 meta/src/diag (optional; most consumers ignore)
+  long id;            // optional record id (if present), else -1
+  long src_ref;       // optional source record reference (if present), else -1
+
   // instr
   char* m;           // mnemonic
   operand_t* ops;
@@ -48,6 +57,24 @@ typedef struct {
 
   // label
   char* label;
+
+  // meta
+  char* producer;
+  char* unit;
+  char* ts;
+
+  // src
+  long src_id;        // required for k==src (schema); else -1
+  long src_line;      // required for k==src (schema); else -1
+  long src_col;       // optional; else -1
+  char* src_file;     // optional
+  char* src_text;     // optional
+
+  // diag
+  char* level;        // info|warn|error
+  char* msg;
+  char* code;
+  char* help;
 } record_t;
 
 typedef struct {
