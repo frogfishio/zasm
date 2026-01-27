@@ -372,11 +372,6 @@ int zduel_main(int argc, char **argv) {
       return 0;
     }
 
-    #if defined(ZASM_STANDALONE_ZDUEL)
-    int main(int argc, char **argv) {
-      return zduel_main(argc, argv);
-    }
-    #endif
     if (strcmp(arg, "-v") == 0) {
       o.verbose = 1;
       continue;

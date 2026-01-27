@@ -319,8 +319,3 @@ int ztriage_main(int argc, char **argv) {
   return 0;
 }
 
-#if defined(ZASM_STANDALONE_ZTRIAGE)
-int main(int argc, char **argv) {
-  return ztriage_main(argc, argv);
-}
-#endif

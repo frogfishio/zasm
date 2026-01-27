@@ -331,8 +331,4 @@ int zirdiff_main(int argc, char **argv) {
   return 0;
 }
 
-#if defined(ZASM_STANDALONE_ZIRDIFF)
-int main(int argc, char **argv) {
-  return zirdiff_main(argc, argv);
-}
-#endif
+

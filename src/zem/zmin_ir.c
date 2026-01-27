@@ -361,9 +361,3 @@ int zmin_ir_main(int argc, char **argv) {
   free_lines(lines, nlines);
   return 0;
 }
-
-#if defined(ZASM_STANDALONE_ZMIN_IR)
-int main(int argc, char **argv) {
-  return zmin_ir_main(argc, argv);
-}
-#endif
