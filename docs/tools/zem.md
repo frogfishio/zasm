@@ -89,11 +89,18 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 
 ## Common flags
 
-## IR corpus modes
+## Tools
 
-These are not separate tools.
+These are not separate binaries. They are built into `zem`.
 
-`zem` also includes a few IR corpus-oriented modes, invoked as flags:
+These flags select a different top-level action than “run the emulator”. In these modes, `zem` is operating on IR files and/or running external commands, not executing an IR program.
+
+Which one should you use?
+
+- Use `--irdiff` when you have two IR files and you want to know whether they match (and why not).
+- Use `--min-ir` when you have one “bad” IR file and you want the smallest IR that still triggers a failure in some command.
+- Use `--triage` when you have many IR files and you want to run a command over all of them and group failures by signature.
+- Use `--duel` when you want to compare two commands (A vs B) across inputs and find cases where they diverge (optionally minimizing a divergent case).
 
 - `zem --irdiff ...` — compare two IR JSONL files
 - `zem --min-ir ...` — delta-minimize an IR JSONL file against a predicate
@@ -107,6 +114,102 @@ bin/zem --irdiff a.ir.jsonl b.ir.jsonl
 bin/zem --min-ir input.ir.jsonl -- bin/zir --canon {}
 bin/zem --triage --summary corpus/*.jsonl -- bin/zld {}
 bin/zem --duel --corpus corpus --a bin/zir --canon --b bin/zir --canon --assign-ids
+```
+
+### `--irdiff`
+
+Compares two IR JSONL files for semantic-ish equality (record-by-record after filtering).
+
+- Inputs: exactly two `.jsonl` files.
+- Output: no output on success; prints a short mismatch report on stderr when different.
+- Exit codes: `0` equal, `1` different, `2` error.
+
+Useful options:
+
+- `--include-ids` include v1.1 stable record ids in comparison.
+- `--include-src` include v1.1 `src_ref` in comparison.
+- `--include-loc` include `loc.line` in comparison.
+
+Example:
+
+```sh
+bin/zem --irdiff --include-ids a.ir.jsonl b.ir.jsonl
+```
+
+### `--min-ir`
+
+Delta-minimizes a single IR JSONL file against a predicate command.
+
+You provide:
+
+- an input IR JSONL file, and
+- a predicate command (after `--`) that is run repeatedly.
+
+Command templating:
+
+- If any predicate arg is exactly `{}`, it is replaced with the candidate path.
+- Otherwise the candidate path is appended as the last arg.
+
+Predicate selection:
+
+- `--want-exit N` predicate is satisfied iff the command exits with code `N`.
+- `--want-nonzero` predicate is satisfied iff the command exits nonzero (default).
+
+Example (minimize while still failing `zir --canon`):
+
+```sh
+bin/zem --min-ir --want-nonzero -o /tmp/min.jsonl input.ir.jsonl -- bin/zir --canon {}
+```
+
+### `--triage`
+
+Runs an external command across many input IR files and groups failures by a stderr signature.
+
+- Inputs: one or more `.jsonl` files, followed by `-- <cmd> ...`.
+- Output:
+  - A per-input JSONL stream (to stdout, or `--jsonl PATH`).
+  - Optional human summary to stderr (`--summary`).
+
+The output JSONL records include (at minimum):
+
+- `k: "triage"`
+- `path`: input path
+- `exit`: command exit code
+- `fail`: boolean
+- `sig`: captured stderr prefix (see `--max-stderr`)
+
+Example:
+
+```sh
+bin/zem --triage --want-nonzero --summary --jsonl /tmp/triage.jsonl corpus/*.jsonl -- bin/zld {}
+```
+
+### `--duel`
+
+Runs two external commands (A and B) over inputs and checks whether they diverge.
+
+Two input styles are supported:
+
+- Explicit inputs:
+  `bin/zem --duel --a <cmd...> --b <cmd...> -- <inputs...>`
+- Corpus directory:
+  `bin/zem --duel --corpus <dir> --a <cmd...> --b <cmd...>` (runs over `*.jsonl`)
+
+Comparison modes:
+
+- `--compare exit|stdout|stderr|both` (default: `both`)
+
+Common workflows:
+
+- `--check` is for a single input: exit `1` iff divergent.
+- `--out DIR` writes per-case artifacts (captured stdout/stderr/metadata).
+- `--minimize` minimizes a divergent case by invoking `zem --min-ir`.
+  - `--zem PATH` can override which `zem` executable is used for that re-run.
+
+Example (A/B compare `zir --canon`):
+
+```sh
+bin/zem --duel --corpus corpus --compare stdout --a bin/zir --canon --b bin/zir --canon --assign-ids
 ```
 
 ### Tracing
