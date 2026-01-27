@@ -318,6 +318,8 @@ This is intended to make “trap, identify, explain” workflows fast when debug
 - `--sniff` enables heuristic warnings for high-signal bug signatures (currently: return-slot pointer truncation patterns).
 - `--sniff-fatal` like `--sniff`, but turns a warning into a failing trap.
 
+In addition, `--sniff` warns when common ABI v2 (`zi_*`) call arguments look invalid at the boundary (e.g. a sign-extended i32 used where the ABI expects a u32 pointer/length, or obvious out-of-bounds spans). This is meant to surface “will crash later” issues early, with provenance.
+
 The warning includes the detected pattern PCs, the suspect register’s current value, and its provenance.
 
 ### Shake mode (deterministic perturbations)

@@ -2,6 +2,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include <stdint.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "zem_exec_internal.h"
@@ -37,6 +39,20 @@ int zem_exec_call_misc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
         !zabi_u32_from_u64(regs->DE, &topic_len) ||
         !zabi_u32_from_u64(regs->BC, &msg_ptr) ||
         !zabi_u32_from_u64(regs->IX, &msg_len)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, callee, cur_label,
+                                     "topic/msg args not representable as u32")) {
+        return 1;
+      }
+      if (ctx->dbg_cfg && ctx->dbg_cfg->sniff) {
+        fprintf(stderr,
+                "  HL(topic_ptr)=0x%016" PRIx64 " DE(topic_len)=0x%016" PRIx64
+                " BC(msg_ptr)=0x%016" PRIx64 " IX(msg_len)=0x%016" PRIx64 "\n",
+                regs->HL, regs->DE, regs->BC, regs->IX);
+        zem_diag_print_regprov(stderr, regprov, "HL");
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+        zem_diag_print_regprov(stderr, regprov, "IX");
+      }
       regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);
@@ -45,6 +61,20 @@ int zem_exec_call_misc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     }
     if (!mem_check_span(mem, topic_ptr, topic_len) ||
         !mem_check_span(mem, msg_ptr, msg_len)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, callee, cur_label,
+                                     "topic/msg span out of bounds")) {
+        return 1;
+      }
+      if (ctx->dbg_cfg && ctx->dbg_cfg->sniff) {
+        fprintf(stderr,
+                "  topic_ptr=%" PRIu32 " topic_len=%" PRIu32 " msg_ptr=%" PRIu32
+                " msg_len=%" PRIu32 " mem_len=%zu\n",
+                topic_ptr, topic_len, msg_ptr, msg_len, mem ? mem->len : 0);
+        zem_diag_print_regprov(stderr, regprov, "HL");
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+        zem_diag_print_regprov(stderr, regprov, "IX");
+      }
       regs->HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);
@@ -165,9 +195,21 @@ int zem_exec_call_misc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     if (r->nops >= 2) {
       (void)op_to_u64(syms, regs, &r->ops[1], &key_obj64);
     }
+    uint32_t key_obj = 0;
+    if (!zabi_u32_from_u64(key_obj64, &key_obj)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, callee, cur_label,
+                                     "key_obj not representable as u32")) {
+        return 1;
+      }
+      regs->HL = 0;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
     uint32_t key_ptr = 0, key_len = 0;
     uint64_t key = 0;
-    if (bytes_view(mem, (uint32_t)key_obj64, &key_ptr, &key_len) &&
+    if (bytes_view(mem, key_obj, &key_ptr, &key_len) &&
         mem_check_span(mem, key_ptr, key_len)) {
       key = hash64_fnv1a(mem->bytes + key_ptr, (size_t)key_len);
     }
@@ -196,9 +238,21 @@ int zem_exec_call_misc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       (void)op_to_u64(syms, regs, &r->ops[1], &key_obj64);
       (void)op_to_u64(syms, regs, &r->ops[2], &value);
     }
+    uint32_t key_obj = 0;
+    if (!zabi_u32_from_u64(key_obj64, &key_obj)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, callee, cur_label,
+                                     "key_obj not representable as u32")) {
+        return 1;
+      }
+      regs->HL = 0;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
     uint32_t key_ptr = 0, key_len = 0;
     uint64_t key = 0;
-    if (bytes_view(mem, (uint32_t)key_obj64, &key_ptr, &key_len) &&
+    if (bytes_view(mem, key_obj, &key_ptr, &key_len) &&
         mem_check_span(mem, key_ptr, key_len)) {
       key = hash64_fnv1a(mem->bytes + key_ptr, (size_t)key_len);
     }

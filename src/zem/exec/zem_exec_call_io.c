@@ -124,6 +124,20 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     if (!zabi_u32_from_u64(regs->HL, &handle_u) ||
         !zabi_u32_from_u64(regs->DE, &ptr) ||
         !zabi_u32_from_u64(regs->BC, &len)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, "zi_write",
+                                 cur_label,
+                                 "handle/ptr/len not representable as u32")) {
+        return 1;
+      }
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr,
+                "  HL(handle)=0x%016" PRIx64 " DE(ptr)=0x%016" PRIx64
+                " BC(len)=0x%016" PRIx64 "\n",
+                regs->HL, regs->DE, regs->BC);
+        zem_diag_print_regprov(stderr, regprov, "HL");
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = (uint64_t)(uint32_t)(strcmp(callee, "zi_write") == 0 ? ZI_E_INVALID
                                                                       : 0xffffffffu);
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -133,6 +147,16 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     }
     int32_t handle = (int32_t)handle_u;
     if (!mem_check_span(mem, ptr, len)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, "zi_write", cur_label,
+                                 "ptr/len out of bounds")) {
+        return 1;
+      }
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  ptr=%" PRIu32 " len=%" PRIu32 " mem_len=%zu\n", ptr, len,
+                mem ? mem->len : 0);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = (uint64_t)(uint32_t)(strcmp(callee, "zi_write") == 0 ? ZI_E_BOUNDS
                                                                       : 0xffffffffu);
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -156,6 +180,20 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     if (!zabi_u32_from_u64(regs->HL, &handle_u) ||
         !zabi_u32_from_u64(regs->DE, &ptr) ||
         !zabi_u32_from_u64(regs->BC, &cap)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, "zi_read",
+                                 cur_label,
+                                 "handle/ptr/cap not representable as u32")) {
+        return 1;
+      }
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr,
+                "  HL(handle)=0x%016" PRIx64 " DE(ptr)=0x%016" PRIx64
+                " BC(cap)=0x%016" PRIx64 "\n",
+                regs->HL, regs->DE, regs->BC);
+        zem_diag_print_regprov(stderr, regprov, "HL");
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = (uint64_t)(uint32_t)(strcmp(callee, "zi_read") == 0 ? ZI_E_INVALID
                                                                      : 0xffffffffu);
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -165,6 +203,16 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     }
     int32_t handle = (int32_t)handle_u;
     if (!mem_check_span(mem, ptr, cap)) {
+      if (zem_sniff_abi_fail_or_warn(ctx, r, pc, "zi_read", cur_label,
+                                 "ptr/cap out of bounds")) {
+        return 1;
+      }
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  ptr=%" PRIu32 " cap=%" PRIu32 " mem_len=%zu\n", ptr, cap,
+                mem ? mem->len : 0);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = (uint64_t)(uint32_t)(strcmp(callee, "zi_read") == 0 ? ZI_E_BOUNDS
                                                                      : 0xffffffffu);
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,

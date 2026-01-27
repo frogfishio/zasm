@@ -256,6 +256,11 @@ test-validation: test-zem-inherit-env
 test-validation: test-zem-caps
 test-validation: test-zem-sniff-ret-trunc
 test-validation: test-zem-sniff-hop-bad-args
+test-validation: test-zem-sniff-zi-read-bad-args
+test-validation: test-zem-sniff-zi-telemetry-bad-args
+test-validation: test-zem-sniff-zi-argv-copy-bad-args
+test-validation: test-zem-sniff-zi-alloc-bad-args
+test-validation: test-zem-sniff-zi-str-concat-bad-args
 test-validation: test-zem-diag-ret-trunc-ld32s64
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
@@ -347,6 +352,21 @@ test-zem-sniff-ret-trunc: zas zem
 
 test-zem-sniff-hop-bad-args: zas zem
 	sh test/zem_sniff_hop_bad_args.sh
+
+test-zem-sniff-zi-read-bad-args: zas zem
+	sh test/zem_sniff_zi_read_bad_args.sh
+
+test-zem-sniff-zi-telemetry-bad-args: zas zem
+	sh test/zem_sniff_zi_telemetry_bad_args.sh
+
+test-zem-sniff-zi-argv-copy-bad-args: zas zem
+	sh test/zem_sniff_zi_argv_copy_bad_args.sh
+
+test-zem-sniff-zi-alloc-bad-args: zas zem
+	sh test/zem_sniff_zi_alloc_bad_args.sh
+
+test-zem-sniff-zi-str-concat-bad-args: zas zem
+	sh test/zem_sniff_zi_str_concat_bad_args.sh
 
 test-zem-diag-ret-trunc-ld32s64: zas zem
 	sh test/zem_diag_ret_trunc_ld32s64.sh

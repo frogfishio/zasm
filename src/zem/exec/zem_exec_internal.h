@@ -118,6 +118,13 @@ int jump_to_label(const zem_symtab_t *labels, const char *label, size_t *pc);
 int mem_check_span(const zem_buf_t *mem, uint32_t addr, uint32_t len);
 int zabi_u32_from_u64(uint64_t v, uint32_t *out);
 
+// ABI sniffer helper (used by zi_* syscall handlers).
+// Returns 1 if --sniff-fatal turns this into a failing trap (and sets *ctx->rc).
+// Returns 0 otherwise (warning printed when --sniff is enabled).
+int zem_sniff_abi_fail_or_warn(zem_exec_ctx_t *ctx, const record_t *r, size_t pc,
+                               const char *callee, const char *cur_label,
+                               const char *msg);
+
 uint64_t hash64_fnv1a(const void *data, size_t len);
 
 uint32_t rotl32(uint32_t x, uint32_t r);

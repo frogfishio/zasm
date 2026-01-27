@@ -87,6 +87,24 @@ int zabi_u32_from_u64(uint64_t v, uint32_t *out) {
   return 0;
 }
 
+int zem_sniff_abi_fail_or_warn(zem_exec_ctx_t *ctx, const record_t *r, size_t pc,
+                               const char *callee, const char *cur_label,
+                               const char *msg) {
+  if (!ctx || !ctx->dbg_cfg || !ctx->dbg_cfg->sniff) return 0;
+  fprintf(stderr, "zem: sniff: ABI: %s: %s (pc=%zu", callee ? callee : "<null>",
+          msg ? msg : "suspicious", pc);
+  if (cur_label) fprintf(stderr, " label=%s", cur_label);
+  fprintf(stderr, ")\n");
+
+  if (ctx->dbg_cfg->sniff_fatal) {
+    *ctx->rc = zem_exec_fail_at(pc, r, ctx->pc_labels, ctx->stack,
+                               (ctx->sp ? *ctx->sp : 0), ctx->regs, ctx->mem,
+                               "sniff: ABI violation: %s: %s", callee, msg);
+    return 1;
+  }
+  return 0;
+}
+
 uint64_t hash64_fnv1a(const void *data, size_t len) {
   const uint8_t *p = (const uint8_t *)data;
   uint64_t h = 1469598103934665603ull;
