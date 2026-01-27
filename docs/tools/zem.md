@@ -89,6 +89,26 @@ compiler | bin/zem --debug-events-only --source-name program.jsonl --debug-scrip
 
 ## Common flags
 
+## Built-in workbench modes
+
+These are not separate tools.
+
+`zem` also includes a few “workbench” subcommands for IR corpora workflows:
+
+- `zem zirdiff ...` — compare two IR JSONL files
+- `zem zmin-ir ...` — delta-minimize an IR JSONL file against a predicate
+- `zem ztriage ...` — run a command across many inputs and group failures
+- `zem zduel ...` — differential runner (A/B) with optional minimization
+
+Examples:
+
+```sh
+bin/zem zirdiff a.ir.jsonl b.ir.jsonl
+bin/zem zmin-ir input.ir.jsonl -- bin/zir --canon {}
+bin/zem ztriage --summary corpus/*.jsonl -- bin/zld {}
+bin/zem zduel --corpus corpus --a bin/zir --canon --b bin/zir --canon --assign-ids
+```
+
 ### Tracing
 
 - `--trace` emits per-instruction JSONL events to stderr.

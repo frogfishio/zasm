@@ -33,6 +33,12 @@
 #include "zem_trace.h"
 #include "zem_util.h"
 
+// Multicall / extra tooling entrypoints.
+int zirdiff_main(int argc, char **argv);
+int zmin_ir_main(int argc, char **argv);
+int ztriage_main(int argc, char **argv);
+int zduel_main(int argc, char **argv);
+
 // Optional: query the host-side capability registry (if linked).
 #include "zingcore/include/zi_caps.h"
 #include "zingcore/include/zi_async.h"
@@ -126,6 +132,12 @@ static void print_help(FILE *out) {
       "  --rep-diag         Print one-line bloat_diag summary to stdout\n",
   "  --params          Stop option parsing; remaining args become guest argv\n",
   "  --                Alias for --params\n",
+      "\n",
+      "Extra tools (built into zem):\n",
+      "  zem zirdiff ...   (or invoke as 'zirdiff' via symlink)\n",
+      "  zem zmin-ir ...   (or invoke as 'zmin-ir' via symlink)\n",
+      "  zem ztriage ...   (or invoke as 'ztriage' via symlink)\n",
+      "  zem zduel ...     (or invoke as 'zduel' via symlink)\n",
       "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
       "  --clear-env        Clear the env snapshot (default: empty)\n",
       "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n",
@@ -219,6 +231,33 @@ static void print_help(FILE *out) {
   }
 }
 
+static const char *prog_basename(const char *path) {
+  if (!path) return "";
+  const char *slash = strrchr(path, '/');
+  return slash ? (slash + 1) : path;
+}
+
+// Returns >=0 if dispatched; -1 if caller should continue with normal zem mode.
+static int maybe_dispatch_extra_tool(int argc, char **argv) {
+  if (argc <= 0 || !argv || !argv[0]) return -1;
+
+  const char *prog = prog_basename(argv[0]);
+  if (strcmp(prog, "zirdiff") == 0) return zirdiff_main(argc, argv);
+  if (strcmp(prog, "zmin-ir") == 0) return zmin_ir_main(argc, argv);
+  if (strcmp(prog, "ztriage") == 0) return ztriage_main(argc, argv);
+  if (strcmp(prog, "zduel") == 0) return zduel_main(argc, argv);
+
+  // Subcommand mode: zem <tool> ...
+  if (argc >= 2 && argv[1]) {
+    if (strcmp(argv[1], "zirdiff") == 0) return zirdiff_main(argc - 1, argv + 1);
+    if (strcmp(argv[1], "zmin-ir") == 0) return zmin_ir_main(argc - 1, argv + 1);
+    if (strcmp(argv[1], "ztriage") == 0) return ztriage_main(argc - 1, argv + 1);
+    if (strcmp(argv[1], "zduel") == 0) return zduel_main(argc - 1, argv + 1);
+  }
+
+  return -1;
+}
+
 static uint64_t splitmix64_step(uint64_t *state) {
   // Deterministic, fast pseudo-random generator (not cryptographic).
   uint64_t z = (*state += 0x9e3779b97f4a7c15ull);
@@ -302,6 +341,9 @@ static int proc_env_put_kv(zem_proc_t *p, const char *kv) {
 }
 
 int main(int argc, char **argv) {
+  int tool_rc = maybe_dispatch_extra_tool(argc, argv);
+  if (tool_rc >= 0) return tool_rc;
+
   const char *inputs[256];
   int ninputs = 0;
 

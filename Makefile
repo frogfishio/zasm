@@ -142,12 +142,25 @@ install: zas zld zrun zlnt zop zxc zir zem lower
 	@install -m 0755 $(BIN)/zem $(DESTDIR)$(BINDIR)/zem
 	@install -m 0755 $(BIN)/lower $(DESTDIR)$(BINDIR)/lower
 
+$(BUILD)/zirdiff/%.o: src/zirdiff/%.c | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -Isrc/common -c $< -o $@
+
+$(BUILD)/zmin_ir/%.o: src/zmin_ir/%.c | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
+
+$(BUILD)/ztriage/%.o: src/ztriage/%.c | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
+
+$(BUILD)/zduel/%.o: src/zduel/%.c | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
+
+
 install-devtools: zasm-bin-wrap
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(BUILD)/zirdiff $(BUILD)/zmin_ir $(BUILD)/ztriage $(BUILD)/zduel
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -238,6 +251,10 @@ test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden te
 test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-zir-canon-assign-ids
+test-validation: test-zirdiff-smoke
+test-validation: test-zmin-ir-smoke
+test-validation: test-ztriage-smoke
+test-validation: test-zduel-smoke
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
 test-validation: test-zem-emit-cert-smoke
@@ -277,6 +294,22 @@ test-zop-bytes: zop
 
 test-diagnostics-jsonl: zas
 	sh test/diagnostics_jsonl.sh
+
+
+test-zirdiff-smoke: zem
+	sh test/zirdiff_smoke.sh
+
+
+test-zmin-ir-smoke: zem
+	sh test/zmin_ir_smoke.sh
+
+
+test-ztriage-smoke: zem
+	sh test/ztriage_smoke.sh
+
+
+test-zduel-smoke: zem
+	sh test/zduel_smoke.sh
 
 test-zem-stdin-program: zas zem
 	sh test/zem_stdin_program.sh
@@ -750,7 +783,11 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/zem_trace.o \
 	$(ZEM_BUILD)/zem_cert.o \
 	$(ZEM_BUILD)/zem.o \
-	$(ZEM_BUILD)/jsonl.o
+	$(ZEM_BUILD)/jsonl.o \
+	$(BUILD)/zirdiff/main.o \
+	$(BUILD)/zmin_ir/main.o \
+	$(BUILD)/ztriage/main.o \
+	$(BUILD)/zduel/main.o
 
 $(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@
