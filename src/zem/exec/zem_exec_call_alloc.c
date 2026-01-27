@@ -1,13 +1,32 @@
 /* SPDX-FileCopyrightText: 2026 Frogfish */
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
+#include <inttypes.h>
 #include <limits.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "zem_exec_internal.h"
 
 #include "zem_host.h"
+
+static void sniff_abi_hop_warn(const zem_dbg_cfg_t *dbg_cfg,
+                               const zem_regprov_t *regprov,
+                               const char *callee,
+                               size_t pc,
+                               const char *label,
+                               const char *msg) {
+  if (!dbg_cfg || !dbg_cfg->sniff) return;
+  fprintf(stderr, "zem: sniff: ABI: %s: %s (pc=%zu", callee ? callee : "<null>",
+          msg ? msg : "suspicious", pc);
+  if (label) fprintf(stderr, " label=%s", label);
+  fprintf(stderr, ")\n");
+  if (regprov) {
+    // Best-effort provenance context; individual callers print specific regs.
+    (void)regprov;
+  }
+}
 
 int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   if (!ctx || !r) return 0;
@@ -88,6 +107,14 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint32_t align_u = 0;
     if (!zabi_u32_from_u64(regs->DE, &size_u) ||
         !zabi_u32_from_u64(regs->BC, &align_u)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "size/align not representable as u32");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  DE(size)=0x%016" PRIx64 " BC(align)=0x%016" PRIx64 "\n",
+                regs->DE, regs->BC);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -98,6 +125,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
       return 1;
     }
     if (size_u == 0) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "size is 0 (would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -109,6 +138,11 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     }
     if (align_u == 0) align_u = 1u;
     if ((align_u & (align_u - 1u)) != 0u) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "align is not a power of two (would return NULL)");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  align=%" PRIu32 "\n", align_u);
+      }
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -124,6 +158,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint64_t start64 = (cur64 + (a64 - 1u)) & ~(a64 - 1u);
     uint64_t end64 = start64 + (uint64_t)size_u;
     if (end64 > SIZE_MAX || start64 > UINT32_MAX) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "allocation range overflows (would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -136,6 +172,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     size_t end = (size_t)end64;
     size_t new_top_aligned = (end + 3u) & ~3u;
     if (!mem_grow_zero(mem, new_top_aligned)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "OOM (mem_grow_zero failed; would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -167,6 +205,12 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t cap_u = 0;
     if (!zabi_u32_from_u64(regs->DE, &cap_u)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "cap not representable as u32");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  DE(cap)=0x%016" PRIx64 "\n", regs->DE);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+      }
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -180,6 +224,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     const uint32_t hdr = 16u;
     uint64_t total64 = (uint64_t)hdr + (uint64_t)cap_u;
     if (total64 > UINT32_MAX) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "cap too large (would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -194,6 +240,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint64_t start64 = (cur64 + 7u) & ~7ull;
     uint64_t end64 = start64 + total64;
     if (end64 > SIZE_MAX || start64 > UINT32_MAX) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "allocation range overflows (would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -206,6 +254,8 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     size_t end = (size_t)end64;
     size_t new_top_aligned = (end + 3u) & ~3u;
     if (!mem_grow_zero(mem, new_top_aligned)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "OOM (mem_grow_zero failed; would return NULL)");
       regs->HL = 0;
       regs->DE = 0;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
@@ -257,6 +307,14 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint32_t mark = 0;
     uint32_t wipe = 0;
     if (!zabi_u32_from_u64(regs->DE, &mark) || !zabi_u32_from_u64(regs->BC, &wipe)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "mark/wipe not representable as u32");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  DE(mark)=0x%016" PRIx64 " BC(wipe)=0x%016" PRIx64 "\n",
+                regs->DE, regs->BC);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+        zem_diag_print_regprov(stderr, regprov, "BC");
+      }
       regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);
@@ -265,6 +323,10 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     }
     uint32_t used = heap_top - hop_base;
     if (mark > used) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label, "mark > used");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  mark=%" PRIu32 " used=%" PRIu32 "\n", mark, used);
+      }
       regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);
@@ -291,6 +353,12 @@ int zem_exec_call_alloc(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t wipe = 0;
     if (!zabi_u32_from_u64(regs->DE, &wipe)) {
+      sniff_abi_hop_warn(dbg_cfg, regprov, callee, pc, cur_label,
+                         "wipe not representable as u32");
+      if (dbg_cfg && dbg_cfg->sniff) {
+        fprintf(stderr, "  DE(wipe)=0x%016" PRIx64 "\n", regs->DE);
+        zem_diag_print_regprov(stderr, regprov, "DE");
+      }
       regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
       zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                        r->m);

@@ -255,6 +255,7 @@ test-validation: test-zem-zi-proc-env
 test-validation: test-zem-inherit-env
 test-validation: test-zem-caps
 test-validation: test-zem-sniff-ret-trunc
+test-validation: test-zem-sniff-hop-bad-args
 test-validation: test-zem-diag-ret-trunc-ld32s64
 test-validation: test-zem-coverage-smoke
 test-validation: test-zem-coverage-blackholes
@@ -343,6 +344,9 @@ test-zem-inherit-env: zas zem
 
 test-zem-sniff-ret-trunc: zas zem
 	sh test/zem_sniff_ret_trunc.sh
+
+test-zem-sniff-hop-bad-args: zas zem
+	sh test/zem_sniff_hop_bad_args.sh
 
 test-zem-diag-ret-trunc-ld32s64: zas zem
 	sh test/zem_diag_ret_trunc_ld32s64.sh
