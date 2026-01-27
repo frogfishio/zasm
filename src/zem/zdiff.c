@@ -8,32 +8,15 @@
 
 #include "jsonl.h"
 
-static void usage(FILE *out) {
-  fprintf(out,
-          "zirdiff — semantic-ish diff for ZASM IR JSONL\n"
-          "\n"
-          "Usage:\n"
-          "  zirdiff [options] <a.jsonl> <b.jsonl>\n"
-          "\n"
-          "Options:\n"
-          "  --help           Show this help and exit\n"
-          "  --include-ids    Include v1.1 record id (default: ignore)\n"
-          "  --include-src    Include v1.1 src_ref (default: ignore)\n"
-          "  --include-loc    Include loc.line (default: ignore)\n"
-          "\n"
-          "Exit codes:\n"
-          "  0  equal\n"
-          "  1  different\n"
-          "  2  error\n");
-}
+#include "zem_workbench_usage.h"
 
 static void die(const char *msg) {
-  fprintf(stderr, "zirdiff: error: %s\n", msg);
+  fprintf(stderr, "irdiff: error: %s\n", msg);
   exit(2);
 }
 
 static void die2(const char *msg, const char *arg) {
-  fprintf(stderr, "zirdiff: error: %s: %s\n", msg, arg);
+  fprintf(stderr, "irdiff: error: %s: %s\n", msg, arg);
   exit(2);
 }
 
@@ -245,7 +228,7 @@ int zirdiff_main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
-      usage(stdout);
+      zem_workbench_usage_zirdiff(stdout);
       return 0;
     }
     if (strcmp(arg, "--include-ids") == 0) {
@@ -269,7 +252,7 @@ int zirdiff_main(int argc, char **argv) {
   }
 
   if (!a_path || !b_path) {
-    usage(stderr);
+    zem_workbench_usage_zirdiff(stderr);
     return 2;
   }
 
@@ -279,13 +262,13 @@ int zirdiff_main(int argc, char **argv) {
 
   char err[256];
   if (read_records(a_path, &a, err, sizeof(err)) != 0) {
-    fprintf(stderr, "zirdiff: error: %s (%s)\n", err, a_path);
+    fprintf(stderr, "irdiff: error: %s (%s)\n", err, a_path);
     recvec_free(&a);
     recvec_free(&b);
     return 2;
   }
   if (read_records(b_path, &b, err, sizeof(err)) != 0) {
-    fprintf(stderr, "zirdiff: error: %s (%s)\n", err, b_path);
+    fprintf(stderr, "irdiff: error: %s (%s)\n", err, b_path);
     recvec_free(&a);
     recvec_free(&b);
     return 2;
@@ -305,7 +288,7 @@ int zirdiff_main(int argc, char **argv) {
 
     int same = (strcmp(fa, fb) == 0);
     if (!same) {
-      fprintf(stderr, "zirdiff: mismatch at record %zu\n", i);
+      fprintf(stderr, "irdiff: mismatch at record %zu\n", i);
       fprintf(stderr, "  a: %s\n", fa);
       fprintf(stderr, "  b: %s\n", fb);
       free(fa);
@@ -320,7 +303,7 @@ int zirdiff_main(int argc, char **argv) {
   }
 
   if (a.n != b.n) {
-    fprintf(stderr, "zirdiff: different record count: a=%zu b=%zu\n", a.n, b.n);
+    fprintf(stderr, "irdiff: different record count: a=%zu b=%zu\n", a.n, b.n);
     recvec_free(&a);
     recvec_free(&b);
     return 1;

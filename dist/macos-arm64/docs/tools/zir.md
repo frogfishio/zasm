@@ -12,6 +12,12 @@ IR JSONL to opcode JSONL compiler. Reads **zasm-v1.0** JSONL records and emits
 zir < input.ir.jsonl > output.opcodes.jsonl
 zir --tool -o output.opcodes.jsonl input1.ir.jsonl input2.ir.jsonl
 zir --allow-extern-prim < input.ir.jsonl > output.opcodes.jsonl
+
+# Canonicalize IR for stable golden tests
+zir --canon < input.ir.jsonl > canon.ir.jsonl
+
+# Canonicalize and fill missing instruction ids (stable across pc drift)
+zir --canon --assign-ids < input.ir.jsonl > canon_ids.ir.jsonl
 ```
 
 ## Pipeline

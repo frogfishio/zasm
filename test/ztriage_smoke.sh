@@ -3,7 +3,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-"$ROOT/bin/zem" ztriage --help >/dev/null
+"$ROOT/bin/zem" --triage --help >/dev/null
 
 IN1="${TMPDIR:-/tmp}/ztriage_in1_$$.jsonl"
 IN2="${TMPDIR:-/tmp}/ztriage_in2_$$.jsonl"
@@ -19,7 +19,7 @@ cat >"$IN2" <<'EOF'
 EOF
 
 # Command fails with exit 7 and emits a signature only when NOP is present.
-"$ROOT/bin/zem" ztriage --want-exit 7 --summary --jsonl "$OUT" "$IN1" "$IN2" -- sh -c 'if grep -q '"'"'"m":"NOP"'"'"' "$1"; then echo NOP_PRESENT 1>&2; exit 7; else exit 0; fi' sh {}
+"$ROOT/bin/zem" --triage --want-exit 7 --summary --jsonl "$OUT" "$IN1" "$IN2" -- sh -c 'if grep -q '"'"'"m":"NOP"'"'"' "$1"; then echo NOP_PRESENT 1>&2; exit 7; else exit 0; fi' sh {}
 
 # JSONL should include both inputs.
 grep -q '"path"' "$OUT"

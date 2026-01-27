@@ -14,7 +14,7 @@ cat examples/hello.asm | bin/zas | bin/zlnt
 ## Flags
 
 - `--version` prints the tool version.
-- `--json` emits diagnostics as JSON lines (stderr).
+- `--json` emits diagnostics as JSON lines (stderr). See [docs/diagnostics.md](../diagnostics.md).
 - `--tool` enables filelist mode (non-stream).
 
 ## Tool mode

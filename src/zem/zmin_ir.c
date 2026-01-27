@@ -10,41 +10,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static void usage(FILE *out) {
-  fprintf(out,
-          "zmin-ir — delta-minimize an IR JSONL file against a predicate\n"
-          "\n"
-          "Usage:\n"
-          "  zmin-ir [options] <input.jsonl> -- <cmd> [args...]\n"
-          "\n"
-          "Behavior:\n"
-          "  Writes smaller IR JSONL that still reproduces the predicate.\n"
-          "  The command is run repeatedly against candidate files.\n"
-          "\n"
-          "Command templating:\n"
-          "  If any arg equals '{}' it is replaced with the candidate path.\n"
-          "  Otherwise the candidate path is appended as the last arg.\n"
-          "\n"
-          "Options:\n"
-          "  -o <path>        Output path (default: stdout)\n"
-          "  --want-exit N    Predicate is satisfied iff cmd exits with code N\n"
-          "  --want-nonzero   Predicate is satisfied iff cmd exits nonzero (default)\n"
-          "  --max-steps N    Limit predicate invocations (default: 2000)\n"
-          "  -v              Verbose progress\n"
-          "  --help          Show this help and exit\n"
-          "\n"
-          "Exit codes:\n"
-          "  0  minimized output written\n"
-          "  2  usage/error\n");
-}
+#include "zem_workbench_usage.h"
 
 static void die(const char *msg) {
-  fprintf(stderr, "zmin-ir: error: %s\n", msg);
+  fprintf(stderr, "min-ir: error: %s\n", msg);
   exit(2);
 }
 
 static void die2(const char *msg, const char *arg) {
-  fprintf(stderr, "zmin-ir: error: %s: %s\n", msg, arg);
+  fprintf(stderr, "min-ir: error: %s: %s\n", msg, arg);
   exit(2);
 }
 
@@ -171,7 +145,7 @@ static int predicate_satisfied(predicate_t *pred, const char *candidate_path, ch
   else ok = (code != 0);
 
   if (pred->verbose) {
-    fprintf(stderr, "zmin-ir: step=%ld lines? cmd_exit=%d satisfied=%s\n", pred->steps, code, ok ? "yes" : "no");
+    fprintf(stderr, "min-ir: step=%ld lines? cmd_exit=%d satisfied=%s\n", pred->steps, code, ok ? "yes" : "no");
   }
   return ok;
 }
@@ -209,7 +183,7 @@ int zmin_ir_main(int argc, char **argv) {
       break;
     }
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
-      usage(stdout);
+      zem_workbench_usage_zmin_ir(stdout);
       return 0;
     }
     if (strcmp(arg, "-v") == 0) {
@@ -245,7 +219,7 @@ int zmin_ir_main(int argc, char **argv) {
   }
 
   if (!in_path || cmd_start < 0 || cmd_start >= argc) {
-    usage(stderr);
+    zem_workbench_usage_zmin_ir(stderr);
     return 2;
   }
 
@@ -322,7 +296,7 @@ int zmin_ir_main(int argc, char **argv) {
         nidx = ncomp;
         if (gran > 2) gran--;
         reduced = 1;
-        if (pred.verbose) fprintf(stderr, "zmin-ir: reduced to %zu lines (gran=%zu)\n", nidx, gran);
+        if (pred.verbose) fprintf(stderr, "min-ir: reduced to %zu lines (gran=%zu)\n", nidx, gran);
         break;
       }
 
@@ -332,7 +306,7 @@ int zmin_ir_main(int argc, char **argv) {
     if (!reduced) {
       if (gran >= nidx) break;
       gran = (gran * 2 > nidx) ? nidx : gran * 2;
-      if (pred.verbose) fprintf(stderr, "zmin-ir: increasing granularity to %zu\n", gran);
+      if (pred.verbose) fprintf(stderr, "min-ir: increasing granularity to %zu\n", gran);
     }
   }
 

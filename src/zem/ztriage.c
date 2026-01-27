@@ -12,38 +12,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static void usage(FILE *out) {
-  fprintf(out,
-          "ztriage — run a command over IR files and group failures\n"
-          "\n"
-          "Usage:\n"
-          "  ztriage [options] <inputs...> -- <cmd> [args...]\n"
-          "\n"
-          "Command templating:\n"
-          "  If any arg equals '{}' it is replaced with the input path.\n"
-          "  Otherwise the input path is appended as the last arg.\n"
-          "\n"
-          "Options:\n"
-          "  --want-exit N      Consider a failure iff cmd exits with code N\n"
-          "  --want-nonzero     Consider a failure iff cmd exits nonzero (default)\n"
-          "  --max-stderr N     Capture up to N bytes of stderr for signature (default: 4096)\n"
-          "  --jsonl <path>     Write per-input JSONL records to <path> (default: stdout)\n"
-          "  --summary          Print grouped summary to stderr\n"
-          "  -v                 Verbose progress\n"
-          "  --help             Show this help and exit\n"
-          "\n"
-          "Exit codes:\n"
-          "  0  ran successfully (even if failures were found)\n"
-          "  2  usage/error\n");
-}
+#include "zem_workbench_usage.h"
 
 static void die(const char *msg) {
-  fprintf(stderr, "ztriage: error: %s\n", msg);
+  fprintf(stderr, "triage: error: %s\n", msg);
   exit(2);
 }
 
 static void die2(const char *msg, const char *arg) {
-  fprintf(stderr, "ztriage: error: %s: %s\n", msg, arg);
+  fprintf(stderr, "triage: error: %s: %s\n", msg, arg);
   exit(2);
 }
 
@@ -209,7 +186,7 @@ int ztriage_main(int argc, char **argv) {
       break;
     }
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
-      usage(stdout);
+      zem_workbench_usage_ztriage(stdout);
       free(inputs);
       return 0;
     }
@@ -250,7 +227,7 @@ int ztriage_main(int argc, char **argv) {
   }
 
   if (cmd_start < 0 || cmd_start >= argc) {
-    usage(stderr);
+    zem_workbench_usage_ztriage(stderr);
     free(inputs);
     return 2;
   }
@@ -291,21 +268,21 @@ int ztriage_main(int argc, char **argv) {
     int fail = is_failure(&o, code);
     if (fail) buckets_add(&buckets, sig ? sig : "");
 
-    fprintf(jsonl, "{\"k\":\"ztriage\",\"path\":");
+    fprintf(jsonl, "{\"k\":\"triage\",\"path\":");
     json_escape_to(jsonl, in);
     fprintf(jsonl, ",\"exit\":%d,\"fail\":%s,\"sig\":", code, fail ? "true" : "false");
     json_escape_to(jsonl, sig ? sig : "");
     fprintf(jsonl, "}\n");
 
     if (o.verbose) {
-      fprintf(stderr, "ztriage: %s exit=%d %s\n", in, code, fail ? "FAIL" : "ok");
+      fprintf(stderr, "triage: %s exit=%d %s\n", in, code, fail ? "FAIL" : "ok");
     }
 
     free(sig);
   }
 
   if (o.summary) {
-    fprintf(stderr, "ztriage: summary (by stderr signature)\n");
+    fprintf(stderr, "triage: summary (by stderr signature)\n");
     for (size_t i = 0; i < buckets.n; i++) {
       fprintf(stderr, "  %ld\t%s\n", buckets.v[i].count, buckets.v[i].sig[0] ? buckets.v[i].sig : "<empty>");
     }

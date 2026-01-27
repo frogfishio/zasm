@@ -3,7 +3,7 @@ set -eu
 
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
-"$ROOT/bin/zem" zmin-ir --help >/dev/null
+"$ROOT/bin/zem" --min-ir --help >/dev/null
 
 IN="${TMPDIR:-/tmp}/zmin_ir_in_$$.jsonl"
 OUT="${TMPDIR:-/tmp}/zmin_ir_out_$$.jsonl"
@@ -18,7 +18,7 @@ cat >"$IN" <<'EOF'
 EOF
 
 # Predicate: grep returns 0 iff the NOP record is present.
-"$ROOT/bin/zem" zmin-ir --want-exit 0 -o "$OUT" "$IN" -- grep -q '"m":"NOP"'
+"$ROOT/bin/zem" --min-ir --want-exit 0 -o "$OUT" "$IN" -- grep -q '"m":"NOP"'
 
 # Output should still contain NOP and be minimized (typically 1 line).
 grep -q '"m":"NOP"' "$OUT"

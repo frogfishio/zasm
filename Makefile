@@ -142,25 +142,13 @@ install: zas zld zrun zlnt zop zxc zir zem lower
 	@install -m 0755 $(BIN)/zem $(DESTDIR)$(BINDIR)/zem
 	@install -m 0755 $(BIN)/lower $(DESTDIR)$(BINDIR)/lower
 
-$(BUILD)/zirdiff/%.o: src/zirdiff/%.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -Isrc/common -c $< -o $@
-
-$(BUILD)/zmin_ir/%.o: src/zmin_ir/%.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
-
-$(BUILD)/ztriage/%.o: src/ztriage/%.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
-
-$(BUILD)/zduel/%.o: src/zduel/%.c | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/common -c $< -o $@
-
 
 install-devtools: zasm-bin-wrap
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(BUILD)/zirdiff $(BUILD)/zmin_ir $(BUILD)/ztriage $(BUILD)/zduel
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -784,10 +772,11 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/zem_cert.o \
 	$(ZEM_BUILD)/zem.o \
 	$(ZEM_BUILD)/jsonl.o \
-	$(BUILD)/zirdiff/main.o \
-	$(BUILD)/zmin_ir/main.o \
-	$(BUILD)/ztriage/main.o \
-	$(BUILD)/zduel/main.o
+	$(ZEM_BUILD)/zem_workbench_usage.o \
+	$(ZEM_BUILD)/zdiff.o \
+	$(ZEM_BUILD)/zmin_ir.o \
+	$(ZEM_BUILD)/ztriage.o \
+	$(ZEM_BUILD)/zduel.o
 
 $(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@

@@ -132,12 +132,6 @@ static void print_help(FILE *out) {
       "  --rep-diag         Print one-line bloat_diag summary to stdout\n",
   "  --params          Stop option parsing; remaining args become guest argv\n",
   "  --                Alias for --params\n",
-      "\n",
-      "Extra tools (built into zem):\n",
-      "  zem zirdiff ...   (or invoke as 'zirdiff' via symlink)\n",
-      "  zem zmin-ir ...   (or invoke as 'zmin-ir' via symlink)\n",
-      "  zem ztriage ...   (or invoke as 'ztriage' via symlink)\n",
-      "  zem zduel ...     (or invoke as 'zduel' via symlink)\n",
       "  --inherit-env      Snapshot host environment for zi_env_get_*\n",
       "  --clear-env        Clear the env snapshot (default: empty)\n",
       "  --env KEY=VAL      Add/override an env entry in the snapshot (repeatable)\n",
@@ -224,6 +218,12 @@ static void print_help(FILE *out) {
       "  --debug-events-only Like --debug-events but suppress debugger text output\n",
       "                    and suppresses zem lifecycle telemetry.\n",
       "  --source-name NAME  Source name to report when reading program JSONL from stdin ('-')\n",
+        "\n",
+        "Tools:\n",
+        "  --irdiff ...       Diff IR JSONL\n",
+        "  --min-ir ...       Delta-minimize IR JSONL\n",
+        "  --triage ...       Run + group failures over corpora\n",
+        "  --duel ...         Differential runner (A/B)\n\n",
   };
 
   for (size_t i = 0; i < (sizeof(help) / sizeof(help[0])); i++) {
@@ -237,15 +237,49 @@ static const char *prog_basename(const char *path) {
   return slash ? (slash + 1) : path;
 }
 
+static int dispatch_mode_with_argv0(const char *argv0, int (*fn)(int, char **), int argc,
+                                   char **argv) {
+  if (!argv0 || !fn || argc <= 0 || !argv) return 2;
+
+  // Replace argv[0] for nicer diagnostics, but keep argv storage stable.
+  char **tmp = (char **)malloc((size_t)argc * sizeof(*tmp));
+  if (!tmp) return 2;
+  tmp[0] = (char *)argv0;
+  for (int i = 1; i < argc; i++) tmp[i] = argv[i];
+  int rc = fn(argc, tmp);
+  free(tmp);
+  return rc;
+}
+
 // Returns >=0 if dispatched; -1 if caller should continue with normal zem mode.
 static int maybe_dispatch_extra_tool(int argc, char **argv) {
   if (argc <= 0 || !argv || !argv[0]) return -1;
+
+  // Allow subcommands to re-invoke the same zem binary reliably.
+  // (In subcommand mode we pass argv+1, so argv[0] becomes e.g. "zduel".)
+  if (!getenv("ZEM_EXE")) (void)setenv("ZEM_EXE", argv[0], 1);
 
   const char *prog = prog_basename(argv[0]);
   if (strcmp(prog, "zirdiff") == 0) return zirdiff_main(argc, argv);
   if (strcmp(prog, "zmin-ir") == 0) return zmin_ir_main(argc, argv);
   if (strcmp(prog, "ztriage") == 0) return ztriage_main(argc, argv);
   if (strcmp(prog, "zduel") == 0) return zduel_main(argc, argv);
+
+  // Integrated mode flags: zem --irdiff/--min-ir/--triage/--duel ...
+  if (argc >= 2 && argv[1]) {
+    if (strcmp(argv[1], "--irdiff") == 0 || strcmp(argv[1], "--zirdiff") == 0) {
+      return dispatch_mode_with_argv0("irdiff", zirdiff_main, argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "--min-ir") == 0 || strcmp(argv[1], "--zmin-ir") == 0) {
+      return dispatch_mode_with_argv0("min-ir", zmin_ir_main, argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "--triage") == 0 || strcmp(argv[1], "--ztriage") == 0) {
+      return dispatch_mode_with_argv0("triage", ztriage_main, argc - 1, argv + 1);
+    }
+    if (strcmp(argv[1], "--duel") == 0 || strcmp(argv[1], "--zduel") == 0) {
+      return dispatch_mode_with_argv0("duel", zduel_main, argc - 1, argv + 1);
+    }
+  }
 
   // Subcommand mode: zem <tool> ...
   if (argc >= 2 && argv[1]) {

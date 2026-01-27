@@ -14,41 +14,15 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-static void usage(FILE *out) {
-  fprintf(out,
-          "zduel — differential runner (A/B) over IR corpora\n"
-          "\n"
-          "Usage:\n"
-          "  zduel [options] --a <cmd...> --b <cmd...> -- <inputs...>\n"
-          "  zduel [options] --corpus <dir> --a <cmd...> --b <cmd...>\n"
-          "\n"
-          "Command templating:\n"
-          "  If any arg equals '{}' it is replaced with the input path.\n"
-          "  Otherwise the input path is appended as the last arg.\n"
-          "\n"
-          "Options:\n"
-          "  --out <dir>         Write divergence artifacts under <dir>\n"
-          "  --compare <mode>    exit|stdout|stderr|both (default: both)\n"
-          "  --check             Single-input check: exit 1 iff divergent\n"
-          "  --minimize           Minimize divergent input via zmin-ir\n"
-          "  --zmin <path>       Path to zmin-ir (default: zmin-ir in PATH)\n"
-          "  --corpus <dir>      Run over *.jsonl files in <dir>\n"
-          "  -v                  Verbose\n"
-          "  --help              Show this help and exit\n"
-          "\n"
-          "Exit codes:\n"
-          "  0  no divergence\n"
-          "  1  divergence found\n"
-          "  2  usage/error\n");
-}
+#include "zem_workbench_usage.h"
 
 static void die(const char *msg) {
-  fprintf(stderr, "zduel: error: %s\n", msg);
+  fprintf(stderr, "duel: error: %s\n", msg);
   exit(2);
 }
 
 static void die2(const char *msg, const char *arg) {
-  fprintf(stderr, "zduel: error: %s: %s\n", msg, arg);
+  fprintf(stderr, "duel: error: %s: %s\n", msg, arg);
   exit(2);
 }
 
@@ -280,7 +254,7 @@ static int do_check_one(opts_t *o, char **argv, const char *input_path,
   }
 
   if (o->verbose) {
-    fprintf(stderr, "zduel: %s a=%d b=%d %s\n", input_path, a_code, b_code, diverge ? "DIVERGE" : "ok");
+    fprintf(stderr, "duel: %s a=%d b=%d %s\n", input_path, a_code, b_code, diverge ? "DIVERGE" : "ok");
   }
 
   // In non-artifact mode, we still wrote temp outputs into case_dir.
@@ -299,20 +273,24 @@ static int run_minimize(const opts_t *o, char **argv,
     die("--out path too long");
   }
 
-  const char *zmin = o->zmin_path ? o->zmin_path : "zmin-ir";
+  const char *zem = o->zmin_path ? o->zmin_path : getenv("ZEM_EXE");
+  if (!zem || !*zem) zem = "zem";
 
-  // Build argv for: zmin-ir --want-exit 1 -o <min_path> <input> -- zduel --check --compare X --a ... --b ... -- {}
-  int cap = 64 + a_argc + b_argc;
+  // Build argv for:
+  //   zem --min-ir --want-exit 1 -o <min_path> <input> -- zem --duel --check --compare X --a ... --b ... -- {}
+  int cap = 80 + a_argc + b_argc;
   char **zargv = (char **)xmalloc((size_t)cap * sizeof(*zargv));
   int zi = 0;
-  zargv[zi++] = (char *)zmin;
+  zargv[zi++] = (char *)zem;
+  zargv[zi++] = (char *)"--min-ir";
   zargv[zi++] = (char *)"--want-exit";
   zargv[zi++] = (char *)"1";
   zargv[zi++] = (char *)"-o";
   zargv[zi++] = (char *)min_path;
   zargv[zi++] = (char *)input_path;
   zargv[zi++] = (char *)"--";
-  zargv[zi++] = (char *)"zduel";
+  zargv[zi++] = (char *)zem;
+  zargv[zi++] = (char *)"--duel";
   zargv[zi++] = (char *)"--check";
   if (o->mode == CMP_EXIT) {
     zargv[zi++] = (char *)"--compare";
@@ -368,7 +346,7 @@ int zduel_main(int argc, char **argv) {
   for (int i = 1; i < argc; i++) {
     const char *arg = argv[i];
     if (strcmp(arg, "--help") == 0 || strcmp(arg, "-h") == 0) {
-      usage(stdout);
+      zem_workbench_usage_zduel(stdout);
       return 0;
     }
 
@@ -381,8 +359,8 @@ int zduel_main(int argc, char **argv) {
       o.out_dir = argv[++i];
       continue;
     }
-    if (strcmp(arg, "--zmin") == 0) {
-      if (i + 1 >= argc) die("--zmin requires a path");
+    if (strcmp(arg, "--zem") == 0 || strcmp(arg, "--zmin") == 0) {
+      if (i + 1 >= argc) die("--zem requires a path");
       o.zmin_path = argv[++i];
       continue;
     }

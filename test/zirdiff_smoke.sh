@@ -4,7 +4,7 @@ set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 
 # Basic: help works
-"$ROOT/bin/zem" zirdiff --help >/dev/null
+"$ROOT/bin/zem" --irdiff --help >/dev/null
 
 # Basic: identical files compare equal
 TMPA="${TMPDIR:-/tmp}/zirdiff_a_$$.jsonl"
@@ -17,6 +17,6 @@ cat >"$TMPA" <<'EOF'
 EOF
 cp "$TMPA" "$TMPB"
 
-"$ROOT/bin/zem" zirdiff "$TMPA" "$TMPB" >/dev/null 2>&1
+"$ROOT/bin/zem" --irdiff "$TMPA" "$TMPB" >/dev/null 2>&1
 
 echo "ok"
