@@ -5,6 +5,7 @@
 #include "zi_file_fs25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
+#include "zi_proc_hopper25.h"
 
 #include <string.h>
 
@@ -144,6 +145,11 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   if (strcmp(found->kind, ZI_CAP_KIND_PROC) == 0 && strcmp(found->name, ZI_CAP_NAME_ENV) == 0 && found->version == 1) {
     if (params_len != 0) return (zi_handle_t)ZI_E_INVALID;
     return zi_proc_env25_open();
+  }
+
+  // proc/hopper v1
+  if (strcmp(found->kind, ZI_CAP_KIND_PROC) == 0 && strcmp(found->name, ZI_CAP_NAME_HOPPER) == 0 && found->version == 1) {
+    return zi_proc_hopper25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
   return (zi_handle_t)ZI_E_DENIED;

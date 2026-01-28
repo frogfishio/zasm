@@ -25,6 +25,9 @@ SRC := \
 	$(SRCDIR)/zi_file_fs25.c \
 	$(SRCDIR)/zi_proc_argv25.c \
 	$(SRCDIR)/zi_proc_env25.c \
+	$(SRCDIR)/zi_proc_hopper25.c \
+	$(SRCDIR)/vendor/hopper/hopper.c \
+	$(SRCDIR)/vendor/hopper/pic.c \
 	$(SRCDIR)/zi_caps.c \
 	$(SRCDIR)/zi_async.c \
 	$(SRCDIR)/zi_problem.c \
@@ -40,12 +43,15 @@ OBJ := \
 	$(BUILD)/zi_file_fs25.o \
 	$(BUILD)/zi_proc_argv25.o \
 	$(BUILD)/zi_proc_env25.o \
+	$(BUILD)/zi_proc_hopper25.o \
+	$(BUILD)/vendor/hopper/hopper.o \
+	$(BUILD)/vendor/hopper/pic.o \
 	$(BUILD)/zi_caps.o \
 	$(BUILD)/zi_async.o \
 	$(BUILD)/zi_problem.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap test_sysabi25_env_cap
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap
 
 EXAMPLES := stdio_caps_demo all_caps_demo
 
@@ -62,9 +68,11 @@ dist-dirs:
 	mkdir -p $(DIST_LIB) $(DIST_INCLUDE)
 
 $(BUILD)/%.o: $(SRCDIR)/%.c | dirs
+	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
 
 $(BUILD)/test_%.o: $(TESTDIR)/test_%.c | dirs
+	mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
 
 $(LIB): $(OBJ)
@@ -94,6 +102,7 @@ itest: examples
 	echo "$$out" | grep -q -- "- file/fs"; \
 	echo "$$out" | grep -q -- "- proc/argv"; \
 	echo "$$out" | grep -q -- "- proc/env"; \
+	echo "$$out" | grep -q -- "- proc/hopper"; \
 	rm -rf "$$root"
 
 dist-debug: all dist-dirs

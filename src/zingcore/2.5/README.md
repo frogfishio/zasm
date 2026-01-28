@@ -146,6 +146,38 @@ Stream format (packed little-endian):
 - `u32 envc`
 - Repeat `envc` times: `u32 len`, then `bytes[len]` (typically `KEY=VALUE`)
 
+## Hopper capability (golden)
+
+zingcore 2.5 exposes a minimal Hopper instance as a capability:
+
+- kind: `"proc"`
+- name: `"hopper"`
+- version: `1`
+
+Open semantics:
+
+- `zi_cap_open` with kind/name matching `proc/hopper` returns a **read-write** handle.
+- Open params are either empty (`params_len=0`, defaults) or a packed little-endian blob (12 bytes):
+  - `u32 version` (must be 1)
+  - `u32 arena_bytes`
+  - `u32 ref_count`
+
+I/O semantics:
+
+- Requests are written as ZCL1 frames to the handle.
+- Responses are read back as ZCL1 frames from the same handle.
+
+Supported ops (ZCL1 `op`):
+
+- `1` INFO (empty payload) → payload: `u32 hopper_abi_version, u32 default_layout_id, u32 arena_bytes, u32 ref_count`
+- `3` RECORD (payload: `u32 layout_id`) → payload: `u32 hopper_err, i32 ref`
+- `4` FIELD_SET_BYTES (payload: `i32 ref, u32 field_index, u32 len, bytes[len]`) → payload: `u32 hopper_err`
+- `5` FIELD_GET_BYTES (payload: `i32 ref, u32 field_index`) → payload: `u32 hopper_err, u32 len, bytes[len]`
+- `6` FIELD_SET_I32 (payload: `i32 ref, u32 field_index, i32 v`) → payload: `u32 hopper_err`
+- `7` FIELD_GET_I32 (payload: `i32 ref, u32 field_index`) → payload: `u32 hopper_err, i32 v`
+
+Note: this initial golden cap uses a small built-in catalog (layout_id=1) suitable for smoke/conformance tests.
+
 ## Example: stdio + extra caps
 
 See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:

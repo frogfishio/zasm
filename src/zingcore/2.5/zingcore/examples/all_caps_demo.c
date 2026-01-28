@@ -5,6 +5,7 @@
 #include "zi_handles25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
+#include "zi_proc_hopper25.h"
 #include "zi_runtime25.h"
 #include "zi_sysabi25.h"
 
@@ -123,6 +124,10 @@ static uint32_t zcl1_read_u32(const uint8_t *p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
 }
 
+static int32_t zcl1_read_i32(const uint8_t *p) {
+  return (int32_t)zcl1_read_u32(p);
+}
+
 static void build_caps_list_req(uint8_t req[24], uint32_t rid) {
   memcpy(req + 0, "ZCL1", 4);
   zcl1_write_u16(req + 4, 1);
@@ -131,6 +136,271 @@ static void build_caps_list_req(uint8_t req[24], uint32_t rid) {
   zcl1_write_u32(req + 12, 0);
   zcl1_write_u32(req + 16, 0);
   zcl1_write_u32(req + 20, 0);
+}
+
+static uint32_t zcl1_status(const uint8_t *fr) {
+  return zcl1_read_u32(fr + 12);
+}
+
+static void build_zcl1_req(uint8_t *out, uint16_t op, uint32_t rid, const uint8_t *payload, uint32_t payload_len) {
+  memcpy(out + 0, "ZCL1", 4);
+  zcl1_write_u16(out + 4, 1);
+  zcl1_write_u16(out + 6, op);
+  zcl1_write_u32(out + 8, rid);
+  zcl1_write_u32(out + 12, 0);
+  zcl1_write_u32(out + 16, 0);
+  zcl1_write_u32(out + 20, payload_len);
+  if (payload_len && payload) memcpy(out + 24, payload, payload_len);
+}
+
+static void build_open_req(uint8_t req[40], const char *kind, const char *name, const void *params, uint32_t params_len);
+
+static int hopper_smoke(void) {
+  // Open proc/hopper with small buffers.
+  uint8_t params[12];
+  zcl1_write_u32(params + 0, 1);
+  zcl1_write_u32(params + 4, 256);
+  zcl1_write_u32(params + 8, 8);
+
+  uint8_t req[40];
+  build_open_req(req, ZI_CAP_KIND_PROC, ZI_CAP_NAME_HOPPER, params, (uint32_t)sizeof(params));
+
+  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (h < 3) {
+    fprintf(stderr, "proc/hopper open failed: %d\n", h);
+    return 0;
+  }
+
+  // Helper: round-trip a single request and read back the whole response.
+  uint8_t resp[4096];
+
+  // INFO
+  {
+    uint8_t fr[24];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_INFO, 1, NULL, 0);
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper INFO write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper INFO read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0 || off >= 24) break;
+    }
+    if (off < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper INFO bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // RECORD layout_id=1
+  int32_t ref = -1;
+  {
+    uint8_t payload[4];
+    zcl1_write_u32(payload + 0, 1);
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_RECORD, 2, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper RECORD write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper RECORD read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0 || off >= 32) break;
+    }
+    if (off < 32 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper RECORD bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    const uint8_t *pl = resp + 24;
+    uint32_t herr = zcl1_read_u32(pl + 0);
+    ref = zcl1_read_i32(pl + 4);
+    if (herr != 0 || ref < 0) {
+      fprintf(stderr, "hopper RECORD failed herr=%u ref=%d\n", herr, ref);
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // SET_BYTES field 0 = "hi"
+  {
+    const char *msg = "hi";
+    uint8_t payload[12 + 2];
+    zcl1_write_u32(payload + 0, (uint32_t)ref);
+    zcl1_write_u32(payload + 4, 0);
+    zcl1_write_u32(payload + 8, 2);
+    memcpy(payload + 12, msg, 2);
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_FIELD_SET_BYTES, 3, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper SET_BYTES write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper SET_BYTES read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0 || off >= 28) break;
+    }
+    if (off < 28 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper SET_BYTES bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24) != 0) {
+      fprintf(stderr, "hopper SET_BYTES failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // SET_I32 field 1 = 123
+  {
+    uint8_t payload[12];
+    zcl1_write_u32(payload + 0, (uint32_t)ref);
+    zcl1_write_u32(payload + 4, 1);
+    zcl1_write_u32(payload + 8, 123);
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_FIELD_SET_I32, 4, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper SET_I32 write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper SET_I32 read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0 || off >= 28) break;
+    }
+    if (off < 28 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper SET_I32 bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24) != 0) {
+      fprintf(stderr, "hopper SET_I32 failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // GET_BYTES field 0 -> expect "hi  "
+  {
+    uint8_t payload[8];
+    zcl1_write_u32(payload + 0, (uint32_t)ref);
+    zcl1_write_u32(payload + 4, 0);
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_FIELD_GET_BYTES, 5, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper GET_BYTES write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper GET_BYTES read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0) break;
+      if (off >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (off >= 24u + pl) break;
+      }
+    }
+    if (off < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper GET_BYTES bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    const uint8_t *pl = resp + 24;
+    uint32_t herr = zcl1_read_u32(pl + 0);
+    uint32_t blen = zcl1_read_u32(pl + 4);
+    if (herr != 0 || blen != 4 || memcmp(pl + 8, "hi  ", 4) != 0) {
+      fprintf(stderr, "hopper GET_BYTES mismatch herr=%u blen=%u\n", herr, blen);
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // GET_I32 field 1 -> expect 123
+  {
+    uint8_t payload[8];
+    zcl1_write_u32(payload + 0, (uint32_t)ref);
+    zcl1_write_u32(payload + 4, 1);
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_HOPPER_OP_FIELD_GET_I32, 6, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "hopper GET_I32 write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t off = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + off), (zi_size32_t)(sizeof(resp) - off));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "hopper GET_I32 read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      off += (uint32_t)n;
+      if (n == 0 || off >= 32) break;
+    }
+    if (off < 32 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "hopper GET_I32 bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    const uint8_t *pl = resp + 24;
+    uint32_t herr = zcl1_read_u32(pl + 0);
+    int32_t v = zcl1_read_i32(pl + 4);
+    if (herr != 0 || v != 123) {
+      fprintf(stderr, "hopper GET_I32 mismatch herr=%u v=%d\n", herr, v);
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  (void)zi_end(h);
+  return 1;
 }
 
 static void write_u64le(uint8_t *p, uint64_t v) {
@@ -413,6 +683,7 @@ int main(int argc, char **argv) {
   (void)zi_file_fs25_register();
   (void)zi_proc_argv25_register();
   (void)zi_proc_env25_register();
+  (void)zi_proc_hopper25_register();
 
   // Wire stdio handles.
   (void)zi_handles25_init();
@@ -446,6 +717,11 @@ int main(int argc, char **argv) {
 
   if (!fs_smoke()) {
     fprintf(stderr, "file/fs smoke failed\n");
+    return 1;
+  }
+
+  if (!hopper_smoke()) {
+    fprintf(stderr, "hopper smoke failed\n");
     return 1;
   }
 
