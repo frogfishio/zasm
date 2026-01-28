@@ -79,6 +79,19 @@ int zi_handle25_lookup(zi_handle_t h, const zi_handle_ops_v1 **out_ops, void **o
   return 1;
 }
 
+int zi_handle25_release(zi_handle_t h) {
+  if (!g_h.initialized) return 0;
+  uint32_t idx = idx_from_handle(h);
+  if (idx >= ZI_HANDLES25_MAX) return 0;
+  zi_handle_entry *e = &g_h.entries[idx];
+  if (!e->in_use) return 0;
+  e->in_use = 0;
+  e->hflags = 0;
+  e->ops = NULL;
+  e->ctx = NULL;
+  return 1;
+}
+
 uint32_t zi_handle25_hflags(zi_handle_t h) {
   uint32_t flags = 0;
   (void)zi_handle25_lookup(h, NULL, NULL, &flags);

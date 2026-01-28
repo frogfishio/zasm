@@ -22,6 +22,7 @@ SRC := \
 	$(SRCDIR)/zi_zcl1.c \
 	$(SRCDIR)/zi_syscalls_core25.c \
 	$(SRCDIR)/zi_syscalls_caps25.c \
+	$(SRCDIR)/zi_file_fs25.c \
 	$(SRCDIR)/zi_caps.c \
 	$(SRCDIR)/zi_async.c \
 	$(SRCDIR)/zi_problem.c \
@@ -34,12 +35,13 @@ OBJ := \
 	$(BUILD)/zi_zcl1.o \
 	$(BUILD)/zi_syscalls_core25.o \
 	$(BUILD)/zi_syscalls_caps25.o \
+	$(BUILD)/zi_file_fs25.o \
 	$(BUILD)/zi_caps.o \
 	$(BUILD)/zi_async.o \
 	$(BUILD)/zi_problem.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap
 
 .PHONY: test
 

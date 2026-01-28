@@ -2,6 +2,7 @@
 
 #include "zi_runtime25.h"
 #include "zi_caps.h"
+#include "zi_file_fs25.h"
 
 #include <string.h>
 
@@ -74,10 +75,62 @@ int32_t zi_cap_get(int32_t index, zi_ptr_t out_ptr, zi_size32_t out_cap) {
 }
 
 zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
-  // Core 2.5 provides the caps listing plumbing. Opening is cap-specific.
-  // A capability must advertise ZI_CAP_CAN_OPEN and provide an implementation in its runtime pack.
-  (void)req_ptr;
+  // Packed little-endian open request:
+  //   u64 kind_ptr
+  //   u32 kind_len
+  //   u64 name_ptr
+  //   u32 name_len
+  //   u32 mode (reserved; must be 0 for now)
+  //   u64 params_ptr
+  //   u32 params_len
   const zi_cap_registry_v1 *reg = zi_cap_registry();
   if (!reg) return (zi_handle_t)ZI_E_NOSYS;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return (zi_handle_t)ZI_E_NOSYS;
+
+  const uint8_t *req = NULL;
+  if (!mem->map_ro(mem->ctx, req_ptr, 40u, &req) || !req) return (zi_handle_t)ZI_E_BOUNDS;
+
+  // local little-endian readers
+  uint32_t kind_len = (uint32_t)req[8] | ((uint32_t)req[9] << 8) | ((uint32_t)req[10] << 16) | ((uint32_t)req[11] << 24);
+  uint32_t name_len = (uint32_t)req[20] | ((uint32_t)req[21] << 8) | ((uint32_t)req[22] << 16) | ((uint32_t)req[23] << 24);
+  uint32_t mode = (uint32_t)req[24] | ((uint32_t)req[25] << 8) | ((uint32_t)req[26] << 16) | ((uint32_t)req[27] << 24);
+  zi_ptr_t kind_ptr = (zi_ptr_t)((uint64_t)req[0] | ((uint64_t)req[1] << 8) | ((uint64_t)req[2] << 16) | ((uint64_t)req[3] << 24) |
+                                ((uint64_t)req[4] << 32) | ((uint64_t)req[5] << 40) | ((uint64_t)req[6] << 48) | ((uint64_t)req[7] << 56));
+  zi_ptr_t name_ptr = (zi_ptr_t)((uint64_t)req[12] | ((uint64_t)req[13] << 8) | ((uint64_t)req[14] << 16) | ((uint64_t)req[15] << 24) |
+                                ((uint64_t)req[16] << 32) | ((uint64_t)req[17] << 40) | ((uint64_t)req[18] << 48) | ((uint64_t)req[19] << 56));
+  zi_ptr_t params_ptr = (zi_ptr_t)((uint64_t)req[28] | ((uint64_t)req[29] << 8) | ((uint64_t)req[30] << 16) | ((uint64_t)req[31] << 24) |
+                                  ((uint64_t)req[32] << 32) | ((uint64_t)req[33] << 40) | ((uint64_t)req[34] << 48) | ((uint64_t)req[35] << 56));
+  uint32_t params_len = (uint32_t)req[36] | ((uint32_t)req[37] << 8) | ((uint32_t)req[38] << 16) | ((uint32_t)req[39] << 24);
+
+  if (mode != 0) return (zi_handle_t)ZI_E_INVALID;
+  if (kind_len == 0 || name_len == 0) return (zi_handle_t)ZI_E_INVALID;
+
+  const uint8_t *kind = NULL;
+  const uint8_t *name = NULL;
+  if (!mem->map_ro(mem->ctx, kind_ptr, (zi_size32_t)kind_len, &kind) || !kind) return (zi_handle_t)ZI_E_BOUNDS;
+  if (!mem->map_ro(mem->ctx, name_ptr, (zi_size32_t)name_len, &name) || !name) return (zi_handle_t)ZI_E_BOUNDS;
+
+  // Find the cap in the registry.
+  const zi_cap_v1 *found = NULL;
+  for (size_t i = 0; i < reg->cap_count; i++) {
+    const zi_cap_v1 *c = reg->caps[i];
+    if (!c || !c->kind || !c->name) continue;
+    if (strlen(c->kind) != (size_t)kind_len) continue;
+    if (strlen(c->name) != (size_t)name_len) continue;
+    if (memcmp(c->kind, kind, kind_len) != 0) continue;
+    if (memcmp(c->name, name, name_len) != 0) continue;
+    found = c;
+    break;
+  }
+  if (!found) return (zi_handle_t)ZI_E_NOENT;
+  if ((found->cap_flags & ZI_CAP_CAN_OPEN) == 0) return (zi_handle_t)ZI_E_DENIED;
+
+  // file/fs v1
+  if (strcmp(found->kind, ZI_CAP_KIND_FILE) == 0 && strcmp(found->name, ZI_CAP_NAME_FS) == 0 && found->version == 1) {
+    return zi_file_fs25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
   return (zi_handle_t)ZI_E_DENIED;
 }

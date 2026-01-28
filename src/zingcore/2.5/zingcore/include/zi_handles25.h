@@ -25,6 +25,10 @@ zi_handle_t zi_handle25_alloc(const zi_handle_ops_v1 *ops, void *ctx, uint32_t h
 // Returns 1 on success.
 int zi_handle25_lookup(zi_handle_t h, const zi_handle_ops_v1 **out_ops, void **out_ctx, uint32_t *out_hflags);
 
+// Releases (invalidates) an existing handle.
+// Returns 1 if the handle existed and was released.
+int zi_handle25_release(zi_handle_t h);
+
 // Returns 0 if unknown.
 uint32_t zi_handle25_hflags(zi_handle_t h);
 

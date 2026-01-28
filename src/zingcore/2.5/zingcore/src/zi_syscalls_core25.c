@@ -146,10 +146,12 @@ int32_t zi_end(zi_handle_t h) {
 
   const zi_handle_ops_v1 *ops = NULL;
   void *ctx = NULL;
-  if (zi_handle25_lookup(h, &ops, &ctx, NULL) && ops && ops->end) {
-    return ops->end(ctx);
-  }
-  return ZI_E_NOSYS;
+  if (!zi_handle25_lookup(h, &ops, &ctx, NULL) || !ops) return ZI_E_NOSYS;
+
+  int32_t r = 0;
+  if (ops->end) r = ops->end(ctx);
+  (void)zi_handle25_release(h);
+  return r;
 }
 
 zi_ptr_t zi_alloc(zi_size32_t size) {

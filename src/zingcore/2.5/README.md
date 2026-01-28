@@ -69,6 +69,45 @@ If a runtime exposes any capabilities, it must provide the caps extension (`zi_c
 `zi_handle_hflags`). Capability discovery is done via `zi_ctl` (CAPS_LIST) which returns a
 deterministic list and per-cap flags/metadata.
 
+## File capability (golden)
+
+zingcore 2.5 includes a production-ready **file system capability**:
+
+- kind: `"file"`
+- name: `"fs"`
+- version: `1`
+
+It is opened via `zi_cap_open()` and returns a stream handle usable with `zi_read`/`zi_write`/`zi_end`.
+
+### zi_cap_open request format
+
+`zi_cap_open(req_ptr)` reads a packed little-endian request (40 bytes):
+
+- `u64 kind_ptr`
+- `u32 kind_len`
+- `u64 name_ptr`
+- `u32 name_len`
+- `u32 mode` (reserved; must be 0)
+- `u64 params_ptr`
+- `u32 params_len`
+
+### file/fs open params format
+
+When kind/name select file/fs, `params_ptr` points at a packed little-endian params blob (20 bytes):
+
+- `u64 path_ptr` (UTF-8 bytes, not NUL-terminated)
+- `u32 path_len`
+- `u32 oflags` (`ZI_FILE_O_*` in `zingcore/include/zi_file_fs25.h`)
+- `u32 create_mode` (used when `ZI_FILE_O_CREATE` is set; e.g. 0644)
+
+### Sandboxing via ZI_FS_ROOT
+
+If the environment variable `ZI_FS_ROOT` is set:
+
+- Guest paths must be absolute (start with `/`).
+- Any `..` path segment is rejected.
+- The runtime resolves the guest path *under* that directory using `openat()` and rejects symlinks in any path segment (escape-resistant).
+
 ## Example: stdio + extra caps
 
 See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:
