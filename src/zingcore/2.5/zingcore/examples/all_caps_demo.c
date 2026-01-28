@@ -3,6 +3,7 @@
 #include "zi_caps.h"
 #include "zi_file_fs25.h"
 #include "zi_handles25.h"
+#include "zi_net_tcp25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
@@ -681,6 +682,7 @@ int main(int argc, char **argv) {
   (void)zi_cap_register(&cap_demo_echo_v1);
   (void)zi_cap_register(&cap_demo_version_v1);
   (void)zi_file_fs25_register();
+  (void)zi_net_tcp25_register();
   (void)zi_proc_argv25_register();
   (void)zi_proc_env25_register();
   (void)zi_proc_hopper25_register();

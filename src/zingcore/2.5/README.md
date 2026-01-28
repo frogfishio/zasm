@@ -178,6 +178,29 @@ Supported ops (ZCL1 `op`):
 
 Note: this initial golden cap uses a small built-in catalog (layout_id=1) suitable for smoke/conformance tests.
 
+## TCP capability (golden)
+
+zingcore 2.5 exposes basic TCP client connections as a capability:
+
+- kind: `"net"`
+- name: `"tcp"`
+- version: `1`
+
+Open semantics:
+
+- `zi_cap_open` with kind/name matching `net/tcp` returns a **read-write** stream handle.
+- Open params are a packed little-endian blob (20 bytes):
+  - `u64 host_ptr` (UTF-8 bytes, not NUL-terminated)
+  - `u32 host_len`
+  - `u32 port` (1..65535)
+  - `u32 flags` (reserved; must be 0)
+
+Sandboxing via `ZI_NET_ALLOW`:
+
+- If `ZI_NET_ALLOW` is unset/empty: only loopback hosts are allowed (`localhost`, `127.0.0.1`, `::1`).
+- If `ZI_NET_ALLOW=any`: any host:port is allowed.
+- Otherwise: a comma-separated allowlist of `host:port`, `host:*`, or `loopback`.
+
 ## Example: stdio + extra caps
 
 See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:
