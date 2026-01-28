@@ -28,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/time.h>
 #include <unistd.h>
 
 enum {
@@ -418,8 +419,127 @@ void res_end(int32_t handle) {
   /* No-op for now; could flush/close in a richer runtime. */
 }
 
+static uint64_t zi_now_ms(void) {
+  struct timeval tv;
+  if (gettimeofday(&tv, NULL) != 0) return 0;
+  return (uint64_t)tv.tv_sec * 1000ull + (uint64_t)tv.tv_usec / 1000ull;
+}
+
+static int zi_telemetry_jsonl_enabled(void) {
+  static int init = 0;
+  static int enabled = 0;
+  if (!init) {
+    const char *v = getenv("ZI_TELEMETRY");
+    enabled = (v && (strcmp(v, "jsonl") == 0 || strcmp(v, "ndjson") == 0));
+    init = 1;
+  }
+  return enabled;
+}
+
+static int zi_telemetry_jsonl_ts_enabled(void) {
+  static int init = 0;
+  static int enabled = 0;
+  if (!init) {
+    const char *v = getenv("ZI_TELEMETRY_TS");
+    enabled = (v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "yes") == 0));
+    init = 1;
+  }
+  return enabled;
+}
+
+static uint64_t zi_telemetry_seq_next(void) {
+  static uint64_t seq = 0;
+  seq++;
+  if (seq == 0) seq = 1;
+  return seq;
+}
+
+static int zi_is_space(unsigned char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
+}
+
+static int zi_body_looks_like_json(const unsigned char *p, int32_t n) {
+  if (!p || n <= 0) return 0;
+  int32_t i = 0;
+  while (i < n && zi_is_space(p[i])) i++;
+  if (i >= n) return 0;
+  unsigned char ch = p[i];
+  if (ch == '{' || ch == '[' || ch == '\"') return 1;
+  if (ch == '-' || (ch >= '0' && ch <= '9')) return 1;
+  if (ch == 't' || ch == 'f' || ch == 'n') return 1;
+  return 0;
+}
+
+static void zi_write_u64_stderr(uint64_t v) {
+  char buf[32];
+  int n = snprintf(buf, sizeof(buf), "%" PRIu64, v);
+  if (n > 0) {
+    write_all(STDERR_FILENO, buf, (size_t)n);
+  } else {
+    write_all(STDERR_FILENO, "0", 1);
+  }
+}
+
+static void zi_write_json_string_stderr(const unsigned char *p, int32_t n) {
+  static const char q[] = "\"";
+  write_all(STDERR_FILENO, q, 1);
+  if (p && n > 0) {
+    for (int32_t i = 0; i < n; i++) {
+      unsigned char ch = p[i];
+      switch (ch) {
+        case '"': write_all(STDERR_FILENO, "\\\"", 2); break;
+        case '\\': write_all(STDERR_FILENO, "\\\\", 2); break;
+        case '\b': write_all(STDERR_FILENO, "\\b", 2); break;
+        case '\f': write_all(STDERR_FILENO, "\\f", 2); break;
+        case '\n': write_all(STDERR_FILENO, "\\n", 2); break;
+        case '\r': write_all(STDERR_FILENO, "\\r", 2); break;
+        case '\t': write_all(STDERR_FILENO, "\\t", 2); break;
+        default:
+          if (ch < 0x20 || ch == 0x7F) {
+            static const char hex[] = "0123456789abcdef";
+            char esc[6] = {'\\', 'u', '0', '0', hex[(ch >> 4) & 0xF], hex[ch & 0xF]};
+            write_all(STDERR_FILENO, esc, sizeof(esc));
+          } else {
+            write_all(STDERR_FILENO, &ch, 1);
+          }
+          break;
+      }
+    }
+  }
+  write_all(STDERR_FILENO, q, 1);
+}
+
 void telemetry(const char *topic_ptr, int32_t topic_len,
                const char *msg_ptr, int32_t msg_len) {
+  if (zi_telemetry_jsonl_enabled()) {
+    // JSONL/NDJSON for easy piping in dev.
+    // Default shape: {"topic":"...","body":<raw json or "string">}\n
+    write_all(STDERR_FILENO, "{", 1);
+    write_all(STDERR_FILENO, "\"seq\":", 6);
+    zi_write_u64_stderr(zi_telemetry_seq_next());
+    write_all(STDERR_FILENO, ",", 1);
+    if (zi_telemetry_jsonl_ts_enabled()) {
+      // Optional host timestamp (nondeterministic by nature).
+      write_all(STDERR_FILENO, "\"ts\":", 5);
+      zi_write_u64_stderr(zi_now_ms());
+      write_all(STDERR_FILENO, ",", 1);
+    }
+
+    write_all(STDERR_FILENO, "\"topic\":", 8);
+    zi_write_json_string_stderr((const unsigned char *)topic_ptr, topic_len);
+    write_all(STDERR_FILENO, ",\"body\":", 8);
+
+    if (zi_body_looks_like_json((const unsigned char *)msg_ptr, msg_len)) {
+      if (msg_ptr && msg_len > 0) write_all(STDERR_FILENO, msg_ptr, (size_t)msg_len);
+      else write_all(STDERR_FILENO, "null", 4);
+    } else {
+      zi_write_json_string_stderr((const unsigned char *)msg_ptr, msg_len);
+    }
+
+    write_all(STDERR_FILENO, "}\\n", 2);
+    return;
+  }
+
   static const char k_sep[] = ": ";
   static const char k_newline[] = "\n";
   if (topic_ptr && topic_len > 0) {

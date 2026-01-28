@@ -26,6 +26,17 @@ We are intentionally freezing the existing vendor snapshot under `src/zem/zingco
 - **Errors are structured**: stable error codes + stable messages where possible.
 - **Strictness**: invalid inputs are rejected consistently; no silent truncation.
 
+## Explicit registration (no linker magic)
+
+zingcore 2.5 intentionally avoids constructor-based or linker-section auto-registration.
+The embedding program (host runtime glue) performs registration explicitly at startup:
+
+1. Call `zingcore25_init()` (or `zi_caps_init()` + `zi_async_init()` if staying low-level).
+2. Register capabilities via `zi_cap_register()`.
+3. Register selectors via `zi_async_register()`.
+
+This keeps startup deterministic and makes it obvious what the host exposes.
+
 ## Layout
 
 - `zingcore/include/` — public headers (what embedders compile against)

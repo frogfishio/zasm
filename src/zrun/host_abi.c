@@ -7,6 +7,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <sys/time.h>
 
 static int bounds_ok(size_t ptr, size_t len, size_t size) {
   if (ptr > size) return 0;
@@ -26,6 +27,83 @@ static void tracef(zrun_abi_env_t* e, const char* fmt, ...) {
 
 static wasm_trap_t* trap_msg(const char* msg) {
   return wasmtime_trap_new(msg, strlen(msg));
+}
+
+static uint64_t now_ms(void) {
+  struct timeval tv;
+  if (gettimeofday(&tv, NULL) != 0) return 0;
+  return (uint64_t)tv.tv_sec * 1000ull + (uint64_t)tv.tv_usec / 1000ull;
+}
+
+static int telemetry_jsonl_ts_enabled(void) {
+  static int init = 0;
+  static int enabled = 0;
+  if (!init) {
+    const char* v = getenv("ZI_TELEMETRY_TS");
+    enabled = (v && (strcmp(v, "1") == 0 || strcmp(v, "true") == 0 || strcmp(v, "yes") == 0));
+    init = 1;
+  }
+  return enabled;
+}
+
+static uint64_t telemetry_seq_next(void) {
+  static uint64_t seq = 0;
+  seq++;
+  if (seq == 0) seq = 1; // avoid 0 on wrap
+  return seq;
+}
+
+static int telemetry_jsonl_enabled(void) {
+  static int init = 0;
+  static int enabled = 0;
+  if (!init) {
+    const char* v = getenv("ZI_TELEMETRY");
+    enabled = (v && (strcmp(v, "jsonl") == 0 || strcmp(v, "ndjson") == 0));
+    init = 1;
+  }
+  return enabled;
+}
+
+static int is_ascii_space(unsigned char ch) {
+  return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f';
+}
+
+static int body_looks_like_json(const uint8_t* body, size_t n) {
+  if (!body || n == 0) return 0;
+  size_t i = 0;
+  while (i < n && is_ascii_space(body[i])) i++;
+  if (i >= n) return 0;
+  unsigned char ch = body[i];
+  if (ch == '{' || ch == '[' || ch == '\"') return 1;
+  if (ch == '-' || (ch >= '0' && ch <= '9')) return 1;
+  if (ch == 't' || ch == 'f' || ch == 'n') return 1;
+  return 0;
+}
+
+static void write_json_string_bytes(FILE* f, const uint8_t* s, size_t n) {
+  fputc('\"', f);
+  for (size_t i = 0; i < n; i++) {
+    unsigned char ch = (unsigned char)s[i];
+    switch (ch) {
+      case '\"': fputs("\\\"", f); break;
+      case '\\': fputs("\\\\", f); break;
+      case '\b': fputs("\\b", f); break;
+      case '\f': fputs("\\f", f); break;
+      case '\n': fputs("\\n", f); break;
+      case '\r': fputs("\\r", f); break;
+      case '\t': fputs("\\t", f); break;
+      default:
+        if (ch < 0x20 || ch == 0x7F) {
+          static const char hex[] = "0123456789abcdef";
+          char esc[7] = {'\\', 'u', '0', '0', hex[(ch >> 4) & 0xF], hex[ch & 0xF], 0};
+          fputs(esc, f);
+        } else {
+          fputc((int)ch, f);
+        }
+        break;
+    }
+  }
+  fputc('\"', f);
 }
 
 enum {
@@ -75,21 +153,6 @@ uint8_t* mem_data(wasmtime_caller_t* caller, wasmtime_memory_t* mem, size_t* out
   return data;
 }
 
-static int mem_span(wasmtime_caller_t* caller, int32_t ptr_i32, int32_t len_i32,
-                    uint8_t** out_ptr, size_t* out_len) {
-  if (ptr_i32 < 0 || len_i32 < 0) return 0;
-  wasmtime_memory_t mem;
-  if (!get_memory_from_caller(caller, &mem)) return 0;
-  size_t mem_size = 0;
-  uint8_t* data = mem_data(caller, &mem, &mem_size);
-  size_t u_ptr = (size_t)(uint32_t)ptr_i32;
-  size_t u_len = (size_t)len_i32;
-  if (!bounds_ok(u_ptr, u_len, mem_size)) return 0;
-  if (out_ptr) *out_ptr = data + u_ptr;
-  if (out_len) *out_len = u_len;
-  return 1;
-}
-
 static int mem_span64(wasmtime_caller_t* caller, int64_t ptr_i64, int32_t len_i32,
                       uint8_t** out_ptr, size_t* out_len) {
   if (ptr_i64 < 0 || len_i32 < 0) return 0;
@@ -104,32 +167,6 @@ static int mem_span64(wasmtime_caller_t* caller, int64_t ptr_i64, int32_t len_i3
   if (!bounds_ok(u_ptr, u_len, mem_size)) return 0;
   if (out_ptr) *out_ptr = data + u_ptr;
   if (out_len) *out_len = u_len;
-  return 1;
-}
-
-static uint64_t hash64_fnv1a(const void* data, size_t len) {
-  const uint8_t* p = (const uint8_t*)data;
-  uint64_t h = 1469598103934665603ull;
-  for (size_t i = 0; i < len; i++) {
-    h ^= (uint64_t)p[i];
-    h *= 1099511628211ull;
-  }
-  return h;
-}
-
-static int zi_str_view(wasmtime_caller_t* caller, int32_t obj_ptr, int32_t* out_ptr, int32_t* out_len) {
-  enum { TAG_STR = 3, STR_HEADER = 8 };
-  if (!out_ptr || !out_len) return 0;
-  uint8_t* hdr = NULL;
-  size_t hdr_len = 0;
-  if (!mem_span(caller, obj_ptr, STR_HEADER, &hdr, &hdr_len)) return 0;
-  uint32_t tag = (uint32_t)hdr[0] | ((uint32_t)hdr[1] << 8) | ((uint32_t)hdr[2] << 16) | ((uint32_t)hdr[3] << 24);
-  uint32_t len = (uint32_t)hdr[4] | ((uint32_t)hdr[5] << 8) | ((uint32_t)hdr[6] << 16) | ((uint32_t)hdr[7] << 24);
-  if (tag != TAG_STR) return 0;
-  if (len > (uint32_t)INT32_MAX) return 0;
-  if (!mem_span(caller, obj_ptr + STR_HEADER, (int32_t)len, NULL, NULL)) return 0;
-  *out_ptr = obj_ptr + STR_HEADER;
-  *out_len = (int32_t)len;
   return 1;
 }
 
@@ -396,6 +433,50 @@ wasm_trap_t* zrun_zi_telemetry(void* env, wasmtime_caller_t* caller,
     results[0].of.i32 = ZI_E_BOUNDS;
     return NULL;
   }
+
+  if (telemetry_jsonl_enabled()) {
+    // JSONL/NDJSON for easy piping in dev.
+    // Default shape: {"topic":"...","body":<raw json or "string">}\n
+    fputc('{', stderr);
+    {
+      uint64_t seq = telemetry_seq_next();
+      char sbuf[32];
+      int sn = snprintf(sbuf, sizeof(sbuf), "%" PRIu64, seq);
+      if (sn < 0) {
+        sbuf[0] = '0';
+        sbuf[1] = 0;
+      }
+      fputs("\"seq\":", stderr);
+      fputs(sbuf, stderr);
+      fputc(',', stderr);
+    }
+    if (telemetry_jsonl_ts_enabled()) {
+      // Optional host timestamp (nondeterministic by nature).
+      uint64_t ts = now_ms();
+      char tsbuf[32];
+      int tsn = snprintf(tsbuf, sizeof(tsbuf), "%" PRIu64, ts);
+      if (tsn < 0) {
+        tsbuf[0] = '0';
+        tsbuf[1] = 0;
+      }
+      fputs("\"ts\":", stderr);
+      fputs(tsbuf, stderr);
+      fputc(',', stderr);
+    }
+
+    fputs("\"topic\":", stderr);
+    write_json_string_bytes(stderr, topic, topic_n);
+    fputs(",\"body\":", stderr);
+    if (body_looks_like_json(msg, msg_n)) {
+      fwrite(msg, 1, msg_n, stderr);
+    } else {
+      write_json_string_bytes(stderr, msg, msg_n);
+    }
+    fputs("}\n", stderr);
+    fflush(stderr);
+    return NULL;
+  }
+
   fputc('[', stderr);
   fwrite(topic, 1, topic_n, stderr);
   fputs("] ", stderr);
@@ -528,6 +609,7 @@ wasm_trap_t* zrun_zi_mvar_set_default_u64(void* env, wasmtime_caller_t* caller,
 wasm_trap_t* zrun_zi_mvar_get(void* env, wasmtime_caller_t* caller,
                              const wasmtime_val_t* args, size_t nargs,
                              wasmtime_val_t* results, size_t nresults) {
+  (void)env;
   (void)caller;
   (void)args;
   (void)nargs;
