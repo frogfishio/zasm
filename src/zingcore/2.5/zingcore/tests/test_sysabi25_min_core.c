@@ -40,10 +40,6 @@ int main(void) {
     fprintf(stderr, "zi_abi_version mismatch\n");
     return 1;
   }
-  if (zi_abi_features() != 0) {
-    fprintf(stderr, "expected zero features when caps system not initialized\n");
-    return 1;
-  }
 
   if (zi_read(3, 0, 0) != ZI_E_NOSYS) {
     fprintf(stderr, "expected zi_read nosys\n");

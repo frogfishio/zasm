@@ -197,13 +197,6 @@ int main(void) {
     return 1;
   }
 
-  // Features should reflect registered caps kinds.
-  uint64_t feats = zi_abi_features();
-  if ((feats & (1ull << 1)) == 0 || (feats & (1ull << 3)) == 0) {
-    fprintf(stderr, "expected ASYNC and EXEC feature bits to be set\n");
-    return 1;
-  }
-
   printf("ok\n");
   return 0;
 }

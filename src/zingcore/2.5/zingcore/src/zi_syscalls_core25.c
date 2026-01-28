@@ -8,33 +8,10 @@
 
 #include <string.h>
 
-static uint64_t features_from_caps(void) {
-  const zi_cap_registry_v1 *reg = zi_cap_registry();
-  if (!reg || reg->cap_count == 0) return 0;
-
-  uint64_t bits = 0;
-  for (size_t i = 0; i < reg->cap_count; i++) {
-    const zi_cap_v1 *c = reg->caps[i];
-    if (!c || !c->kind) continue;
-    if (strcmp(c->kind, "file") == 0) bits |= (1ull << 0);
-    else if (strcmp(c->kind, "async") == 0) bits |= (1ull << 1);
-    else if (strcmp(c->kind, "time") == 0) bits |= (1ull << 2);
-    else if (strcmp(c->kind, "exec") == 0) bits |= (1ull << 3);
-    else if (strcmp(c->kind, "proc") == 0) bits |= (1ull << 4);
-  }
-  return bits;
-}
-
 uint32_t zi_abi_version(void) {
   const zi_host_v1 *host = zi_runtime25_host();
   if (host && host->abi_version) return host->abi_version(host->ctx);
   return (uint32_t)ZI_SYSABI25_ZABI_VERSION;
-}
-
-uint64_t zi_abi_features(void) {
-  const zi_host_v1 *host = zi_runtime25_host();
-  if (host && host->abi_features) return host->abi_features(host->ctx);
-  return features_from_caps();
 }
 
 static int ctl_caps_list(uint8_t *resp, uint32_t resp_cap, uint16_t op, uint32_t rid) {

@@ -15,7 +15,7 @@ extern "C" {
  * - zingcore's wiring/embedding APIs are family-namespaced separately (e.g. `zingcore25_*`).
  *
  * Minimal core ABI (always present):
- *   zi_abi_version, zi_abi_features
+ *   zi_abi_version
  *   zi_ctl
  *   zi_read, zi_write, zi_end
  *   zi_alloc, zi_free
@@ -69,7 +69,6 @@ enum {
 
 /* --- Minimal core surface (expected everywhere) --- */
 uint32_t zi_abi_version(void);
-uint64_t zi_abi_features(void);
 
 int32_t zi_ctl(zi_ptr_t req_ptr, zi_size32_t req_len,
                zi_ptr_t resp_ptr, zi_size32_t resp_cap);

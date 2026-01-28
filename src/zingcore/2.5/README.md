@@ -26,6 +26,59 @@ We are intentionally freezing the existing vendor snapshot under `src/zem/zingco
 - **Errors are structured**: stable error codes + stable messages where possible.
 - **Strictness**: invalid inputs are rejected consistently; no silent truncation.
 
+## Core ABI (golden)
+
+The zABI 2.5 **core wire ABI** is intentionally small and stable. The full contract is declared in
+`zingcore/include/zi_sysabi25.h`.
+
+Core calls (always present):
+
+- `zi_abi_version`
+- `zi_ctl`
+- `zi_read`, `zi_write`, `zi_end`
+- `zi_alloc`, `zi_free`
+- `zi_telemetry`
+
+There is no `zi_abi_features` in the core ABI: discovery/negotiation is done via `zi_ctl`.
+
+### What the core calls mean
+
+- `zi_ctl` is the **authoritative** control-plane mechanism. Discovery, extensibility, and
+  structured replies happen here (ZCL1 framing).
+- `zi_read` / `zi_write` / `zi_end` operate on **host-defined handles** (`zi_handle_t`). There is no
+  baked-in notion of stdin/stdout/stderr; those are provided by the embedding program.
+- `zi_telemetry` is a **best-effort sink**. If the host does not install a telemetry hook it is a
+  noop.
+
+### “Facade” reality (wiring model)
+
+The `zi_*` syscall entrypoints are a thin dispatch layer:
+
+- If the embedding installs host hooks via `zi_runtime25_set_host()`, syscalls forward to those
+  hooks.
+- Otherwise `zi_read/write/end` can use the internal handle table (see `zi_handles25.*`) if the host
+  has allocated handles with per-handle ops.
+- If neither is wired, the syscall returns `ZI_E_NOSYS`.
+
+This design keeps the ABI stable while allowing very different embeddings (native process, WASM
+host, test harnesses, etc.).
+
+## Caps discovery (optional extension)
+
+If a runtime exposes any capabilities, it must provide the caps extension (`zi_cap_*` and
+`zi_handle_hflags`). Capability discovery is done via `zi_ctl` (CAPS_LIST) which returns a
+deterministic list and per-cap flags/metadata.
+
+## Example: stdio + extra caps
+
+See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:
+
+- Initializes `zingcore25`.
+- Wires native memory mapping so `zi_ctl` can read/write request/response buffers.
+- Registers three extra caps.
+- Allocates three stream handles backed by POSIX fds (stdin/stdout/stderr) and then uses
+  `zi_read`/`zi_write` on them.
+
 ## Explicit registration (no linker magic)
 
 zingcore 2.5 intentionally avoids constructor-based or linker-section auto-registration.

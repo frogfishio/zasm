@@ -31,7 +31,6 @@ typedef struct zi_host_v1 {
 
   // Optional overrides. If NULL, zingcore provides a default.
   uint32_t (*abi_version)(void *ctx);
-  uint64_t (*abi_features)(void *ctx);
 
   // Core syscall hooks. If NULL, zingcore may return ZI_E_NOSYS (or noop for telemetry).
   int32_t (*ctl)(void *ctx, zi_ptr_t req_ptr, zi_size32_t req_len,
