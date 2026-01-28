@@ -31,6 +31,7 @@ SRC := \
 	$(SRCDIR)/zi_caps.c \
 	$(SRCDIR)/zi_async.c \
 	$(SRCDIR)/zi_problem.c \
+	$(SRCDIR)/zi_hopabi25.c \
 	$(SRCDIR)/zi_telemetry.c
 
 OBJ := \
@@ -49,11 +50,12 @@ OBJ := \
 	$(BUILD)/zi_caps.o \
 	$(BUILD)/zi_async.o \
 	$(BUILD)/zi_problem.o \
+	$(BUILD)/zi_hopabi25.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_hopabi25_basic
 
-EXAMPLES := stdio_caps_demo all_caps_demo
+EXAMPLES := stdio_caps_demo all_caps_demo hopabi_guest_demo
 
 .PHONY: test examples itest
 

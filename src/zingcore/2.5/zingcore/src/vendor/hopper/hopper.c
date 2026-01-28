@@ -107,6 +107,84 @@ hopper_err_t hopper_reset(hopper_t *h, int32_t wipe_arena) {
   return HOPPER_OK;
 }
 
+static int is_pow2_u32(uint32_t v) {
+  return v && ((v & (v - 1u)) == 0u);
+}
+
+static hopper_err_t align_cursor(hopper_t *h, uint32_t align, uint32_t *out_aligned) {
+  if (!h || !out_aligned) return HOPPER_E_BAD_FIELD;
+  if (align == 0) align = 1;
+  if (align != 1 && !is_pow2_u32(align)) return HOPPER_E_BAD_FIELD;
+
+  uint64_t cur = (uint64_t)h->cursor;
+  uint64_t a = (uint64_t)align;
+  uint64_t aligned = (cur + (a - 1u)) & ~(a - 1u);
+  if (aligned > (uint64_t)UINT32_MAX) return HOPPER_E_OVERFLOW;
+  *out_aligned = (uint32_t)aligned;
+  return HOPPER_OK;
+}
+
+hopper_result_ref_t hopper_alloc(hopper_t *h, uint32_t size, uint32_t align) {
+  hopper_result_ref_t res = {0, HOPPER_OK, 0};
+  if (!h) {
+    res.err = HOPPER_E_BAD_FIELD;
+    return res;
+  }
+  if (size == 0) {
+    res.err = HOPPER_E_BAD_FIELD;
+    return res;
+  }
+
+  uint32_t aligned = 0;
+  hopper_err_t aerr = align_cursor(h, align, &aligned);
+  if (aerr != HOPPER_OK) {
+    res.err = aerr;
+    return res;
+  }
+
+  if ((uint64_t)aligned + (uint64_t)size > (uint64_t)h->arena_bytes) {
+    res.err = HOPPER_E_OOM_ARENA;
+    return res;
+  }
+
+  uint32_t free_idx = h->ref_count;
+  for (uint32_t i = 0; i < h->ref_count; i++) {
+    if (!h->refs[i].in_use) {
+      free_idx = i;
+      break;
+    }
+  }
+  if (free_idx == h->ref_count) {
+    res.err = HOPPER_E_OOM_REFS;
+    return res;
+  }
+
+  hopper_ref_entry_t *entry = &h->refs[free_idx];
+  entry->offset = aligned;
+  entry->size = size;
+  entry->layout_id = 0;
+  entry->in_use = 1;
+
+  memset(h->arena + entry->offset, 0, entry->size);
+  h->cursor = aligned + size;
+
+  res.ok = 1;
+  res.ref = (hopper_ref_t)free_idx;
+  return res;
+}
+
+hopper_err_t hopper_free(hopper_t *h, hopper_ref_t ref) {
+  hopper_ref_entry_t *entry = NULL;
+  if (!ref_is_valid(h, ref, &entry)) {
+    return HOPPER_E_BAD_REF;
+  }
+  entry->in_use = 0;
+  entry->offset = 0;
+  entry->size = 0;
+  entry->layout_id = 0;
+  return HOPPER_OK;
+}
+
 static hopper_err_t ensure_layout_and_ref(hopper_t *h, hopper_ref_t ref, const hopper_layout_t **out_layout, hopper_ref_entry_t **out_entry) {
   hopper_ref_entry_t *entry = NULL;
   if (!ref_is_valid(h, ref, &entry)) {

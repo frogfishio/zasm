@@ -184,6 +184,18 @@ hopper_err_t hopper_init(void *hopper_storage, const hopper_config_t *cfg, hoppe
 hopper_err_t hopper_reset(hopper_t *h, int32_t wipe_arena);
 
 // ------------------------------
+// Generic allocations (no catalog required)
+// ------------------------------
+
+// Allocate an untyped buffer in the arena with optional alignment.
+// - layout_id for these refs is 0.
+// - align must be 1 or a power-of-two.
+hopper_result_ref_t hopper_alloc(hopper_t *h, uint32_t size, uint32_t align);
+
+// Releases a ref slot. Note: does not reclaim arena bytes (arena-style).
+hopper_err_t hopper_free(hopper_t *h, hopper_ref_t ref);
+
+// ------------------------------
 // Allocation & ref queries
 // ------------------------------
 
