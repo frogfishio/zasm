@@ -3,10 +3,15 @@
 
 main:
   LD HL, #1
-  CALL _alloc
+  CALL zi_alloc
+  LD IX, HL
   LD A, #65
   LD (HL), A
   LD DE, #1
-  CALL _out
-  CALL _free
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
+  LD HL, IX
+  CALL zi_free
   RET

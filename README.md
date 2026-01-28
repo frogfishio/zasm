@@ -149,7 +149,7 @@ zasm ships with **normative specifications** that third-party tools can rely on:
 - **IR Spec** (`docs/spec/ir.md`) — JSONL intermediate representation
 - **Opcode Spec** (`docs/spec/opcode_encoding.md`) — Binary encoding for native backends
 
-The **Integrator Pack** (`integrator_pack/`) provides schemas, conformance tests, and a reference C cloak implementation for third-party compiler authors.
+The historical **Integrator Pack** was ABI1-based and is now largely defunct; we will produce a new zABI 2.5 integrator pack later.
 
 ---
 
@@ -160,8 +160,10 @@ The **Integrator Pack** (`integrator_pack/`) provides schemas, conformance tests
 Building a domain-specific language? Emit JSONL IR and let zasm handle the hard parts:
 
 ```json
-{"ir":"zasm-v1.1","kind":"instr","op":"LD","ops":[{"t":"reg","v":"HL"},{"t":"sym","v":"msg"}],"loc":{"line":5}}
-{"ir":"zasm-v1.1","kind":"instr","op":"CALL","ops":[{"t":"sym","v":"_out"}],"loc":{"line":6}}
+{"ir":"zasm-v1.1","kind":"instr","op":"LD","ops":[{"t":"reg","v":"DE"},{"t":"sym","v":"msg"}],"loc":{"line":5}}
+{"ir":"zasm-v1.1","kind":"instr","op":"LD","ops":[{"t":"reg","v":"BC"},{"t":"sym","v":"msg_len"}],"loc":{"line":6}}
+{"ir":"zasm-v1.1","kind":"instr","op":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":1}],"loc":{"line":7}}
+{"ir":"zasm-v1.1","kind":"instr","op":"CALL","ops":[{"t":"sym","v":"zi_write"}],"loc":{"line":8}}
 ```
 
 No need to handle WASM's structured control flow—`zld` converts labels and jumps automatically.
@@ -170,7 +172,7 @@ No need to handle WASM's structured control flow—`zld` converts labels and jum
 
 Run untrusted code with full auditability:
 
-- Every host call is explicit (`CALL _out`, `CALL _alloc`)
+- Every host call is explicit (`CALL zi_write`, `CALL zi_alloc`)
 - No hidden syscalls or ambient capabilities
 - Memory bounds checked at the ABI level
 - Deterministic execution for replay/audit
@@ -186,7 +188,7 @@ Perfect for systems where the **hash is the identity**:
 
 ### ⚡ High-Performance Stream Processing
 
-The `(HL, DE)` = `(ptr, len)` slice convention enables:
+The `(DE, BC)` = `(ptr, len)` slice convention (with `HL` as a handle for `zi_read/zi_write`) enables:
 
 - O(1) length lookups (no NUL scanning)
 - Zero-copy buffer passing
@@ -221,7 +223,10 @@ RET
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg:      STR "Hello from zasm!"

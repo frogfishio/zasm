@@ -4,7 +4,10 @@
 main:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg: DB "A", 10, 0

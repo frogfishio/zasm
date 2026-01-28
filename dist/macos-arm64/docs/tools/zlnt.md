@@ -30,4 +30,8 @@ bin/zlnt --tool build/app.jsonl
 
 ## Warnings
 
-- `CALL _out` warns if `HL` or `DE` may be undefined at the call site, and includes the instruction context in the warning text.
+`zlnt` checks register-definition rules at `CALL` sites for zABI hostcalls. For example:
+
+- `CALL zi_write` requires `HL` (handle), `DE` (ptr), `BC` (len)
+- `CALL zi_read` requires `HL` (handle), `DE` (ptr), `BC` (cap)
+- `CALL zi_telemetry` requires `HL`/`DE`/`BC`/`IX`

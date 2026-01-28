@@ -1,2 +1,2 @@
-CALL _log
+CALL zi_telemetry
 RET

@@ -532,7 +532,7 @@ test-manifest: zas zld
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --manifest > build/hello.manifest.json
 	@$(RG) -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
 	@$(RG) -q -F '"lembeh_handle"' build/hello.manifest.json
-	@$(RG) -q -F '"_out"' build/hello.manifest.json
+	@$(RG) -q -F '"primitives":[]' build/hello.manifest.json
 
 test-bytes: zas zld zrun
 	cat examples/bytes.asm | $(BIN)/zas | $(BIN)/zld > build/bytes.wat
@@ -575,7 +575,7 @@ test-twofile: zas zld zrun
 test-strict: zas zld zrun
 	cat examples/bad_strict.asm | $(BIN)/zas | $(BIN)/zld > build/bad_strict.wat
 	@$(BIN)/zrun build/bad_strict.wat > build/bad_strict.out 2>build/bad_strict.err
-	@bash -ec "if $(BIN)/zrun --strict build/bad_strict.wat > build/bad_strict_strict.out 2>build/bad_strict_strict.err; then echo \"expected strict failure\"; exit 1; fi; $(RG) -q -F 'res_write OOB' build/bad_strict_strict.err"
+	@bash -ec "if $(BIN)/zrun --strict build/bad_strict.wat > build/bad_strict_strict.out 2>build/bad_strict_strict.err; then echo \"expected strict failure\"; exit 1; fi; $(RG) -q -F 'zi_write OOB' build/bad_strict_strict.err"
 
 test-trap: zas zld zrun
 	cat examples/bad_trap.asm | $(BIN)/zas | $(BIN)/zld > build/bad_trap.wat

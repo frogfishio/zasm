@@ -25,13 +25,19 @@ dead_code:
   ; this should be stripped (deleted)
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg:      DB "Hello, Zing from Zilog!", 10

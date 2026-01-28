@@ -1,9 +1,10 @@
-LD IX, buf
-LD HL, buf
-LD DE, 0
-CALL _in
-LD DE, HL
-LD HL, IX
-CALL _out
+LD DE, buf
+LD BC, 0
+LD HL, 0
+CALL zi_read
+LD BC, HL
+LD DE, buf
+LD HL, 1
+CALL zi_write
 RET
 buf: RESB 8

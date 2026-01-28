@@ -5,7 +5,10 @@ main:
 read_loop:
   LD HL, buf
   LD DE, #4096
-  CALL _in          ; HL := n
+  LD BC, DE
+  LD DE, HL
+  LD HL, #0
+  CALL zi_read      ; HL := n
   LD IX, HL         ; total length
   LD DE, HL         ; remaining
   LD HL, buf
@@ -39,7 +42,10 @@ no_up:
 
   LD HL, buf
   LD DE, IX
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   JR read_loop
 
 loop_cont:

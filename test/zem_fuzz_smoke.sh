@@ -15,9 +15,10 @@ log="$tmpdir/log"
 
 cat >"$asm" <<'EOF'
 main:
-  LD HL, buf
-  LD DE, #1
-  CALL _in
+  LD HL, #0
+  LD DE, buf
+  LD BC, #1
+  CALL zi_read
   CP HL, #1
   JR ne, done
 

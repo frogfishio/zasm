@@ -24,7 +24,7 @@ RET
 
 main:
   LD HL, 4
-  CALL _alloc
+  CALL zi_alloc
 
   ; Fresh heap should be zero in normal mode.
   LD A, (HL)

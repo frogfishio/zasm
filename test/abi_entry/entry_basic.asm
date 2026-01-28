@@ -1,2 +1,1 @@
-CALL _out
 RET

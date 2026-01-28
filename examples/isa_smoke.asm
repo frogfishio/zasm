@@ -46,7 +46,10 @@ fail:
 out:
   LD HL, BC
   LD DE, #2
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 buf: RESB 2

@@ -30,24 +30,32 @@ manifest="$build_dir/primitives.manifest.json"
 rg -q "mode=tool" "$verbose"
 rg -q "records=" "$verbose"
 
-rg -q 'import "lembeh" "req_read".*\(param i32 i32 i32\).*\(result i32\)' "$wat"
-rg -q 'import "lembeh" "res_write".*\(param i32 i32 i32\).*\(result i32\)' "$wat"
-rg -q 'import "lembeh" "res_end".*\(param i32\)' "$wat"
-rg -q 'import "lembeh" "log".*\(param i32 i32 i32 i32\)' "$wat"
-rg -q 'import "lembeh" "_ctl".*\(param i32 i32 i32 i32\).*(result i32)' "$wat"
-rg -q 'import "lembeh" "alloc".*\(param i32\).*\(result i32\)' "$wat"
-rg -q 'import "lembeh" "free".*\(param i32\)' "$wat"
+rg -q 'import "env" "zi_read".*\(param i32 i64 i32\).*\(result i32\)' "$wat"
+rg -q 'import "env" "zi_write".*\(param i32 i64 i32\).*\(result i32\)' "$wat"
+rg -q 'import "env" "zi_end".*\(param i32\).*(result i32)' "$wat"
+rg -q 'import "env" "zi_telemetry".*\(param i64 i32 i64 i32\).*(result i32)' "$wat"
+rg -q 'import "env" "zi_alloc".*\(param i32\).*\(result i64\)' "$wat"
+rg -q 'import "env" "zi_free".*\(param i64\).*\(result i32\)' "$wat"
 rg -q 'func \$lembeh_handle \(export "lembeh_handle"\)' "$wat"
 
 awk '
   /func \$lembeh_handle/ {in_func=1}
   in_func && /call \$main/ {main=1}
-  in_func && /call \$res_end/ {if (main) ok=1}
+  in_func && /call \$zi_end/ {if (main) ok=1}
   in_func && /^  \)/ {exit ok ? 0 : 1}
   END {exit ok ? 0 : 1}
 ' "$wat"
 
-rg -q '"primitives":\["_in","_out","_log","_alloc","_free","_ctl"\]' "$manifest"
+rg -q '"primitives":\[\]' "$manifest"
+
+legacy_jsonl="$build_dir/legacy_primitives.jsonl"
+legacy_err="$build_dir/legacy_primitives.err.txt"
+"$zas_bin" --tool -o "$legacy_jsonl" "$asm_dir/legacy_primitives.asm"
+if "$zld_bin" --tool --verbose -o "$build_dir/legacy_primitives.wat" "$legacy_jsonl" 2> "$legacy_err"; then
+  echo "expected failure for legacy primitives" >&2
+  exit 1
+fi
+rg -q "legacy primitive CALL _in is not supported" "$legacy_err"
 
 public_jsonl="$build_dir/public_lembeh_handle.jsonl"
 public_err="$build_dir/public_lembeh_handle.err.txt"
@@ -68,9 +76,4 @@ if "$zld_bin" --tool --verbose -o "$build_dir/extern_primitive.wat" "$extern_jso
 fi
 rg -q "EXTERN cannot define primitive _alloc" "$extern_err"
 
-allow_err="$build_dir/allowlist.err.txt"
-if ZLD_ALLOW_PRIMS=none "$zld_bin" --tool --verbose -o "$build_dir/allowlist.wat" "$jsonl" 2> "$allow_err"; then
-  echo "expected failure for ZLD_ALLOW_PRIMS=none" >&2
-  exit 1
-fi
-rg -q "primitive _in disabled" "$allow_err"
+

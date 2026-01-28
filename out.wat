@@ -7,7 +7,7 @@
   (import "env" "zi_end"           (func $zi_end           (param i32) (result i32)))
   (import "env" "zi_alloc"         (func $zi_alloc         (param i32) (result i64)))
   (import "env" "zi_free"          (func $zi_free          (param i64) (result i32)))
-  (import "env" "zi_telemetry"     (func $zi_telemetry     (param i32 i32 i32 i32) (result i32)))
+  (import "env" "zi_telemetry"     (func $zi_telemetry     (param i64 i32 i64 i32) (result i32)))
   (import "env" "zi_cap_count"     (func $zi_cap_count     (result i32)))
   (import "env" "zi_cap_get_size"  (func $zi_cap_get_size  (param i32) (result i32)))
   (import "env" "zi_cap_get"       (func $zi_cap_get       (param i32 i64 i32) (result i32)))
@@ -127,13 +127,31 @@
         local.tee $DE
         i64.extend_i32_s
         local.set $DE64
-        ;; line 13: CALL
-        local.get $res
-        local.get $HL64
+        ;; line 13: LD
         local.get $DE
+        local.tee $BC
+        i64.extend_i32_s
+        local.set $BC64
+        ;; line 14: LD
+        local.get $HL
+        local.tee $DE
+        i64.extend_i32_s
+        local.set $DE64
+        ;; line 15: LD
+    i32.const 1
+        local.tee $HL
+        i64.extend_i32_s
+        local.set $HL64
+        ;; line 16: CALL
+        local.get $HL
+        local.get $DE
+        i64.extend_i32_u
+        local.get $BC
         call $zi_write
-        drop
-        ;; line 14: RET
+        local.tee $HL
+        i64.extend_i32_s
+        local.set $HL64
+        ;; line 17: RET
         br $exit
       )
     )

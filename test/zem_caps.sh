@@ -16,6 +16,6 @@ echo "$out" | grep -q 'async/default'
 
 # With libzingcap_exec linked, exec selectors should be present.
 echo "$out" | grep -q '^exec\.selectors:'
-echo "$out" | grep -q 'exec/default'
+echo "$out" | grep -q 'exec/run'
 
 echo "ok"

@@ -82,7 +82,10 @@ static void diag_emit(const char* level, const char* file, int line, const char*
 }
 
 static int is_primitive(const char* s) {
-  return s && s[0] == '_';
+  if (!s) return 0;
+  if (s[0] == '_') return 1;
+  if (strncmp(s, "zi_", 3) == 0) return 1;
+  return 0;
 }
 
 typedef struct {
@@ -363,6 +366,10 @@ static int analyze_function(const char* fname, const recvec_t* recs, size_t star
         if (strcmp(r->m, "CALL") == 0 && r->nops == 1 && r->ops[0].t == JOP_SYM) {
           const char* callee = r->ops[0].s;
           if (strcmp(callee, "_in") == 0 || strcmp(callee, "_alloc") == 0) st |= REG_HL;
+          if (strcmp(callee, "zi_read") == 0 || strcmp(callee, "zi_write") == 0 ||
+              strcmp(callee, "zi_alloc") == 0 || strcmp(callee, "zi_enum_alloc") == 0) {
+            st |= REG_HL;
+          }
           continue;
         }
       }
@@ -495,6 +502,29 @@ static int analyze_function(const char* fname, const recvec_t* recs, size_t star
           st |= REG_HL;
         } else if (strcmp(callee, "_free") == 0) {
           errors |= check_use(st, REG_HL, "HL", r->line, fname);
+        } else if (strcmp(callee, "zi_write") == 0) {
+          errors |= check_use(st, REG_HL, "HL", r->line, fname);
+          errors |= check_use(st, REG_DE, "DE", r->line, fname);
+          errors |= check_use(st, REG_BC, "BC", r->line, fname);
+          st |= REG_HL;
+        } else if (strcmp(callee, "zi_read") == 0) {
+          errors |= check_use(st, REG_HL, "HL", r->line, fname);
+          errors |= check_use(st, REG_DE, "DE", r->line, fname);
+          errors |= check_use(st, REG_BC, "BC", r->line, fname);
+          st |= REG_HL;
+        } else if (strcmp(callee, "zi_telemetry") == 0) {
+          errors |= check_use(st, REG_HL, "HL", r->line, fname);
+          errors |= check_use(st, REG_DE, "DE", r->line, fname);
+          errors |= check_use(st, REG_BC, "BC", r->line, fname);
+          errors |= check_use(st, REG_IX, "IX", r->line, fname);
+        } else if (strcmp(callee, "zi_alloc") == 0) {
+          errors |= check_use(st, REG_HL, "HL", r->line, fname);
+          st |= REG_HL;
+        } else if (strcmp(callee, "zi_free") == 0) {
+          errors |= check_use(st, REG_HL, "HL", r->line, fname);
+        } else if (strcmp(callee, "zi_enum_alloc") == 0) {
+          errors |= check_use(st, REG_BC, "BC", r->line, fname);
+          st |= REG_HL;
         }
       }
 

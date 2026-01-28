@@ -1,5 +1,6 @@
-LD HL, buf
-LD DE, 0
-CALL _out
+LD DE, buf
+LD BC, 0
+LD HL, 1
+CALL zi_write
 RET
 buf: DB "ABC", 0

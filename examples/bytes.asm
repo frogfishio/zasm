@@ -9,7 +9,10 @@ main:
   LD A, (HL)
   LD HL, buf
   LD DE, #1
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 buf: RESB 4

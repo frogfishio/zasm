@@ -201,6 +201,19 @@ static wasm_functype_t* functype_i32_i32_i32_i32_to_i32(void) {
   return wasm_functype_new(&params, &results);
 }
 
+static wasm_functype_t* functype_i64_i32_i64_i32_to_i32(void) {
+  wasm_valtype_vec_t params;
+  wasm_valtype_vec_new_uninitialized(&params, 4);
+  params.data[0] = wasm_valtype_new_i64();
+  params.data[1] = wasm_valtype_new_i32();
+  params.data[2] = wasm_valtype_new_i64();
+  params.data[3] = wasm_valtype_new_i32();
+  wasm_valtype_vec_t results;
+  wasm_valtype_vec_new_uninitialized(&results, 1);
+  results.data[0] = wasm_valtype_new_i32();
+  return wasm_functype_new(&params, &results);
+}
+
 static wasm_functype_t* functype_i64_to_i32(void) {
   wasm_valtype_vec_t params;
   wasm_valtype_vec_new_uninitialized(&params, 1);
@@ -308,7 +321,7 @@ int zrun_link_zabi_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
   wasm_functype_delete(ty);
   if (err) { zrun_print_error(err); return 1; }
 
-  ty = functype_i32_i32_i32_i32_to_i32();
+  ty = functype_i64_i32_i64_i32_to_i32();
   err = wasmtime_linker_define_func(linker, LIT("env"), LIT("zi_telemetry"), ty,
                                     zrun_zi_telemetry, env, NULL);
   wasm_functype_delete(ty);

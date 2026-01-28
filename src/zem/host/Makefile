@@ -19,7 +19,7 @@ CFLAGS += -I$(HOPPER_INC)
 ZINGCORE_OBJS = $(BUILD)/ctl_common.o $(BUILD)/zi_async.o $(BUILD)/zi_hopper.o $(BUILD)/zingcore.o
 ZINGMAIN_OBJ = $(BUILD)/main.o $(BUILD)/test_files.o $(BUILD)/test_exec.o $(BUILD)/test_exec_run.o $(BUILD)/test_net.o $(BUILD)/test_net_loop.o $(BUILD)/test_hopper.o
 ZINGCAP_ASYNC_OBJ = $(BUILD)/cap_async.o $(BUILD)/cap_async_ping.o $(BUILD)/cap_async_pending.o
-ZINGCAP_EXEC_OBJ = $(BUILD)/cap_exec_fake.o $(BUILD)/cap_exec_run.o
+ZINGCAP_EXEC_OBJ = $(BUILD)/cap_exec_run.o
 ZINGCAP_NET_OBJ  = $(BUILD)/cap_net_echo.o $(BUILD)/cap_net_loop.o
 ZINGCAP_FILES_OBJ = $(BUILD)/cap_files_cap.o $(BUILD)/cap_files_list.o $(BUILD)/cap_files_open.o $(BUILD)/cap_files_create.o $(BUILD)/cap_files_overwrite.o $(BUILD)/cap_files_truncate.o $(BUILD)/cap_files_seek.o $(BUILD)/cap_files_delete.o $(BUILD)/files_store.o
 
@@ -80,9 +80,6 @@ $(BUILD)/cap_async_ping.o: cap/async/selector_ping.c include/zi_async.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cap_async_pending.o: cap/async/selector_pending.c include/zi_async.h | dirs
-	$(CC) $(CFLAGS) -c $< -o $@
-
-$(BUILD)/cap_exec_fake.o: cap/async/exec/selector_exec_fake.c include/zi_async.h | dirs
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD)/cap_exec_run.o: cap/async/exec/selector_exec_run.c include/zi_async.h | dirs

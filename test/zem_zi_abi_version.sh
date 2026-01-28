@@ -4,7 +4,7 @@
 
 set -euo pipefail
 
-# Verify zi_abi_version returns 0x00020000.
+# Verify zi_abi_version returns 0x00020005.
 # We print it as decimal using the existing res_write_u32 helper.
 
 tmpdir="$(mktemp -d)"
@@ -21,7 +21,7 @@ RET
 
 main:
   CALL zi_abi_version
-  ; HL now contains 0x00020000 == 131072
+  ; HL now contains 0x00020005 == 131077
   LD DE, HL
   LD HL, 1
   CALL res_write_u32
@@ -32,7 +32,7 @@ bin/zas --tool -o "$jsonl" "$asm"
 
 bin/zem "$jsonl" >"$out"
 
-printf '131072' >"$exp"
+printf '131077' >"$exp"
 
 if ! cmp -s "$out" "$exp"; then
   echo "mismatch for zi_abi_version" >&2

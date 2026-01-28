@@ -7,7 +7,7 @@
 
 ## MVP capabilities (current)
 
-- Imports zABI 2.0 syscalls under module `"env"` (e.g. `zi_read`, `zi_write`, `zi_end`, `zi_alloc`, `zi_free`, `zi_telemetry`).
+- Imports zABI 2.5 syscalls under module `"env"` (e.g. `zi_read`, `zi_write`, `zi_end`, `zi_alloc`, `zi_free`, `zi_telemetry`).
 - Exports `lembeh_handle(req, res)` which calls `$main`, then `zi_end(res)`.
 - Emits a `__heap_base` global for the allocator to seed dynamic memory.
 - Supports Zilog-mode subset used by `examples/hello.asm`:
@@ -47,15 +47,9 @@ For debug visibility, each instruction emits a `;; line N: MNEMONIC` comment in 
 
 ## Primitives
 
-Leading-underscore symbols are reserved for host primitives.
+`zld` targets the zABI syscall surface (`zi_*` imports under module `"env"`).
 
-- `CALL _out` lowers to: `zi_write(res, HL, DE)` (return value dropped)
-- `CALL _in` lowers to: `HL := zi_read(req, HL, DE)`
-- `CALL _log` lowers to: `zi_telemetry(HL, DE, BC, IX)`
-- `CALL _alloc` lowers to: `HL := zi_alloc(HL)`
-- `CALL _free` lowers to: `HL := zi_free(HL)`
-
-Other primitives (e.g. `_time`, `_crypto`) are rejected for now.
+Leading-underscore primitives (e.g. `_in/_out/_log/_alloc/_free`) are **not supported** and fail with a hard error.
 
 ## Directives
 
@@ -110,14 +104,4 @@ bin/zld --tool -o build/app.wat build/app.jsonl
 `zld` requires every JSONL record to include an `ir` version tag and rejects missing or
 unknown versions.
 
-## Primitive allowlist
 
-`zld` can fail closed for host primitives by setting `ZLD_ALLOW_PRIMS`.
-
-Examples:
-
-- `ZLD_ALLOW_PRIMS=all` (default)
-- `ZLD_ALLOW_PRIMS=none`
-- `ZLD_ALLOW_PRIMS=in,out,log,ctl`
-
-When a primitive is disabled, `CALL _in/_out/_log/_alloc/_free/_ctl` fails with a hard error.

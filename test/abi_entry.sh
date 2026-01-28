@@ -31,13 +31,13 @@ rg -q 'func \$lembeh_handle \(export "lembeh_handle"\)' "$wat"
 awk '
   /func \$lembeh_handle/ {in_func=1}
   in_func && /call \$main/ {main=1}
-  in_func && /call \$res_end/ {if (main) ok=1}
+  in_func && /call \$zi_end/ {if (main) ok=1}
   in_func && /^  \)/ {exit ok ? 0 : 1}
   END {exit ok ? 0 : 1}
 ' "$wat"
 
 rg -q '"exports":\["lembeh_handle"\]' "$manifest"
 rg -q '"imports":\[\]' "$manifest"
-rg -q '"primitives":\["_out"\]' "$manifest"
+rg -q '"primitives":\[\]' "$manifest"
 
 echo "ABI entry/manifest tests passed."

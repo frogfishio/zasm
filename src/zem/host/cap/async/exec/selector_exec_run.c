@@ -130,7 +130,7 @@ static int exec_run_cancel(void* ctx, uint64_t future_id) {
 
 static const zi_async_selector sel_exec_run = {
   .cap_kind = "exec",
-  .cap_name = "default",
+  .cap_name = "run",
   .selector = "exec.run.v1",
   .invoke = exec_run_invoke,
   .cancel = exec_run_cancel,

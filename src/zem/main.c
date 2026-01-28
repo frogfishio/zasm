@@ -41,9 +41,9 @@ int ztriage_main(int argc, char **argv);
 int zduel_main(int argc, char **argv);
 
 // Optional: query the host-side capability registry (if linked).
-#include "zingcore/include/zi_caps.h"
-#include "zingcore/include/zi_async.h"
-#include "zingcore/include/zing_hash.h"
+#include "zingcore2.2_final/zingcore/include/zi_caps.h"
+#include "zingcore2.2_final/zingcore/include/zi_async.h"
+#include "zingcore2.2_final/zingcore/include/zing_hash.h"
 
 // Allow zem to link even if a different host runtime omits caps.
 #if defined(__APPLE__)
@@ -52,6 +52,12 @@ __attribute__((weak_import))
 __attribute__((weak))
 #endif
 const zi_cap_registry_v1 *zi_cap_registry(void);
+
+static int has_selector(const char *kind, const char *name, const char *selector) {
+  if (!kind || !name || !selector) return 0;
+  return zi_async_find(kind, strlen(kind), name, strlen(name), selector,
+                       strlen(selector)) != NULL;
+}
 
 static void print_caps(FILE *out) {
   if (!zi_cap_registry) {
@@ -69,26 +75,17 @@ static void print_caps(FILE *out) {
             c->cap_flags);
   }
 
-  // Also surface async selectors (this is where exec lives today).
-  const zi_async_registry_v1 *areg = zi_async_registry();
-  size_t total = (areg && areg->selectors) ? areg->selector_count : 0;
-
-  // Collect exec selectors for a compact view.
-  const zi_async_selector *exec_sel[64];
-  size_t exec_n = 0;
-  for (size_t i = 0;
-       i < total && exec_n < (sizeof(exec_sel) / sizeof(exec_sel[0])); i++) {
-    const zi_async_selector *s = areg->selectors[i];
-    if (!s || !s->cap_kind || !s->cap_name || !s->selector) continue;
-    if (strcmp(s->cap_kind, "exec") == 0) {
-      exec_sel[exec_n++] = s;
-    }
-  }
-
-  fprintf(out, "exec.selectors: %zu\n", exec_n);
-  for (size_t i = 0; i < exec_n; i++) {
-    const zi_async_selector *s = exec_sel[i];
-    fprintf(out, "- %s/%s %s\n", s->cap_kind, s->cap_name, s->selector);
+  // Zingcore 2.2 exposes selector registration via zi_async_register/zi_async_find,
+  // but does not (currently) provide a public enumeration API. For debugging and
+  // smoke tests, probe for a small set of well-known selectors.
+  fprintf(out, "exec.selectors:\n");
+  int has_exec = has_selector("exec", "run", "exec.run.v1");
+  if (has_exec) {
+    fprintf(out, "- exec/run");
+    if (has_selector("exec", "run", "exec.run.v1")) fprintf(out, " exec.run.v1");
+    fprintf(out, "\n");
+  } else {
+    fprintf(out, "- (none)\n");
   }
 }
 
@@ -149,7 +146,7 @@ static void print_help(FILE *out) {
       "  - Instructions: LD, ADD, SUB, AND, OR, XOR, INC, DEC, CP, JR,\n",
       "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n",
       "  - Primitives (Zingcore ABI v2, preferred):\n",
-      "               CALL zi_abi_version   (HL=0x00020000)\n",
+      "               CALL zi_abi_version   (HL=0x00020005)\n",
       "               CALL zi_abi_features  (DE:HL = feature bits)\n",
       "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n",
       "               CALL zi_free          (HL=ptr, HL=rc)\n",
@@ -171,20 +168,8 @@ static void print_help(FILE *out) {
       "               CALL zi_hop_used      (HL=scope, HL=used)\n",
       "               CALL zi_hop_cap       (HL=scope, HL=cap)\n",
       "\n",
-      "  - Legacy primitives (supported for older IR):\n",
-      "               CALL _out (HL=ptr, DE=len)\n",
-      "               CALL _in  (HL=ptr, DE=cap, HL=nread)\n",
-      "               CALL _log (HL=topic_ptr, DE=topic_len, BC=msg_ptr, IX=msg_len)\n",
-      "               CALL _alloc (HL=size, HL=ptr)\n",
-      "               CALL _free  (HL=ptr)\n",
-      "               CALL _ctl   (HL=req_ptr, DE=req_len, BC=resp_ptr, IX=resp_cap, HL=resp_len)\n",
-      "               CALL _cap   (HL=idx, HL=value)\n",
+      "  - Legacy underscore primitives are not supported.\n",
       "\n",
-      "Debugging:\n",
-      "  --trace            Emit per-instruction JSONL events to stderr\n",
-      "                    (step events include CALL/RET metadata)\n",
-      "  --trace-jsonl-out PATH Write trace JSONL (step+mem) to PATH ('-' for stdout, or 'stderr')\n",
-      "  --coverage         Record per-PC hit counts and emit a coverage report\n",
       "  --coverage-out PATH Write coverage JSONL to PATH\n",
       "  --coverage-merge PATH Merge existing coverage JSONL from PATH into this run\n",
       "  --coverage-blackholes N Print top-N labels with uncovered instructions\n",
@@ -485,8 +470,8 @@ int main(int argc, char **argv) {
       return 0;
     }
     if (strcmp(argv[i], "--version") == 0) {
-      // Zingcore ABI v2.0 (syscall-style, zi_*) compatibility tag.
-      const uint32_t abi_ver = 0x00020000u;
+      // Zingcore ABI v2.5 (syscall-style, zi_*) compatibility tag.
+      const uint32_t abi_ver = 0x00020005u;
       printf("zem %s (ABI 0x%08x)\n", ZASM_VERSION, abi_ver);
       return 0;
     }

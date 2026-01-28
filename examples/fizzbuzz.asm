@@ -41,7 +41,10 @@ do_fizz:
 
   LD HL, fizz
   LD DE, fizz_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   LD BC, #0
   LD HL, c5_save
   LD A, (HL)
@@ -50,16 +53,24 @@ do_fizz:
   JR loop_continue
 
 do_buzz:
+  LD IX, BC
   LD HL, buzz
   LD DE, buzz_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
+  LD BC, IX
   LD DE, #0
   JR loop_continue
 
 do_fizzbuzz:
   LD HL, fizzbuzz
   LD DE, fizzbuzz_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   LD BC, #0
   LD DE, #0
   JR loop_continue
@@ -117,7 +128,10 @@ tens_done:
 
   LD HL, num_buf
   LD DE, #3
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   JR restore_counts
 
 one_digit:
@@ -134,13 +148,19 @@ one_digit:
 
   LD HL, num_buf
   LD DE, #2
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   JR restore_counts
 
 print_100:
   LD HL, onehund
   LD DE, onehund_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
 
 restore_counts:
   LD HL, c3_save

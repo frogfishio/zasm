@@ -107,12 +107,12 @@ cat main.asm lib/itoa.asm | bin/zas | bin/zld > build/app.wat
 
 ## 4. Authoring Modules (ZASM)
 
-### The `(HL, DE)` Slice Convention
+### The `(DE, BC)` Slice Convention
 
 All I/O in the standard system ABI revolves around the "Slice." Instead of passing pointers and assuming null-terminators, we pass an explicit `(ptr, len)` pair.
 
-* **HL:** Points to the start of the data in linear memory.
-* **DE:** Contains the length of the data (number of bytes).
+* **DE:** Points to the start of the data in linear memory.
+* **BC:** Contains the length of the data (number of bytes).
 
 ### Example: A Reusable Library Function
 
@@ -125,7 +125,10 @@ All I/O in the standard system ABI revolves around the "Slice." Instead of passi
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out      ; Host primitive for output
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write  ; zABI hostcall for output
   RET
 
 msg: STR "Hello, zasm!", 10
@@ -157,8 +160,7 @@ Because `zld` calculates offsets and label positions in a single stable pass ove
 
 ### Current Security Checks:
 
-* **Register Definitions:** Warns if `_out` is called without `HL` and `DE` being defined.
-* **Register Use Errors:** Errors if `_in/_log/_alloc/_free` are called without required registers being defined.
+* **Register Use Errors:** Errors if `zi_*` hostcalls are called without required registers being defined.
 
 ---
 

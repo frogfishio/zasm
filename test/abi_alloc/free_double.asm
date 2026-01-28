@@ -1,5 +1,5 @@
 LD HL, 4
-CALL _alloc
-CALL _free
-CALL _free
+CALL zi_alloc
+CALL zi_free
+CALL zi_free
 RET

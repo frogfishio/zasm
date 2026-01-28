@@ -47,17 +47,6 @@ static void allocs_add(zrun_abi_env_t* e, size_t ptr) {
   e->allocs[e->allocs_n++] = ptr;
 }
 
-static int allocs_remove(zrun_abi_env_t* e, size_t ptr) {
-  for (size_t i = 0; i < e->allocs_n; i++) {
-    if (e->allocs[i] == ptr) {
-      e->allocs[i] = e->allocs[e->allocs_n - 1];
-      e->allocs_n--;
-      return 1;
-    }
-  }
-  return 0;
-}
-
 static int get_global_i32(wasmtime_caller_t* caller, const char* name, int32_t* out) {
   wasmtime_extern_t ext;
   if (!wasmtime_caller_export_get(caller, name, strlen(name), &ext)) return 0;
@@ -180,8 +169,8 @@ wasm_trap_t* zrun_zi_abi_version(void* env, wasmtime_caller_t* caller,
   (void)nargs;
   if (nresults < 1) return NULL;
   results[0].kind = WASMTIME_I32;
-  results[0].of.i32 = 0x00020000;
-  tracef((zrun_abi_env_t*)env, "zi_abi_version -> 0x00020000");
+  results[0].of.i32 = 0x00020005;
+  tracef((zrun_abi_env_t*)env, "zi_abi_version -> 0x00020005");
   return NULL;
 }
 
@@ -298,7 +287,7 @@ wasm_trap_t* zrun_zi_alloc(void* env, wasmtime_caller_t* caller,
   results[0].kind = WASMTIME_I64;
   int32_t size = args[0].of.i32;
   tracef(e, "zi_alloc(size=%d)", size);
-  if (size <= 0) { results[0].of.i64 = (int64_t)ZI_E_INVALID; return NULL; }
+  if (size < 0) { results[0].of.i64 = (int64_t)ZI_E_INVALID; return NULL; }
 
   wasmtime_memory_t mem;
   if (!get_memory_from_caller(caller, &mem)) {
@@ -319,11 +308,18 @@ wasm_trap_t* zrun_zi_alloc(void* env, wasmtime_caller_t* caller,
     e->heap_init = 1;
   }
 
+  if (size == 0) {
+    size_t out = e->heap_ptr;
+    tracef(e, "alloc -> %zu", out);
+    results[0].of.i64 = (int64_t)out;
+    return NULL;
+  }
+
   size_t n = (size_t)size;
   size_t aligned = (n + 7u) & ~((size_t)7);
   size_t out = e->heap_ptr;
   size_t want_end = out + aligned;
-  if (want_end > e->mem_cap_bytes) { results[0].of.i64 = (int64_t)ZI_E_OOM; return NULL; }
+  if (want_end > e->mem_cap_bytes) return trap_msg("OOM: exceeded runner cap");
 
   size_t current_pages = wasmtime_memory_size(ctx, &mem);
   size_t current_bytes = current_pages * 65536ull;
@@ -340,6 +336,7 @@ wasm_trap_t* zrun_zi_alloc(void* env, wasmtime_caller_t* caller,
 
   e->heap_ptr += aligned;
   allocs_add(e, out);
+  tracef(e, "alloc -> %zu", out);
   results[0].of.i64 = (int64_t)out;
   return NULL;
 }
@@ -355,12 +352,24 @@ wasm_trap_t* zrun_zi_free(void* env, wasmtime_caller_t* caller,
   if (nargs < 1) return NULL;
   int64_t ptr = args[0].of.i64;
   tracef(e, "zi_free(ptr=%" PRId64 ")", ptr);
-  if (ptr <= 0 || ptr > (int64_t)SIZE_MAX) { results[0].of.i32 = ZI_E_INVALID; return NULL; }
-  if (!allocs_remove(e, (size_t)ptr)) {
-    if (e->strict) return trap_msg("zrun: zi_free unknown pointer");
+  if (ptr <= 0 || ptr > (int64_t)SIZE_MAX) {
+    if (e->strict) return trap_msg("zrun: free of unknown pointer");
     results[0].of.i32 = ZI_E_INVALID;
     return NULL;
   }
+
+  size_t p = (size_t)ptr;
+  size_t idx = (size_t)-1;
+  for (size_t i = 0; i < e->allocs_n; i++) {
+    if (e->allocs[i] == p) { idx = i; break; }
+  }
+  if (idx == (size_t)-1) {
+    if (e->strict) return trap_msg("zrun: free of unknown pointer");
+    results[0].of.i32 = ZI_E_INVALID;
+    return NULL;
+  }
+  e->allocs[idx] = e->allocs[e->allocs_n - 1];
+  e->allocs_n--;
   return NULL;
 }
 
@@ -372,23 +381,24 @@ wasm_trap_t* zrun_zi_telemetry(void* env, wasmtime_caller_t* caller,
   results[0].kind = WASMTIME_I32;
   results[0].of.i32 = ZI_OK;
   if (nargs < 4) return NULL;
-  int32_t topic_ptr = args[0].of.i32;
+  int64_t topic_ptr = args[0].of.i64;
   int32_t topic_len = args[1].of.i32;
-  int32_t msg_ptr = args[2].of.i32;
+  int64_t msg_ptr = args[2].of.i64;
   int32_t msg_len = args[3].of.i32;
-  tracef(e, "zi_telemetry(topic_ptr=%d, topic_len=%d, msg_ptr=%d, msg_len=%d)",
-         topic_ptr, topic_len, msg_ptr, msg_len);
+  tracef(e, "zi_telemetry(topic_ptr=%" PRId64 ", topic_len=%d, msg_ptr=%" PRId64 ", msg_len=%d)",
+    topic_ptr, topic_len, msg_ptr, msg_len);
   uint8_t* topic = NULL;
   uint8_t* msg = NULL;
   size_t topic_n = 0, msg_n = 0;
-  if (!mem_span(caller, topic_ptr, topic_len, &topic, &topic_n) ||
-      !mem_span(caller, msg_ptr, msg_len, &msg, &msg_n)) {
+  if (!mem_span64(caller, topic_ptr, topic_len, &topic, &topic_n) ||
+      !mem_span64(caller, msg_ptr, msg_len, &msg, &msg_n)) {
     if (e->strict) return trap_msg("zrun: zi_telemetry OOB");
     results[0].of.i32 = ZI_E_BOUNDS;
     return NULL;
   }
+  fputc('[', stderr);
   fwrite(topic, 1, topic_n, stderr);
-  fputs(": ", stderr);
+  fputs("] ", stderr);
   fwrite(msg, 1, msg_n, stderr);
   fputc('\n', stderr);
   fflush(stderr);

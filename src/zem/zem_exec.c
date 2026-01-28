@@ -2791,7 +2791,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       //  - return i32 in HL
       //  - return u64 in (DE:HL) as (hi32:lo32)
       enum {
-        ZI_ABI_V2_0 = 0x00020000u,
+        ZI_ABI_V2_5 = 0x00020005u,
         ZI_OK = 0,
         ZI_E_INVALID = -1,
         ZI_E_BOUNDS = -2,
@@ -2802,7 +2802,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
 
       if (strcmp(callee, "zi_abi_version") == 0) {
         if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
-        regs.HL = (uint64_t)ZI_ABI_V2_0;
+        regs.HL = (uint64_t)ZI_ABI_V2_5;
         zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                          r->m);
         pc++;

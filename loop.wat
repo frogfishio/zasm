@@ -7,7 +7,7 @@
   (import "env" "zi_end"           (func $zi_end           (param i32) (result i32)))
   (import "env" "zi_alloc"         (func $zi_alloc         (param i32) (result i64)))
   (import "env" "zi_free"          (func $zi_free          (param i64) (result i32)))
-  (import "env" "zi_telemetry"     (func $zi_telemetry     (param i32 i32 i32 i32) (result i32)))
+  (import "env" "zi_telemetry"     (func $zi_telemetry     (param i64 i32 i64 i32) (result i32)))
   (import "env" "zi_cap_count"     (func $zi_cap_count     (result i32)))
   (import "env" "zi_cap_get_size"  (func $zi_cap_get_size  (param i32) (result i32)))
   (import "env" "zi_cap_get"       (func $zi_cap_get       (param i32 i64 i32) (result i32)))

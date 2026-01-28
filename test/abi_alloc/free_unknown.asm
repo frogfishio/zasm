@@ -1,3 +1,3 @@
 LD HL, 1234
-CALL _free
+CALL zi_free
 RET

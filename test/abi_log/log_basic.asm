@@ -2,11 +2,15 @@ LD HL, topic
 LD DE, topic_len
 LD BC, msg
 LD IX, msg_len
-CALL _log
-CALL _out
-LD HL, BC
-LD DE, IX
-CALL _out
+CALL zi_telemetry
+LD HL, 1
+LD DE, topic
+LD BC, topic_len
+CALL zi_write
+LD HL, 1
+LD DE, msg
+LD BC, msg_len
+CALL zi_write
 RET
 topic: DB "TT", 0
 topic_len: EQU 2

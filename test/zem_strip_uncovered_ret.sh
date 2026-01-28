@@ -33,13 +33,19 @@ dead_code:
   ; this should be stripped (rewritten to RETs)
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg:      DB "Hello, Zing from Zilog!", 10
@@ -97,7 +103,10 @@ RET
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg:      DB "Hello, Zing from Zilog!", 10
@@ -122,13 +131,19 @@ dead_code:
   ; this has the same shape as the first program, but different data
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 print_hello:
   LD HL, msg
   LD DE, msg_len
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET
 
 msg:      DB "Hello, Zing from Zilog?", 10

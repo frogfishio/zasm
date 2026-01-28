@@ -1,4 +1,4 @@
 LD HL, msg
-CALL _free
+CALL zi_free
 RET
 msg: DB "hi", 0

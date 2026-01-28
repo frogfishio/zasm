@@ -1,3 +1,3 @@
 LD HL, 3145728
-CALL _alloc
+CALL zi_alloc
 RET

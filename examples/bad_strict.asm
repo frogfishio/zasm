@@ -6,5 +6,8 @@
 main:
   LD HL, #0
   LD DE, #70000
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
   RET

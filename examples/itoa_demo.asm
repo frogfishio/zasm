@@ -14,7 +14,10 @@ main:
   LD HL, A
   LD DE, HL
   LD HL, itoa_buf
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
 
   LD HL, itoa_in
   LD A, #100
@@ -25,6 +28,9 @@ main:
   LD HL, A
   LD DE, HL
   LD HL, itoa_buf
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
 
   RET

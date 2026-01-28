@@ -22,10 +22,13 @@ main:
   ADD64 HL, 1337
   ST32_64 (dst_s32), HL
 
-  ; Emit the fully-updated packed buffer via Lembeh's _out primitive.
+  ; Emit the fully-updated packed buffer via zABI zi_write.
   LD HL, dst_signed_byte
   LD DE, #16
-  CALL _out
+  LD BC, DE
+  LD DE, HL
+  LD HL, #1
+  CALL zi_write
 
   RET
 

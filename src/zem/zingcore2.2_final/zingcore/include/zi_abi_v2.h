@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -7,6 +8,30 @@ extern "C" {
 #endif
 
 typedef int32_t zi_handle_t;
+
+/* ------------------------------------------------------------------------- */
+/* ZASM note: "core ABI" vs optional capability surfaces                     */
+/*
+   This header historically accreted both:
+     1) a small always-present core surface (the part you can rely on), and
+     2) a grab-bag of optional/pack-dependent surfaces.
+
+   ZASM policy (recommended):
+     - Treat the control plane (CTL) + capability discovery/open as the way
+       to use optional host services.
+     - Do NOT hard-import optional per-capability symbols unless you are
+       intentionally targeting a specific runtime "pack".
+
+   The CTL entrypoint is exported as `_ctl` in legacy packs; prefer calling it
+   as `zi_ctl` to avoid global symbol clashes.
+*/
+
+/* CTL (control plane) op codes (ZCL1 framing; see zingcore/src/zingcore.c). */
+enum {
+  ZI_CTL_OP_CAPS_LIST     = 1,
+  ZI_CTL_OP_CAPS_DESCRIBE = 2,
+  ZI_CTL_OP_CAPS_OPEN     = 3,
+};
 
 enum {
   ZI_OK = 0,
@@ -56,6 +81,11 @@ typedef struct {
 
 uint32_t zi_abi_version(void);
 uint64_t zi_abi_features(void);
+
+/* Control plane (byte-framed). Returns bytes written to resp buffer, or a
+  negative error. This is a stable name for the legacy `_ctl` entrypoint. */
+int32_t zi_ctl(const void *req_ptr, size_t req_len,
+          void *resp_ptr, size_t resp_cap);
 
 int32_t zi_alloc(int32_t size);
 int32_t zi_free(int32_t ptr);

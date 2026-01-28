@@ -259,9 +259,9 @@ This section captures *why* the project is shaped the way it is. The goal is a t
 
 zasm assumes a tiny host ABI with explicit streams:
 
-- input is a stream (`_in`)
-- output is a stream (`_out`)
-- logging is optional (`_log`)
+- input is a stream (`zi_read`)
+- output is a stream (`zi_write`)
+- logging is optional (`zi_telemetry`)
 
 Why:
 
@@ -269,12 +269,12 @@ Why:
 - avoids accidental dependency on an OS surface
 - keeps capabilities explicit and audit-friendly
 
-### Slice convention `(HL, DE)`
+### Slice convention `(DE, BC)`
 
 The canonical data value is a byte slice:
 
-- `HL = ptr`
-- `DE = len`
+- `DE = ptr`
+- `BC = len`
 
 Why:
 
@@ -288,7 +288,7 @@ Any symbol beginning with `_` is reserved for host-provided primitives.
 
 Why:
 
-- keeps side effects visible in source (`CALL _out` is unambiguous)
+- keeps side effects visible in source (`CALL zi_write` is unambiguous)
 - provides a clean capability boundary
 - avoids “magic” instructions that silently gain power
 

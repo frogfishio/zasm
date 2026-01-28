@@ -2477,6 +2477,11 @@ int32_t _ctl(const void *req_ptr, size_t req_len,
   }
 }
 
+int32_t zi_ctl(const void *req_ptr, size_t req_len,
+               void *resp_ptr, size_t resp_cap) {
+  return _ctl(req_ptr, req_len, resp_ptr, resp_cap);
+}
+
 int32_t _cap(int32_t idx) {
   (void)idx;
   /* No capabilities are exposed by this shim. */
