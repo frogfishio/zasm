@@ -3,6 +3,7 @@
 #include "zi_runtime25.h"
 #include "zi_caps.h"
 #include "zi_file_fs25.h"
+#include "zi_proc_argv25.h"
 
 #include <string.h>
 
@@ -130,6 +131,12 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   // file/fs v1
   if (strcmp(found->kind, ZI_CAP_KIND_FILE) == 0 && strcmp(found->name, ZI_CAP_NAME_FS) == 0 && found->version == 1) {
     return zi_file_fs25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
+  // proc/argv v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_PROC) == 0 && strcmp(found->name, ZI_CAP_NAME_ARGV) == 0 && found->version == 1) {
+    if (params_len != 0) return (zi_handle_t)ZI_E_INVALID;
+    return zi_proc_argv25_open();
   }
 
   return (zi_handle_t)ZI_E_DENIED;

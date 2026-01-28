@@ -46,9 +46,14 @@ static int32_t fd_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
   zi_fd_stream *s = (zi_fd_stream *)ctx;
   if (!s) return ZI_E_INTERNAL;
   if (cap == 0) return 0;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_rw) return ZI_E_NOSYS;
   if (dst_ptr == 0) return ZI_E_BOUNDS;
 
-  void *dst = (void *)(uintptr_t)dst_ptr;
+  uint8_t *dst = NULL;
+  if (!mem->map_rw(mem->ctx, dst_ptr, cap, &dst) || !dst) return ZI_E_BOUNDS;
+
   ssize_t n = read(s->fd, dst, (size_t)cap);
   if (n < 0) return map_errno_to_zi(errno);
   return (int32_t)n;
@@ -58,9 +63,14 @@ static int32_t fd_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
   zi_fd_stream *s = (zi_fd_stream *)ctx;
   if (!s) return ZI_E_INTERNAL;
   if (len == 0) return 0;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return ZI_E_NOSYS;
   if (src_ptr == 0) return ZI_E_BOUNDS;
 
-  const void *src = (const void *)(uintptr_t)src_ptr;
+  const uint8_t *src = NULL;
+  if (!mem->map_ro(mem->ctx, src_ptr, len, &src) || !src) return ZI_E_BOUNDS;
+
   ssize_t n = write(s->fd, src, (size_t)len);
   if (n < 0) return map_errno_to_zi(errno);
   return (int32_t)n;

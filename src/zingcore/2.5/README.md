@@ -108,6 +108,25 @@ If the environment variable `ZI_FS_ROOT` is set:
 - Any `..` path segment is rejected.
 - The runtime resolves the guest path *under* that directory using `openat()` and rejects symlinks in any path segment (escape-resistant).
 
+## Argv capability (golden)
+
+zingcore 2.5 exposes process arguments as a capability (not a core syscall):
+
+- kind: `"proc"`
+- name: `"argv"`
+- version: `1`
+
+Open semantics:
+
+- `zi_cap_open` with kind/name matching `proc/argv` returns a **read-only** stream handle.
+- Open params must be empty (`params_len=0`).
+
+Stream format (packed little-endian):
+
+- `u32 version` (currently 1)
+- `u32 argc`
+- Repeat `argc` times: `u32 len`, then `bytes[len]`
+
 ## Example: stdio + extra caps
 
 See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:

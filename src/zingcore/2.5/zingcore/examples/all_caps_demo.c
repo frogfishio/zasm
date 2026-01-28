@@ -1,0 +1,405 @@
+#include "zingcore25.h"
+
+#include "zi_caps.h"
+#include "zi_file_fs25.h"
+#include "zi_handles25.h"
+#include "zi_proc_argv25.h"
+#include "zi_runtime25.h"
+#include "zi_sysabi25.h"
+
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+
+// This example is the "kitchen sink" embedding.
+//
+// Keep `stdio_caps_demo.c` minimal as the bare template.
+// This file registers *all* currently-implemented golden caps and runs a small
+// end-to-end smoke:
+// - CAPS_LIST via zi_ctl
+// - open proc/argv and read its packed stream
+// - open file/fs, write+read a file (uses ZI_FS_ROOT if set; else writes in /tmp)
+
+typedef struct {
+  int fd;
+  int close_on_end;
+} fd_stream;
+
+static int32_t map_errno_to_zi(int e) {
+  switch (e) {
+    case EAGAIN:
+#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EAGAIN)
+    case EWOULDBLOCK:
+#endif
+      return ZI_E_AGAIN;
+    case EBADF:
+      return ZI_E_CLOSED;
+    case EACCES:
+    case EPERM:
+      return ZI_E_DENIED;
+    case ENOMEM:
+      return ZI_E_OOM;
+    default:
+      return ZI_E_IO;
+  }
+}
+
+static int32_t fd_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
+  fd_stream *s = (fd_stream *)ctx;
+  if (!s) return ZI_E_INTERNAL;
+  if (cap == 0) return 0;
+  if (dst_ptr == 0) return ZI_E_BOUNDS;
+
+  void *dst = (void *)(uintptr_t)dst_ptr; // native-guest mode
+  ssize_t n = read(s->fd, dst, (size_t)cap);
+  if (n < 0) return map_errno_to_zi(errno);
+  return (int32_t)n;
+}
+
+static int32_t fd_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
+  fd_stream *s = (fd_stream *)ctx;
+  if (!s) return ZI_E_INTERNAL;
+  if (len == 0) return 0;
+  if (src_ptr == 0) return ZI_E_BOUNDS;
+
+  const void *src = (const void *)(uintptr_t)src_ptr; // native-guest mode
+  ssize_t n = write(s->fd, src, (size_t)len);
+  if (n < 0) return map_errno_to_zi(errno);
+  return (int32_t)n;
+}
+
+static int32_t fd_end(void *ctx) {
+  fd_stream *s = (fd_stream *)ctx;
+  if (!s) return ZI_E_INTERNAL;
+  if (!s->close_on_end) return 0;
+  if (close(s->fd) != 0) return map_errno_to_zi(errno);
+  s->fd = -1;
+  return 0;
+}
+
+static const zi_handle_ops_v1 fd_ops = {
+    .read = fd_read,
+    .write = fd_write,
+    .end = fd_end,
+};
+
+static int32_t host_telemetry(void *ctx, zi_ptr_t topic_ptr, zi_size32_t topic_len, zi_ptr_t msg_ptr,
+                             zi_size32_t msg_len) {
+  (void)ctx;
+  const uint8_t *topic = (const uint8_t *)(uintptr_t)topic_ptr;
+  const uint8_t *msg = (const uint8_t *)(uintptr_t)msg_ptr;
+
+  write(2, "telemetry:", 10);
+  if (topic && topic_len) {
+    write(2, " ", 1);
+    write(2, topic, (size_t)topic_len);
+  }
+  if (msg && msg_len) {
+    write(2, " ", 1);
+    write(2, msg, (size_t)msg_len);
+  }
+  write(2, "\n", 1);
+  return 0;
+}
+
+static void zcl1_write_u16(uint8_t *p, uint16_t v) {
+  p[0] = (uint8_t)(v & 0xFF);
+  p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+static void zcl1_write_u32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xFF);
+  p[1] = (uint8_t)((v >> 8) & 0xFF);
+  p[2] = (uint8_t)((v >> 16) & 0xFF);
+  p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+static uint32_t zcl1_read_u32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void build_caps_list_req(uint8_t req[24], uint32_t rid) {
+  memcpy(req + 0, "ZCL1", 4);
+  zcl1_write_u16(req + 4, 1);
+  zcl1_write_u16(req + 6, (uint16_t)ZI_CTL_OP_CAPS_LIST);
+  zcl1_write_u32(req + 8, rid);
+  zcl1_write_u32(req + 12, 0);
+  zcl1_write_u32(req + 16, 0);
+  zcl1_write_u32(req + 20, 0);
+}
+
+static void write_u64le(uint8_t *p, uint64_t v) {
+  zcl1_write_u32(p + 0, (uint32_t)(v & 0xFFFFFFFFu));
+  zcl1_write_u32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFu));
+}
+
+static void build_open_req(uint8_t req[40], const char *kind, const char *name, const void *params, uint32_t params_len) {
+  // Packed open request (see zi_syscalls_caps25.c):
+  // u64 kind_ptr, u32 kind_len, u64 name_ptr, u32 name_len, u32 mode, u64 params_ptr, u32 params_len
+  write_u64le(req + 0, (uint64_t)(uintptr_t)kind);
+  zcl1_write_u32(req + 8, (uint32_t)strlen(kind));
+  write_u64le(req + 12, (uint64_t)(uintptr_t)name);
+  zcl1_write_u32(req + 20, (uint32_t)strlen(name));
+  zcl1_write_u32(req + 24, 0);
+  write_u64le(req + 28, (uint64_t)(uintptr_t)params);
+  zcl1_write_u32(req + 36, params_len);
+}
+
+static void build_fs_params(uint8_t params[20], const char *path, uint32_t oflags, uint32_t create_mode) {
+  // u64 path_ptr, u32 path_len, u32 oflags, u32 create_mode
+  write_u64le(params + 0, (uint64_t)(uintptr_t)path);
+  zcl1_write_u32(params + 8, (uint32_t)strlen(path));
+  zcl1_write_u32(params + 12, oflags);
+  zcl1_write_u32(params + 16, create_mode);
+}
+
+static void dump_caps_list(void) {
+  uint8_t req[24];
+  uint8_t resp[4096];
+  memset(resp, 0, sizeof(resp));
+  build_caps_list_req(req, 1);
+
+  int32_t r = zi_ctl((zi_ptr_t)(uintptr_t)req, (zi_size32_t)sizeof(req), (zi_ptr_t)(uintptr_t)resp, (zi_size32_t)sizeof(resp));
+  if (r < 0) {
+    fprintf(stderr, "ctl CAPS_LIST failed: %d\n", r);
+    return;
+  }
+
+  // ZCL1 response header is 24 bytes; payload begins at 24.
+  uint32_t payload_len = zcl1_read_u32(resp + 20);
+  if (24u + payload_len > sizeof(resp)) {
+    fprintf(stderr, "ctl CAPS_LIST: payload too large\n");
+    return;
+  }
+
+  const uint8_t *p = resp + 24;
+  if (payload_len < 8) {
+    fprintf(stderr, "ctl CAPS_LIST: short payload\n");
+    return;
+  }
+
+  uint32_t ver = zcl1_read_u32(p + 0);
+  uint32_t n = zcl1_read_u32(p + 4);
+  fprintf(stderr, "caps_list v%u: %u caps\n", ver, n);
+
+  uint32_t off = 8;
+  for (uint32_t i = 0; i < n; i++) {
+    if (off + 4 > payload_len) break;
+    uint32_t kind_len = zcl1_read_u32(p + off);
+    off += 4;
+    if (off + kind_len + 4 > payload_len) break;
+    const char *kind = (const char *)(p + off);
+    off += kind_len;
+
+    uint32_t name_len = zcl1_read_u32(p + off);
+    off += 4;
+    if (off + name_len + 4 > payload_len) break;
+    const char *name = (const char *)(p + off);
+    off += name_len;
+
+    uint32_t flags = zcl1_read_u32(p + off);
+    off += 4;
+
+    if (off + 4 > payload_len) break;
+    uint32_t meta_len = zcl1_read_u32(p + off);
+    off += 4;
+    if (off + meta_len > payload_len) break;
+    off += meta_len;
+
+    fprintf(stderr, "  - %.*s/%.*s flags=0x%08x\n", (int)kind_len, kind, (int)name_len, name, flags);
+  }
+}
+
+static int dump_argv_via_cap(int argc, char **argv) {
+  zi_runtime25_set_argv(argc, (const char *const *)argv);
+
+  uint8_t req[40];
+  build_open_req(req, ZI_CAP_KIND_PROC, ZI_CAP_NAME_ARGV, NULL, 0);
+
+  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (h < 3) {
+    fprintf(stderr, "proc/argv open failed: %d\n", h);
+    return 0;
+  }
+
+  uint8_t buf[2048];
+  uint32_t off = 0;
+  for (;;) {
+    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + off), (zi_size32_t)(sizeof(buf) - off));
+    if (n < 0) {
+      fprintf(stderr, "proc/argv read failed: %d\n", n);
+      (void)zi_end(h);
+      return 0;
+    }
+    if (n == 0) break;
+    off += (uint32_t)n;
+    if (off == sizeof(buf)) break;
+  }
+
+  if (off < 8) {
+    fprintf(stderr, "proc/argv: short\n");
+    (void)zi_end(h);
+    return 0;
+  }
+
+  uint32_t ver = zcl1_read_u32(buf + 0);
+  uint32_t ac = zcl1_read_u32(buf + 4);
+  fprintf(stderr, "argv v%u argc=%u\n", ver, ac);
+
+  uint32_t p = 8;
+  for (uint32_t i = 0; i < ac; i++) {
+    if (p + 4 > off) break;
+    uint32_t sl = zcl1_read_u32(buf + p);
+    p += 4;
+    if (p + sl > off) break;
+    fprintf(stderr, "  argv[%u]=%.*s\n", i, (int)sl, (const char *)(buf + p));
+    p += sl;
+  }
+
+  (void)zi_end(h);
+  return 1;
+}
+
+static int fs_smoke(void) {
+  const char *root = getenv("ZI_FS_ROOT");
+  const char *guest_path = "/all_caps_demo.txt";
+
+  char tmpfile[256];
+  if (!root || root[0] == '\0') {
+    // No sandbox set: fall back to a concrete host path.
+    // This demonstrates permissive behavior; it is *not* a sandbox.
+    snprintf(tmpfile, sizeof(tmpfile), "/tmp/all_caps_demo_%ld.txt", (long)getpid());
+    guest_path = tmpfile;
+  }
+
+  const char *msg = "hello from file/fs\n";
+
+  uint8_t params[20];
+  uint8_t req[40];
+
+  // Write
+  build_fs_params(params, guest_path, ZI_FILE_O_WRITE | ZI_FILE_O_CREATE | ZI_FILE_O_TRUNC, 0644);
+  build_open_req(req, ZI_CAP_KIND_FILE, ZI_CAP_NAME_FS, params, (uint32_t)sizeof(params));
+  zi_handle_t hw = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (hw < 3) {
+    fprintf(stderr, "file/fs open(write) failed: %d\n", hw);
+    return 0;
+  }
+  int32_t wn = zi_write(hw, (zi_ptr_t)(uintptr_t)msg, (zi_size32_t)strlen(msg));
+  if (wn != (int32_t)strlen(msg)) {
+    fprintf(stderr, "file/fs write failed: %d\n", wn);
+    (void)zi_end(hw);
+    return 0;
+  }
+  (void)zi_end(hw);
+
+  // Read
+  build_fs_params(params, guest_path, ZI_FILE_O_READ, 0);
+  build_open_req(req, ZI_CAP_KIND_FILE, ZI_CAP_NAME_FS, params, (uint32_t)sizeof(params));
+  zi_handle_t hr = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (hr < 3) {
+    fprintf(stderr, "file/fs open(read) failed: %d\n", hr);
+    return 0;
+  }
+  char buf[128];
+  memset(buf, 0, sizeof(buf));
+  int32_t rn = zi_read(hr, (zi_ptr_t)(uintptr_t)buf, (zi_size32_t)(sizeof(buf) - 1));
+  (void)zi_end(hr);
+  if (rn <= 0) {
+    fprintf(stderr, "file/fs read failed: %d\n", rn);
+    return 0;
+  }
+  if ((size_t)rn != strlen(msg) || memcmp(buf, msg, (size_t)rn) != 0) {
+    fprintf(stderr, "file/fs content mismatch\n");
+    return 0;
+  }
+
+  return 1;
+}
+
+static zi_cap_v1 cap_stdio_v1 = {
+    .kind = "file",
+    .name = "stdio",
+    .version = 1,
+    .cap_flags = 0,
+    .meta = (const uint8_t *)"{\"handles\":[\"in\",\"out\",\"err\"]}",
+    .meta_len = 34,
+};
+
+static zi_cap_v1 cap_demo_echo_v1 = {
+    .kind = "demo",
+    .name = "echo",
+    .version = 1,
+    .cap_flags = 0,
+    .meta = NULL,
+    .meta_len = 0,
+};
+
+static zi_cap_v1 cap_demo_version_v1 = {
+    .kind = "demo",
+    .name = "version",
+    .version = 1,
+    .cap_flags = 0,
+    .meta = (const uint8_t *)"{\"impl\":\"all_caps_demo\"}",
+    .meta_len = 25,
+};
+
+int main(int argc, char **argv) {
+  if (!zingcore25_init()) {
+    fprintf(stderr, "zingcore25_init failed\n");
+    return 1;
+  }
+
+  zi_mem_v1 mem;
+  zi_mem_v1_native_init(&mem);
+  zi_runtime25_set_mem(&mem);
+
+  zi_host_v1 host;
+  memset(&host, 0, sizeof(host));
+  host.telemetry = host_telemetry;
+  zi_runtime25_set_host(&host);
+
+  // Register all known caps in this build.
+  (void)zi_cap_register(&cap_stdio_v1);
+  (void)zi_cap_register(&cap_demo_echo_v1);
+  (void)zi_cap_register(&cap_demo_version_v1);
+  (void)zi_file_fs25_register();
+  (void)zi_proc_argv25_register();
+
+  // Wire stdio handles.
+  (void)zi_handles25_init();
+  static fd_stream s_in = {.fd = 0, .close_on_end = 0};
+  static fd_stream s_out = {.fd = 1, .close_on_end = 0};
+  static fd_stream s_err = {.fd = 2, .close_on_end = 0};
+
+  zi_handle_t h_in = zi_handle25_alloc(&fd_ops, &s_in, ZI_H_READABLE);
+  zi_handle_t h_out = zi_handle25_alloc(&fd_ops, &s_out, ZI_H_WRITABLE);
+  zi_handle_t h_err = zi_handle25_alloc(&fd_ops, &s_err, ZI_H_WRITABLE);
+
+  if (h_in == 0 || h_out == 0 || h_err == 0) {
+    fprintf(stderr, "failed to allocate stdio handles\n");
+    return 1;
+  }
+
+  const char *banner = "all_caps_demo: caps + argv + file/fs\n";
+  (void)zi_write(h_out, (zi_ptr_t)(uintptr_t)banner, (zi_size32_t)strlen(banner));
+
+  dump_caps_list();
+
+  if (!dump_argv_via_cap(argc, argv)) {
+    fprintf(stderr, "argv cap failed\n");
+    return 1;
+  }
+
+  if (!fs_smoke()) {
+    fprintf(stderr, "file/fs smoke failed\n");
+    return 1;
+  }
+
+  (void)zi_write(h_err, (zi_ptr_t)(uintptr_t)"ok\n", 3);
+  return 0;
+}
