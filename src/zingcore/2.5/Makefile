@@ -17,6 +17,11 @@ LIB := $(BUILD)/libzingcore25.a
 
 SRC := \
 	$(SRCDIR)/zingcore25.c \
+	$(SRCDIR)/zi_runtime25.c \
+	$(SRCDIR)/zi_handles25.c \
+	$(SRCDIR)/zi_zcl1.c \
+	$(SRCDIR)/zi_syscalls_core25.c \
+	$(SRCDIR)/zi_syscalls_caps25.c \
 	$(SRCDIR)/zi_caps.c \
 	$(SRCDIR)/zi_async.c \
 	$(SRCDIR)/zi_problem.c \
@@ -24,12 +29,17 @@ SRC := \
 
 OBJ := \
 	$(BUILD)/zingcore25.o \
+	$(BUILD)/zi_runtime25.o \
+	$(BUILD)/zi_handles25.o \
+	$(BUILD)/zi_zcl1.o \
+	$(BUILD)/zi_syscalls_core25.o \
+	$(BUILD)/zi_syscalls_caps25.o \
 	$(BUILD)/zi_caps.o \
 	$(BUILD)/zi_async.o \
 	$(BUILD)/zi_problem.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list
 
 .PHONY: test
 

@@ -1,6 +1,7 @@
 #include "zi_caps.h"
 
 #include <stdio.h>
+#include <string.h>
 
 static zi_cap_v1 cap_exec_run_v1 = {
     .kind = "exec",
@@ -53,7 +54,7 @@ int main(void) {
     return 1;
   }
 
-  // Deterministic enumeration order: registration order.
+  // Deterministic enumeration order: lexicographic by (kind,name,version).
   if (!reg->caps[0] || !reg->caps[1]) {
     fprintf(stderr, "caps array contains NULL\n");
     return 1;
@@ -61,6 +62,15 @@ int main(void) {
   if (!(reg->caps[0]->kind && reg->caps[0]->name && reg->caps[1]->kind &&
         reg->caps[1]->name)) {
     fprintf(stderr, "cap identity fields missing\n");
+    return 1;
+  }
+
+  if (strcmp(reg->caps[0]->kind, "async") != 0 || strcmp(reg->caps[0]->name, "default") != 0) {
+    fprintf(stderr, "unexpected cap[0] identity\n");
+    return 1;
+  }
+  if (strcmp(reg->caps[1]->kind, "exec") != 0 || strcmp(reg->caps[1]->name, "run") != 0) {
+    fprintf(stderr, "unexpected cap[1] identity\n");
     return 1;
   }
 

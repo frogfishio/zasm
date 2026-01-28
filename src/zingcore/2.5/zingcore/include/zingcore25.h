@@ -9,7 +9,8 @@
 extern "C" {
 #endif
 
-// zABI 2.5 runtime entrypoints (by-the-book runtime, WIP).
+// zingcore 25-family runtime entrypoints (wiring/convenience API).
+// The wire/system ABI remains the `zi_*` surface (see zi_sysabi25.h).
 
 // zABI version for this runtime (2.5).
 #define ZINGCORE25_ZABI_VERSION 0x00020005u

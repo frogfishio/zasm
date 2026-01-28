@@ -9,6 +9,13 @@ extern "C" {
 
 typedef int32_t zi_handle_t;
 
+/*
+ * NOTE:
+ *   This header is a C-friendly API surface (native shim).
+ *   For the fixed-width system ABI (wire contract), use:
+ *     zi_sysabi_v2.h
+ */
+
 /* ------------------------------------------------------------------------- */
 /* ZASM note: "core ABI" vs optional capability surfaces                     */
 /*
