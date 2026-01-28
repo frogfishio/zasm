@@ -291,6 +291,12 @@ int zrun_link_zabi_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
   wasm_functype_delete(ty);
   if (err) { zrun_print_error(err); return 1; }
 
+  ty = functype_i64_i32_i64_i32_to_i32();
+  err = wasmtime_linker_define_func(linker, LIT("env"), LIT("zi_ctl"), ty,
+                                    zrun_zi_ctl, env, NULL);
+  wasm_functype_delete(ty);
+  if (err) { zrun_print_error(err); return 1; }
+
   ty = functype_i32_i64_i32_to_i32();
   err = wasmtime_linker_define_func(linker, LIT("env"), LIT("zi_read"), ty,
                                     zrun_zi_read, env, NULL);
@@ -642,8 +648,8 @@ int zrun_get_export_func(wasmtime_store_t* store, wasmtime_instance_t* instance,
   return 0;
 }
 
-int zrun_call_lembeh_handle(wasmtime_store_t* store, wasmtime_func_t* func,
-                            int32_t req, int32_t res) {
+int zrun_call_main(wasmtime_store_t* store, wasmtime_func_t* func,
+                   int32_t req, int32_t res) {
   wasmtime_val_t args[2];
   args[0].kind = WASMTIME_I32;
   args[0].of.i32 = req;

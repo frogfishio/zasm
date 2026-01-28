@@ -4,7 +4,7 @@
   (import "env" "zi_cap_open" (func $zi_cap_open (param i64) (result i32)))
   (import "env" "zi_end" (func $zi_end (param i32) (result i32)))
 
-  (func $lembeh_handle (export "lembeh_handle") (param $req i32) (param $res i32)
+  (func $main (export "main") (param $req i32) (param $res i32)
     ;; ABI version must be 2.5.
     call $zi_abi_version
     i32.const 0x00020005

@@ -338,7 +338,6 @@ static void emit_name_section(const funcvec_t* funcs, const gsymtab_t* g) {
   for (size_t i=0;i<funcs->n;i++) {
     printf("    (func $%s \"%s\")\n", funcs->v[i].name, funcs->v[i].name);
   }
-  printf("    (func $lembeh_handle \"lembeh_handle\")\n");
   for (size_t i=0;i<g->n;i++) {
     printf("    (global $%s \"%s\")\n", g->v[i].name, g->v[i].name);
   }
@@ -2898,7 +2897,7 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   // exports that don't resolve within this module.
   for (size_t i=0;i<exports.n;i++) {
     if (strcmp(exports.v[i].name, "lembeh_handle") == 0) {
-      fprintf(stderr, "zld: PUBLIC cannot export lembeh_handle\n");
+      fprintf(stderr, "zld: lembeh_handle is deprecated; use main\n");
       funcvec_free(&funcs);
       datavec_free(&data);
       gsymtab_free(&g);
@@ -2929,6 +2928,7 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   printf("  ;; zABI host surface (syscall-style zi_*)\n");
   printf("  (import \"env\" \"zi_abi_version\"   (func $zi_abi_version   (result i32)))\n");
   printf("  (import \"env\" \"zi_abi_features\"  (func $zi_abi_features  (result i64)))\n");
+  printf("  (import \"env\" \"zi_ctl\"           (func $zi_ctl           (param i64 i32 i64 i32) (result i32)))\n");
   printf("  (import \"env\" \"zi_read\"          (func $zi_read          (param i32 i64 i32) (result i32)))\n");
   printf("  (import \"env\" \"zi_write\"         (func $zi_write         (param i32 i64 i32) (result i32)))\n");
   printf("  (import \"env\" \"zi_end\"           (func $zi_end           (param i32) (result i32)))\n");
@@ -3035,18 +3035,13 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
     }
   }
 
-  // lembeh_handle wrapper keeps the exported entrypoint stable.
-  printf("  (func $lembeh_handle (export \"lembeh_handle\") (param $req i32) (param $res i32)\n");
-  printf("    local.get $req\n");
-  printf("    local.get $res\n");
-  printf("    call $main\n");
-  printf("    local.get $res\n");
-  printf("    call $zi_end\n");
-  printf("    drop\n");
-  printf("  )\n");
+  // Entrypoint: export "main" directly.
+  // NOTE: legacy packs used to export "lembeh_handle" as the entrypoint.
+  printf("  (export \"main\" (func $main))\n");
 
   for (size_t i=0;i<exports.n;i++) {
     if (!exports.v[i].name) continue;
+    if (strcmp(exports.v[i].name, "main") == 0) continue;
     long tmp = 0;
     if (gsymtab_get(&g, exports.v[i].name, &tmp)) {
       printf("  (export \"%s\" (global $%s))\n", exports.v[i].name, exports.v[i].name);
@@ -3086,8 +3081,10 @@ int emit_manifest(const recvec_t* recs) {
   primitives_from_recs(recs, &prim_mask);
 
   printf("{\"manifest\":\"zasm-v1.0\",\"exports\":[");
-  json_emit_str("lembeh_handle");
+  json_emit_str("main");
   for (size_t i=0;i<exports.n;i++) {
+    if (!exports.v[i].name) continue;
+    if (strcmp(exports.v[i].name, "main") == 0) continue;
     printf(",");
     json_emit_str(exports.v[i].name);
   }

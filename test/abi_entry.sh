@@ -26,17 +26,9 @@ manifest="$build_dir/entry_basic.manifest.json"
 "$zld_bin" --tool -o "$wat" "$jsonl"
 "$zld_bin" --tool --manifest -o "$manifest" "$jsonl"
 
-rg -q 'func \$lembeh_handle \(export "lembeh_handle"\)' "$wat"
+rg -q 'export "main" \(func \$main\)' "$wat"
 
-awk '
-  /func \$lembeh_handle/ {in_func=1}
-  in_func && /call \$main/ {main=1}
-  in_func && /call \$zi_end/ {if (main) ok=1}
-  in_func && /^  \)/ {exit ok ? 0 : 1}
-  END {exit ok ? 0 : 1}
-' "$wat"
-
-rg -q '"exports":\["lembeh_handle"\]' "$manifest"
+rg -q '"exports":\["main"' "$manifest"
 rg -q '"imports":\[\]' "$manifest"
 rg -q '"primitives":\[\]' "$manifest"
 

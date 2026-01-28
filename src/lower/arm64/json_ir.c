@@ -742,7 +742,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
             entry->u.dir.name = dup_cstr(entry->u.dir.args[0].sym);
             if (!entry->u.dir.name) { ir_entry_free(entry); rc = -1; goto fail_line; }
           }
-          if (strcmp(entry->u.dir.name, "lembeh_handle") == 0) prog->has_public_lembeh = 1;
+          if (strcmp(entry->u.dir.name, "main") == 0) prog->has_public_main = 1;
           break;
         case IR_DIR_EXTERN:
           if (entry->u.dir.arg_count < 2 || entry->u.dir.args[0].kind != IR_OP_STR || entry->u.dir.args[1].kind != IR_OP_STR) {

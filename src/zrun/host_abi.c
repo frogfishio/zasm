@@ -170,6 +170,111 @@ static int mem_span64(wasmtime_caller_t* caller, int64_t ptr_i64, int32_t len_i3
   return 1;
 }
 
+typedef struct {
+  uint16_t op;
+  uint32_t rid;
+  const uint8_t* payload;
+  uint32_t payload_len;
+} zcl1_req_t;
+
+static uint16_t zcl1_read_u16_le(const uint8_t* p) {
+  return (uint16_t)p[0] | (uint16_t)((uint16_t)p[1] << 8);
+}
+
+static uint32_t zcl1_read_u32_le(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void zcl1_write_u16_le(uint8_t* p, uint16_t v) {
+  p[0] = (uint8_t)(v & 0xFF);
+  p[1] = (uint8_t)((v >> 8) & 0xFF);
+}
+
+static void zcl1_write_u32_le(uint8_t* p, uint32_t v) {
+  p[0] = (uint8_t)(v & 0xFF);
+  p[1] = (uint8_t)((v >> 8) & 0xFF);
+  p[2] = (uint8_t)((v >> 16) & 0xFF);
+  p[3] = (uint8_t)((v >> 24) & 0xFF);
+}
+
+// ZCL1 request framing (24-byte header):
+//   0..3  "ZCL1"
+//   4..5  version (u16, must be 1)
+//   6..7  op (u16)
+//   8..11 rid (u32)
+//   12..15 timeout_ms (u32) [ignored]
+//   16..19 flags (u32) [ignored]
+//   20..23 payload_len (u32)
+//   24..   payload
+static int zcl1_parse_req(const uint8_t* req, size_t req_len, zcl1_req_t* out) {
+  if (!req || !out) return 0;
+  if (req_len < 24) return 0;
+  if (req[0] != 'Z' || req[1] != 'C' || req[2] != 'L' || req[3] != '1') return 0;
+  uint16_t v = zcl1_read_u16_le(req + 4);
+  if (v != 1) return 0;
+  uint16_t op = zcl1_read_u16_le(req + 6);
+  uint32_t rid = zcl1_read_u32_le(req + 8);
+  uint32_t payload_len = zcl1_read_u32_le(req + 20);
+  if (24ull + (uint64_t)payload_len > (uint64_t)req_len) return 0;
+  out->op = op;
+  out->rid = rid;
+  out->payload = req + 24;
+  out->payload_len = payload_len;
+  return 1;
+}
+
+// ZCL1 response framing (20-byte header):
+//   0..3  "ZCL1"
+//   4..5  version (u16, 1)
+//   6..7  op (u16)
+//   8..11 rid (u32)
+//   12..15 reserved (u32, 0)
+//   16..19 payload_len (u32)
+//   20..   payload
+static int32_t zcl1_write_ok(uint8_t* out, size_t cap, uint16_t op, uint32_t rid,
+                             const uint8_t* payload, uint32_t payload_len) {
+  if (!out) return (int32_t)ZI_E_INVALID;
+  uint64_t frame_len = 20ull + (uint64_t)payload_len;
+  if (frame_len > (uint64_t)cap || frame_len > (uint64_t)INT32_MAX) return (int32_t)ZI_E_BOUNDS;
+  memcpy(out + 0, "ZCL1", 4);
+  zcl1_write_u16_le(out + 4, 1);
+  zcl1_write_u16_le(out + 6, op);
+  zcl1_write_u32_le(out + 8, rid);
+  zcl1_write_u32_le(out + 12, 0);
+  zcl1_write_u32_le(out + 16, payload_len);
+  if (payload_len && payload) memcpy(out + 20, payload, payload_len);
+  return (int32_t)frame_len;
+}
+
+static int32_t zcl1_write_error(uint8_t* out, size_t cap, uint16_t op, uint32_t rid,
+                                const char* trace, const char* msg) {
+  if (!out || !trace || !msg) return (int32_t)ZI_E_INVALID;
+  uint32_t tlen = (uint32_t)strlen(trace);
+  uint32_t mlen = (uint32_t)strlen(msg);
+  uint32_t clen = 0;
+  uint64_t payload_len = 4ull + 4ull + tlen + 4ull + mlen + 4ull + clen;
+  uint64_t frame_len = 20ull + payload_len;
+  if (frame_len > (uint64_t)cap || frame_len > (uint64_t)INT32_MAX) return (int32_t)ZI_E_BOUNDS;
+  memcpy(out + 0, "ZCL1", 4);
+  zcl1_write_u16_le(out + 4, 1);
+  zcl1_write_u16_le(out + 6, op);
+  zcl1_write_u32_le(out + 8, rid);
+  zcl1_write_u32_le(out + 12, 0);
+  zcl1_write_u32_le(out + 16, (uint32_t)payload_len);
+
+  // Error payload: u32 code(0) + hstr(trace) + hstr(msg) + u32 chain_len(0)
+  out[20] = 0;
+  out[21] = 0;
+  out[22] = 0;
+  out[23] = 0;
+  zcl1_write_u32_le(out + 24, tlen);
+  memcpy(out + 28, trace, tlen);
+  zcl1_write_u32_le(out + 28 + tlen, mlen);
+  memcpy(out + 32 + tlen, msg, mlen);
+  zcl1_write_u32_le(out + 32 + tlen + mlen, clen);
+  return (int32_t)frame_len;
+}
+
 static int64_t mvar_get(zrun_abi_env_t* e, uint64_t key) {
   for (size_t i = 0; i < (sizeof(e->mvars) / sizeof(e->mvars[0])); i++) {
     if (!e->mvars[i].used) continue;
@@ -222,6 +327,67 @@ wasm_trap_t* zrun_zi_abi_features(void* env, wasmtime_caller_t* caller,
   results[0].of.i64 = 0;
   tracef((zrun_abi_env_t*)env, "zi_abi_features -> 0");
   return NULL;
+}
+
+wasm_trap_t* zrun_zi_ctl(void* env, wasmtime_caller_t* caller,
+                         const wasmtime_val_t* args, size_t nargs,
+                         wasmtime_val_t* results, size_t nresults) {
+  zrun_abi_env_t* e = (zrun_abi_env_t*)env;
+  if (nresults < 1) return NULL;
+  results[0].kind = WASMTIME_I32;
+  results[0].of.i32 = ZI_E_INVALID;
+  if (nargs < 4) return NULL;
+
+  int64_t req_ptr = args[0].of.i64;
+  int32_t req_len = args[1].of.i32;
+  int64_t resp_ptr = args[2].of.i64;
+  int32_t resp_cap = args[3].of.i32;
+  tracef(e, "zi_ctl(req_ptr=%" PRId64 ", req_len=%d, resp_ptr=%" PRId64 ", resp_cap=%d)",
+         req_ptr, req_len, resp_ptr, resp_cap);
+
+  uint8_t* req = NULL;
+  uint8_t* resp = NULL;
+  size_t req_n = 0;
+  size_t resp_n = 0;
+  if (!mem_span64(caller, req_ptr, req_len, &req, &req_n) ||
+      !mem_span64(caller, resp_ptr, resp_cap, &resp, &resp_n)) {
+    if (e->strict) return trap_msg("zrun: zi_ctl OOB");
+    results[0].of.i32 = ZI_E_BOUNDS;
+    return NULL;
+  }
+
+  zcl1_req_t fr;
+  if (!zcl1_parse_req(req, req_n, &fr)) {
+    // Best-effort structured error frame if caller gave us space.
+    int32_t nw = zcl1_write_error(resp, resp_n, 0, 0, "t_ctl_bad_frame", "parse");
+    results[0].of.i32 = (nw > 0) ? nw : (int32_t)ZI_E_INVALID;
+    return NULL;
+  }
+
+  switch (fr.op) {
+    case 1: { // CAPS_LIST
+      if (fr.payload_len != 0) {
+        results[0].of.i32 = zcl1_write_error(resp, resp_n, fr.op, fr.rid,
+                                             "t_ctl_bad_frame", "unexpected payload");
+        return NULL;
+      }
+
+      // Payload v1: u32(1) + u32(count) + entries...
+      uint8_t payload[8];
+      payload[0] = 1;
+      payload[1] = 0;
+      payload[2] = 0;
+      payload[3] = 0;
+      zcl1_write_u32_le(payload + 4, 0);
+      results[0].of.i32 = zcl1_write_ok(resp, resp_n, fr.op, fr.rid,
+                                        payload, (uint32_t)sizeof(payload));
+      return NULL;
+    }
+    default:
+      results[0].of.i32 = zcl1_write_error(resp, resp_n, fr.op, fr.rid,
+                                           "t_ctl_unknown_op", "unknown operation");
+      return NULL;
+  }
 }
 
 wasm_trap_t* zrun_zi_read(void* env, wasmtime_caller_t* caller,

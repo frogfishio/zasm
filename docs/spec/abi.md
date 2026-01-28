@@ -1,21 +1,21 @@
 <!-- SPDX-FileCopyrightText: 2025 Frogfish -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# zABI 2.0 (Normative)
+# zABI 2.x (Normative)
 
-This document defines the required host ABI for ZASM-generated modules (**zABI 2.0**).
+This document defines the required host ABI for ZASM-generated modules (**zABI 2.x**).
 All conforming modules and hosts MUST follow this contract.
 
-zABI 2.0 replaces the retired legacy “stream ABI” (`req_read/res_write/_ctl`).
+zABI 2.x replaces the retired legacy “stream ABI” (`req_read/res_write/_ctl`).
 
 ## Module interface
 
 ### Exports
 
-- `lembeh_handle(req: i32, res: i32) -> ()` (WASM runner entrypoint wrapper)
-  - Required for `zrun` today.
-  - Must call the module’s internal `$main` and then close `res` via `zi_end(res)`.
-  - Note: the export name is legacy; the ABI surface is zABI 2.0.
+- `main(req: i32, res: i32) -> ()` (WASM runner entrypoint)
+  - Required by `zrun`.
+  - Must close `res` via `zi_end(res)` before returning.
+  - Note: `lembeh_handle` is legacy/deprecated.
 - `memory` (WASM linear memory)
   - Required for any ABI calls that read/write guest memory.
 
@@ -26,7 +26,7 @@ All zABI imports live under module name `"env"`.
 Core syscalls (required):
 
 - `zi_abi_version() -> i32`
-  - Must return `0x00020000` for zABI 2.0.
+  - Must return `0x00020005` for zABI 2.5.
 - `zi_abi_features() -> i64`
   - Feature bitset (0 for “no optional features”).
 - `zi_alloc(size: i32) -> i64`

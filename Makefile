@@ -531,7 +531,7 @@ test-linkage: zas zld
 test-manifest: zas zld
 	cat examples/hello.asm | $(BIN)/zas | $(BIN)/zld --manifest > build/hello.manifest.json
 	@$(RG) -q -F '"manifest":"zasm-v1.0"' build/hello.manifest.json
-	@$(RG) -q -F '"lembeh_handle"' build/hello.manifest.json
+	@$(RG) -q -F '"main"' build/hello.manifest.json
 	@$(RG) -q -F '"primitives":[]' build/hello.manifest.json
 
 test-bytes: zas zld zrun

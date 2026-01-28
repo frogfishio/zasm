@@ -34,7 +34,7 @@ int main(void) {
     fail("json_ir_read returned error");
   }
   fclose(fp);
-  if (!prog.has_public_lembeh) fail("PUBLIC lembeh_handle not detected");
+  if (!prog.has_public_main) fail("PUBLIC main not detected");
 
   size_t labels = 0, instrs = 0, dirs = 0;
   int saw_db = 0, saw_dw = 0, saw_resb = 0, saw_str = 0, saw_equ = 0, saw_extern = 0;

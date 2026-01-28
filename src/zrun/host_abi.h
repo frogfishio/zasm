@@ -34,6 +34,9 @@ wasm_trap_t* zrun_zi_abi_version(void* env, wasmtime_caller_t* caller,
 wasm_trap_t* zrun_zi_abi_features(void* env, wasmtime_caller_t* caller,
                                  const wasmtime_val_t* args, size_t nargs,
                                  wasmtime_val_t* results, size_t nresults);
+wasm_trap_t* zrun_zi_ctl(void* env, wasmtime_caller_t* caller,
+                         const wasmtime_val_t* args, size_t nargs,
+                         wasmtime_val_t* results, size_t nresults);
 wasm_trap_t* zrun_zi_alloc(void* env, wasmtime_caller_t* caller,
                            const wasmtime_val_t* args, size_t nargs,
                            wasmtime_val_t* results, size_t nresults);

@@ -443,7 +443,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   /* Best-effort: if this fails, we fall back to list scans. */
   symtab_map_ensure(&symmap);
   const uint64_t t_total0 = prof ? cg_now_ns() : 0;
-  symtab_add(&ctx, &out->syms, "lembeh_handle", 0);
+  symtab_add(&ctx, &out->syms, "main", 0);
 #define CG_FAIL(ctx_entry, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
 #define CG_FAILF(ctx_entry, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
 

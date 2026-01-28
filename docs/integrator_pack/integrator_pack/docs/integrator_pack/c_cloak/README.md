@@ -6,6 +6,9 @@
 This is a minimal C interface for hosts that integrate ZASM modules without WebAssembly.
 It targets the retired legacy stream ABI and is kept for reference only.
 
+Note: modern zABI modules use `main(req, res)` as the entrypoint export for `zrun`.
+This legacy interface uses `lembeh_handle(req, res)`.
+
 ## Files
 
 - `lembeh_cloak.h` — host vtable and module entrypoint signatures.

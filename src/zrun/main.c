@@ -308,13 +308,13 @@ int main(int argc, char** argv) {
   }
 
   wasmtime_func_t func;
-  if (zrun_get_export_func(store, &instance, "lembeh_handle", &func) != 0) {
+  if (zrun_get_export_func(store, &instance, "main", &func) != 0) {
     wasmtime_module_delete(module);
     rc = 1;
     goto cleanup;
   }
 
-  if (zrun_call_lembeh_handle(store, &func, 0, 1) != 0) {
+  if (zrun_call_main(store, &func, 0, 1) != 0) {
     wasmtime_module_delete(module);
     rc = 1;
     goto cleanup;

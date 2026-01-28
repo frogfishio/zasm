@@ -2,6 +2,7 @@
   ;; zABI host surface (syscall-style zi_*)
   (import "env" "zi_abi_version"   (func $zi_abi_version   (result i32)))
   (import "env" "zi_abi_features"  (func $zi_abi_features  (result i64)))
+  (import "env" "zi_ctl"           (func $zi_ctl           (param i64 i32 i64 i32) (result i32)))
   (import "env" "zi_read"          (func $zi_read          (param i32 i64 i32) (result i32)))
   (import "env" "zi_write"         (func $zi_write         (param i32 i64 i32) (result i32)))
   (import "env" "zi_end"           (func $zi_end           (param i32) (result i32)))
@@ -157,12 +158,5 @@
     )
   )
 
-  (func $lembeh_handle (export "lembeh_handle") (param $req i32) (param $res i32)
-    local.get $req
-    local.get $res
-    call $main
-    local.get $res
-    call $zi_end
-    drop
-  )
+  (export "main" (func $main))
 )

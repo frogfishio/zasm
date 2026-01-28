@@ -32,7 +32,7 @@ The Cortex-M backend is a new ZASM target profile:
 
 Minimal ABI to call a single entrypoint:
 
-- Entry function: `lembeh_handle(req_handle, res_handle)` (future mapping; legacy export name for zABI modules).
+- Entry function: `main(req_handle, res_handle)`.
 - Arguments passed in r0/r1; return value in r0 (if used).
 - Caller-saved: r0-r3, r12; callee-saved: r4-r11.
 - Stack pointer: r13; link register: r14; PC: r15.

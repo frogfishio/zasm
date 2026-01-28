@@ -88,7 +88,7 @@ typedef struct ir_entry {
 typedef struct {
   ir_entry_t *head;
   ir_entry_t *tail;
-  int has_public_lembeh;
+  int has_public_main;
 } ir_prog_t;
 
 ir_entry_t *ir_entry_new(ir_entry_kind_t kind);

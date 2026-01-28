@@ -21,8 +21,9 @@ static void push(ir_prog_t *p, ir_entry_t *e) {
 }
 
 void ir_init(ir_prog_t *p) {
+  if (!p) return;
   p->head = p->tail = NULL;
-  p->has_public_lembeh = 0;
+  p->has_public_main = 0;
 }
 
 ir_entry_t *ir_entry_new(ir_entry_kind_t k) {
@@ -37,7 +38,6 @@ ir_entry_t *ir_entry_new(ir_entry_kind_t k) {
 static void free_op(ir_op_t *op) {
   if (!op) return;
   free(op->sym);
-  free(op->str);
   free(op->mem_base);
   if (op->loc.unit) free(op->loc.unit);
 }
@@ -171,7 +171,7 @@ int ir_append_public(ir_prog_t *p, const char *sym) {
   e->u.dir.dir_kind = IR_DIR_PUBLIC;
   e->u.dir.name = dupstr(sym);
   if (!e->u.dir.name) { free(e); return -1; }
-  if (strcmp(sym, "lembeh_handle") == 0) p->has_public_lembeh = 1;
+  if (strcmp(sym, "main") == 0) p->has_public_main = 1;
   push(p, e);
   return 0;
 }

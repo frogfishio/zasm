@@ -36,15 +36,7 @@ rg -q 'import "env" "zi_end".*\(param i32\).*(result i32)' "$wat"
 rg -q 'import "env" "zi_telemetry".*\(param i64 i32 i64 i32\).*(result i32)' "$wat"
 rg -q 'import "env" "zi_alloc".*\(param i32\).*\(result i64\)' "$wat"
 rg -q 'import "env" "zi_free".*\(param i64\).*\(result i32\)' "$wat"
-rg -q 'func \$lembeh_handle \(export "lembeh_handle"\)' "$wat"
-
-awk '
-  /func \$lembeh_handle/ {in_func=1}
-  in_func && /call \$main/ {main=1}
-  in_func && /call \$zi_end/ {if (main) ok=1}
-  in_func && /^  \)/ {exit ok ? 0 : 1}
-  END {exit ok ? 0 : 1}
-' "$wat"
+rg -q 'export "main" \(func \$main\)' "$wat"
 
 rg -q '"primitives":\[\]' "$manifest"
 
@@ -64,7 +56,7 @@ if "$zld_bin" --tool --verbose -o "$build_dir/public_lembeh_handle.wat" "$public
   echo "expected failure for PUBLIC lembeh_handle" >&2
   exit 1
 fi
-rg -q "PUBLIC cannot export lembeh_handle" "$public_err"
+rg -q "lembeh_handle is deprecated; use main" "$public_err"
 rg -q "mode=tool" "$public_err"
 
 extern_jsonl="$build_dir/extern_primitive.jsonl"
