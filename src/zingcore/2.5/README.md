@@ -127,6 +127,25 @@ Stream format (packed little-endian):
 - `u32 argc`
 - Repeat `argc` times: `u32 len`, then `bytes[len]`
 
+## Env capability (golden)
+
+zingcore 2.5 exposes environment variables as a capability (not a core syscall):
+
+- kind: `"proc"`
+- name: `"env"`
+- version: `1`
+
+Open semantics:
+
+- `zi_cap_open` with kind/name matching `proc/env` returns a **read-only** stream handle.
+- Open params must be empty (`params_len=0`).
+
+Stream format (packed little-endian):
+
+- `u32 version` (currently 1)
+- `u32 envc`
+- Repeat `envc` times: `u32 len`, then `bytes[len]` (typically `KEY=VALUE`)
+
 ## Example: stdio + extra caps
 
 See `zingcore/examples/stdio_caps_demo.c` for a concrete embedding that:

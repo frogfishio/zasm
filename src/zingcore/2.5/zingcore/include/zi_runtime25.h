@@ -61,6 +61,11 @@ const zi_mem_v1 *zi_runtime25_mem(void);
 void zi_runtime25_set_argv(int argc, const char *const *argv);
 void zi_runtime25_get_argv(int *out_argc, const char *const **out_argv);
 
+// Configure the process environment snapshot for capability implementations.
+// If not set, env-related caps treat envc as 0.
+void zi_runtime25_set_env(int envc, const char *const *envp);
+void zi_runtime25_get_env(int *out_envc, const char *const **out_envp);
+
 // Helpers for common embedding modes.
 //
 // Native embedding where guest pointers are process pointers.

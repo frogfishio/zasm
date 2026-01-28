@@ -24,6 +24,7 @@ SRC := \
 	$(SRCDIR)/zi_syscalls_caps25.c \
 	$(SRCDIR)/zi_file_fs25.c \
 	$(SRCDIR)/zi_proc_argv25.c \
+	$(SRCDIR)/zi_proc_env25.c \
 	$(SRCDIR)/zi_caps.c \
 	$(SRCDIR)/zi_async.c \
 	$(SRCDIR)/zi_problem.c \
@@ -38,14 +39,17 @@ OBJ := \
 	$(BUILD)/zi_syscalls_caps25.o \
 	$(BUILD)/zi_file_fs25.o \
 	$(BUILD)/zi_proc_argv25.o \
+	$(BUILD)/zi_proc_env25.o \
 	$(BUILD)/zi_caps.o \
 	$(BUILD)/zi_async.o \
 	$(BUILD)/zi_problem.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_argv_cap test_sysabi25_env_cap
 
-.PHONY: test
+EXAMPLES := stdio_caps_demo all_caps_demo
+
+.PHONY: test examples itest
 
 .PHONY: all clean dirs dist-dirs dist-debug
 
@@ -73,6 +77,24 @@ test: $(LIB) $(addprefix $(BUILD)/,$(addsuffix .o,$(TESTS)))
 	  $(CC) $(CFLAGS) "$(BUILD)/$$t.o" $(LIB) -o "$$bin"; \
 	  "$$bin"; \
 	done
+
+examples: $(LIB)
+	@set -e; \
+	for e in $(EXAMPLES); do \
+	  bin="$(BUILD)/$$e"; \
+	  $(CC) $(CFLAGS) -I$(INCDIR) "zingcore/examples/$$e.c" $(LIB) -o "$$bin"; \
+	done
+
+itest: examples
+	@set -e; \
+	bin="$(BUILD)/all_caps_demo"; \
+	root="$$(mktemp -d -t zi_fs_root)"; \
+	out="$$(ZI_FS_ROOT="$$root" "$$bin" arg1 arg2 2>&1)"; \
+	echo "$$out" | grep -q "^ok$$"; \
+	echo "$$out" | grep -q -- "- file/fs"; \
+	echo "$$out" | grep -q -- "- proc/argv"; \
+	echo "$$out" | grep -q -- "- proc/env"; \
+	rm -rf "$$root"
 
 dist-debug: all dist-dirs
 	cp $(LIB) $(DIST_LIB)/

@@ -4,6 +4,7 @@
 #include "zi_file_fs25.h"
 #include "zi_handles25.h"
 #include "zi_proc_argv25.h"
+#include "zi_proc_env25.h"
 #include "zi_runtime25.h"
 #include "zi_sysabi25.h"
 
@@ -264,6 +265,46 @@ static int dump_argv_via_cap(int argc, char **argv) {
   return 1;
 }
 
+static int dump_env_via_cap(const char *const *envp) {
+  int envc = 0;
+  if (envp) {
+    while (envp[envc]) envc++;
+  }
+  zi_runtime25_set_env(envc, envp);
+
+  uint8_t req[40];
+  build_open_req(req, ZI_CAP_KIND_PROC, ZI_CAP_NAME_ENV, NULL, 0);
+
+  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (h < 3) {
+    fprintf(stderr, "proc/env open failed: %d\n", h);
+    return 0;
+  }
+
+  uint8_t buf[4096];
+  uint32_t off = 0;
+  for (;;) {
+    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + off), (zi_size32_t)(sizeof(buf) - off));
+    if (n < 0) {
+      fprintf(stderr, "proc/env read failed: %d\n", n);
+      (void)zi_end(h);
+      return 0;
+    }
+    if (n == 0) break;
+    off += (uint32_t)n;
+    if (off == sizeof(buf)) break;
+  }
+
+  if (off >= 8) {
+    uint32_t ver = zcl1_read_u32(buf + 0);
+    uint32_t ec = zcl1_read_u32(buf + 4);
+    fprintf(stderr, "env v%u envc=%u\n", ver, ec);
+  }
+
+  (void)zi_end(h);
+  return 1;
+}
+
 static int fs_smoke(void) {
   const char *root = getenv("ZI_FS_ROOT");
   const char *guest_path = "/all_caps_demo.txt";
@@ -348,6 +389,8 @@ static zi_cap_v1 cap_demo_version_v1 = {
     .meta_len = 25,
 };
 
+extern const char **environ;
+
 int main(int argc, char **argv) {
   if (!zingcore25_init()) {
     fprintf(stderr, "zingcore25_init failed\n");
@@ -369,6 +412,7 @@ int main(int argc, char **argv) {
   (void)zi_cap_register(&cap_demo_version_v1);
   (void)zi_file_fs25_register();
   (void)zi_proc_argv25_register();
+  (void)zi_proc_env25_register();
 
   // Wire stdio handles.
   (void)zi_handles25_init();
@@ -392,6 +436,11 @@ int main(int argc, char **argv) {
 
   if (!dump_argv_via_cap(argc, argv)) {
     fprintf(stderr, "argv cap failed\n");
+    return 1;
+  }
+
+  if (!dump_env_via_cap((const char *const *)environ)) {
+    fprintf(stderr, "env cap failed\n");
     return 1;
   }
 

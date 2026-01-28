@@ -6,6 +6,8 @@ static const zi_host_v1 *g_host;
 static const zi_mem_v1 *g_mem;
 static int g_argc;
 static const char *const *g_argv;
+static int g_envc;
+static const char *const *g_envp;
 
 void zi_runtime25_set_host(const zi_host_v1 *host) { g_host = host; }
 void zi_runtime25_set_mem(const zi_mem_v1 *mem) { g_mem = mem; }
@@ -21,6 +23,16 @@ void zi_runtime25_set_argv(int argc, const char *const *argv) {
 void zi_runtime25_get_argv(int *out_argc, const char *const **out_argv) {
   if (out_argc) *out_argc = g_argc;
   if (out_argv) *out_argv = g_argv;
+}
+
+void zi_runtime25_set_env(int envc, const char *const *envp) {
+  g_envc = (envc < 0) ? 0 : envc;
+  g_envp = envp;
+}
+
+void zi_runtime25_get_env(int *out_envc, const char *const **out_envp) {
+  if (out_envc) *out_envc = g_envc;
+  if (out_envp) *out_envp = g_envp;
 }
 
 static int native_map_ro(void *ctx, zi_ptr_t ptr, zi_size32_t len, const uint8_t **out) {
