@@ -75,6 +75,19 @@ for tool in lower zem zld ircheck; do
   rsync -a "$tool_src/$tool" "$platform_out/bin/"
 done
 
+# Smoke-test the packaged tools (fail fast rather than shipping a broken pack).
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/zasm-integration-pack-smoke-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+smoke_ir="$tmp_dir/zem_min_ret.jsonl"
+printf '%s\n' \
+  '{"ir":"zasm-v1.1","k":"meta"}' \
+  '{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[]}' \
+  >"$smoke_ir"
+
+"$platform_out/bin/ircheck" --tool "$smoke_ir" >/dev/null
+"$platform_out/bin/zem" "$smoke_ir" >/dev/null
+
 # Libraries
 rsync -a "$zing_lib" "$platform_out/lib/"
 

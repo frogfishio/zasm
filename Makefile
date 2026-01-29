@@ -163,6 +163,7 @@ zas zld zrun zlnt lower: $(VERSION_HEADER)
 dist: build
 	$(MAKE) clean
 	$(MAKE) dist-$(PLATFORM)
+	$(MAKE) dist-integration-pack PLATFORM=$(PLATFORM)
 
 DIST_TOOLS := zas zld ircheck zlnt zop zxc zir
 ifneq ($(NO_ZRUN),1)
@@ -250,6 +251,7 @@ test-validation: test-zduel-smoke
 test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
 test-validation: test-zem-emit-cert-smoke
+test-validation: test-zem-min-ret
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
@@ -314,6 +316,9 @@ test-zduel-smoke: zem
 
 test-zem-stdin-program: zas zem
 	sh test/zem_stdin_program.sh
+
+test-zem-min-ret: zem
+	sh test/zem_min_ret_smoke.sh
 
 test-zem-emit-cert-smoke: zas zem
 	sh test/zem_emit_cert_smoke.sh
@@ -688,10 +693,10 @@ dist-integrator-pack:
 
 
 integration-pack: lower zem zld ircheck
-	./docs/integration_pack/pack.sh $(CURDIR)/integration_pack
+	./docs/integration_pack/pack.sh $(CURDIR)/integration_pack $(PLATFORM)
 
 dist-integration-pack: lower zem zld ircheck
-	./docs/integration_pack/pack.sh $(CURDIR)/dist/integration-pack
+	./docs/integration_pack/pack.sh $(CURDIR)/dist/integration-pack $(PLATFORM)
 
 clean:
 	rm -rf $(BUILD) $(BIN_ROOT)
