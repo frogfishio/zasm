@@ -24,6 +24,7 @@ Inside a platform folder:
 - `docs/` — tool + spec docs
 - `schema/` — JSON schemas for IR (ship IR **v1.1**)
 - `conformance/` — JSONL-only conformance fixtures (schema/record validation)
+- `examples/` — small C templates (host shim + cap usage)
 
 ## Build the pack
 
@@ -62,6 +63,14 @@ Then call `zi_hostlib25_init_all()` early in `main()`.
 A minimal template is shipped in the pack at:
 
 - `./dist/integration-pack/macos-arm64/examples/host_shim/`
+
+That folder also includes a small `echo_zabi25_native.jsonl` sample so the pack is self-contained.
+
+### Capability example: get a time value
+
+The pack also includes a tiny host-side example that opens `sys/info@v1` and requests `TIME_NOW` (ZCL1) to retrieve timestamps:
+
+- `./dist/integration-pack/macos-arm64/examples/sys_info_time_now/`
 
 ## IR version
 

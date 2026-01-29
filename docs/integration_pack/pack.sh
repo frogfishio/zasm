@@ -17,10 +17,15 @@ fi
 zing_root="$root_dir/src/zingcore/2.5"
 zing_dist="$zing_root/dist/debug"
 
-zing_lib="$zing_dist/lib/libzingcore25.a"
+# Prefer the archive produced by the zingcore build (contains host shim helpers).
+zing_lib="$zing_root/build/libzingcore25.a"
 if [ ! -f "$zing_lib" ]; then
-  echo "missing zingcore runtime archive: $zing_lib" >&2
-  echo "(did you build zingcore 2.5 yet?)" >&2
+  zing_lib="$zing_dist/lib/libzingcore25.a"
+fi
+if [ ! -f "$zing_lib" ]; then
+  echo "missing zingcore runtime archive (tried build/ and dist/debug):" >&2
+  echo "  $zing_root/build/libzingcore25.a" >&2
+  echo "  $zing_dist/lib/libzingcore25.a" >&2
   exit 2
 fi
 
@@ -119,9 +124,7 @@ fi
 # Examples (host shim template for native `lower` outputs)
 if [ -d "$root_dir/docs/integration_pack/examples" ]; then
   rsync -a "$root_dir/docs/integration_pack/examples/" "$platform_out/examples/"
-  if [ -f "$platform_out/examples/host_shim/build.sh" ]; then
-    chmod +x "$platform_out/examples/host_shim/build.sh" || true
-  fi
+  find "$platform_out/examples" -maxdepth 3 -type f -name '*.sh' -exec chmod +x {} \; || true
 fi
 
 echo "Wrote integration pack to $platform_out"
