@@ -40,10 +40,19 @@ int zmin_ir_main(int argc, char **argv);
 int ztriage_main(int argc, char **argv);
 int zduel_main(int argc, char **argv);
 
-// Optional: query the host-side capability registry (if linked).
-#include "zingcore2.2_final/zingcore/include/zi_caps.h"
-#include "zingcore2.2_final/zingcore/include/zi_async.h"
-#include "zingcore2.2_final/zingcore/include/zing_hash.h"
+// Optional: query the host-side capability/selector registries (if linked).
+#include "zi_caps.h"
+#include "zi_async.h"
+#include "zingcore25.h"
+
+#include "zi_async_default25.h"
+#include "zi_event_bus25.h"
+#include "zi_file_fs25.h"
+#include "zi_net_tcp25.h"
+#include "zi_proc_argv25.h"
+#include "zi_proc_env25.h"
+#include "zi_proc_hopper25.h"
+#include "zi_sys_info25.h"
 
 // Allow zem to link even if a different host runtime omits caps.
 #if defined(__APPLE__)
@@ -60,6 +69,20 @@ static int has_selector(const char *kind, const char *name, const char *selector
 }
 
 static void print_caps(FILE *out) {
+  // Ensure zingcore25 has initialized its registries.
+  (void)zingcore25_init();
+
+  // Register built-in caps/selectors so the registry is meaningful.
+  (void)zi_async_default25_register();
+  (void)zi_async_default25_register_selectors();
+  (void)zi_event_bus25_register();
+  (void)zi_file_fs25_register();
+  (void)zi_net_tcp25_register();
+  (void)zi_proc_argv25_register();
+  (void)zi_proc_env25_register();
+  (void)zi_proc_hopper25_register();
+  (void)zi_sys_info25_register();
+
   if (!zi_cap_registry) {
     fprintf(out, "caps: (unavailable)\n");
     return;
@@ -75,14 +98,18 @@ static void print_caps(FILE *out) {
             c->cap_flags);
   }
 
-  // Zingcore 2.2 exposes selector registration via zi_async_register/zi_async_find,
-  // but does not (currently) provide a public enumeration API. For debugging and
-  // smoke tests, probe for a small set of well-known selectors.
-  fprintf(out, "exec.selectors:\n");
-  int has_exec = has_selector("exec", "run", "exec.run.v1");
-  if (has_exec) {
-    fprintf(out, "- exec/run");
-    if (has_selector("exec", "run", "exec.run.v1")) fprintf(out, " exec.run.v1");
+  // Zingcore exposes selector registration via zi_async_register/zi_async_find,
+  // but does not provide a public enumeration API. For debugging and smoke tests,
+  // probe for a small set of well-known selectors.
+  fprintf(out, "async/default.selectors:\n");
+  int has_async_default = has_selector("async", "default", "ping.v1") ||
+                          has_selector("async", "default", "fail.v1") ||
+                          has_selector("async", "default", "hold.v1");
+  if (has_async_default) {
+    fprintf(out, "- async/default");
+    if (has_selector("async", "default", "ping.v1")) fprintf(out, " ping.v1");
+    if (has_selector("async", "default", "fail.v1")) fprintf(out, " fail.v1");
+    if (has_selector("async", "default", "hold.v1")) fprintf(out, " hold.v1");
     fprintf(out, "\n");
   } else {
     fprintf(out, "- (none)\n");
@@ -147,7 +174,7 @@ static void print_help(FILE *out) {
       "                  CALL, RET, shifts/rotates, mul/div/rem, LD*/ST*\n",
       "  - Primitives (Zingcore ABI v2, preferred):\n",
       "               CALL zi_abi_version   (HL=0x00020005)\n",
-      "               CALL zi_abi_features  (DE:HL = feature bits)\n",
+      "               CALL zi_ctl           (HL=req_ptr64, DE=req_len, BC=resp_ptr64, IX=resp_cap, HL=n_or_err)\n",
       "               CALL zi_alloc         (HL=size, HL=ptr_or_err)\n",
       "               CALL zi_free          (HL=ptr, HL=rc)\n",
       "               CALL zi_enum_alloc    (HL=key_lo, DE=key_hi, BC=slot_size, DE:HL=ptr_or_0)\n",
@@ -155,6 +182,11 @@ static void print_help(FILE *out) {
       "               CALL zi_write         (HL=h, DE=src_ptr64, BC=len, HL=n_or_err)\n",
       "               CALL zi_end           (HL=h, HL=rc)\n",
       "               CALL zi_telemetry     (HL=topic_ptr64, DE=topic_len, BC=msg_ptr64, IX=msg_len, HL=rc)\n",
+      "               CALL zi_cap_count     (HL=n_or_err)\n",
+      "               CALL zi_cap_get_size  (HL=i, HL=need_or_err)\n",
+      "               CALL zi_cap_get       (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n",
+      "               CALL zi_cap_open      (HL=req_ptr64, HL=h_or_err)\n",
+      "               CALL zi_handle_hflags (HL=h, HL=hflags_or_0)\n",
       "               CALL zi_argc          (HL=argc)\n",
       "               CALL zi_argv_len      (HL=i, HL=len_or_err)\n",
       "               CALL zi_argv_copy     (HL=i, DE=out_ptr64, BC=cap, HL=written_or_err)\n",

@@ -9,6 +9,8 @@
 
 #include "zem_exec_internal.h"
 
+#include "zi_sysabi25.h"
+
 int zem_exec_call_env_time_proc(zem_exec_ctx_t *ctx, const record_t *r,
                                 zem_op_t op) {
   if (!ctx || !r) return 0;
@@ -28,35 +30,12 @@ int zem_exec_call_env_time_proc(zem_exec_ctx_t *ctx, const record_t *r,
   const int trace_pending = (ctx->trace_pending ? *ctx->trace_pending : 0);
   zem_trace_meta_t *trace_meta = ctx->trace_meta;
 
-  enum {
-    ZI_ABI_V2_5 = 0x00020005u,
-    ZI_OK = 0,
-    ZI_E_INVALID = -1,
-    ZI_E_BOUNDS = -2,
-    ZI_E_NOENT = -3,
-    ZI_E_NOSYS = -7,
-  };
-
   const char *callee = r->ops[0].s;
 
   if (strcmp(callee, "zi_abi_version") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
-    regs->HL = (uint64_t)ZI_ABI_V2_5;
+    regs->HL = (uint64_t)ZI_SYSABI25_ZABI_VERSION;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
-                     r->m);
-    *ctx->pc = pc + 1;
-    return 1;
-  }
-
-  if (strcmp(callee, "zi_abi_features") == 0) {
-    if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
-    const uint64_t feats = (1ull << 2) /* ZI_FEAT_TIME */ |
-                           (1ull << 4) /* ZI_FEAT_PROC */;
-    regs->HL = (uint64_t)(uint32_t)(feats & 0xffffffffu);
-    regs->DE = (uint64_t)(uint32_t)(feats >> 32);
-    zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
-                     r->m);
-    zem_regprov_note(regprov, ZEM_REG_DE, (uint32_t)pc, cur_label, r->line,
                      r->m);
     *ctx->pc = pc + 1;
     return 1;
@@ -349,17 +328,79 @@ int zem_exec_call_env_time_proc(zem_exec_ctx_t *ctx, const record_t *r,
 
   if (strcmp(callee, "zi_cap_count") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
-    regs->HL = 0;
+    int32_t n = zi_cap_count();
+    regs->HL = (uint64_t)(uint32_t)n;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
     *ctx->pc = pc + 1;
     return 1;
   }
 
-  if (strcmp(callee, "zi_cap_get_size") == 0 || strcmp(callee, "zi_cap_get") == 0 ||
-      strcmp(callee, "zi_cap_open") == 0) {
+  if (strcmp(callee, "zi_cap_get_size") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
-    regs->HL = (uint64_t)(uint32_t)ZI_E_NOENT;
+    uint32_t index_u = 0;
+    if (!zabi_u32_from_u64(regs->HL, &index_u)) {
+      regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
+    int32_t rc = zi_cap_get_size((int32_t)index_u);
+    regs->HL = (uint64_t)(uint32_t)rc;
+    zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                     r->m);
+    *ctx->pc = pc + 1;
+    return 1;
+  }
+
+  if (strcmp(callee, "zi_cap_get") == 0) {
+    if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
+    uint32_t index_u = 0;
+    uint32_t out_ptr = 0;
+    uint32_t out_cap = 0;
+    if (!zabi_u32_from_u64(regs->HL, &index_u) ||
+        !zabi_u32_from_u64(regs->DE, &out_ptr) ||
+        !zabi_u32_from_u64(regs->BC, &out_cap)) {
+      regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
+    if (!mem_check_span(mem, out_ptr, out_cap)) {
+      regs->HL = (uint64_t)(uint32_t)ZI_E_BOUNDS;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
+    int32_t n = zi_cap_get((int32_t)index_u, (zi_ptr_t)out_ptr, (zi_size32_t)out_cap);
+    if (n > 0) {
+      uint32_t wlen = (uint32_t)n;
+      if (wlen > out_cap) wlen = out_cap;
+      zem_watchset_note_write(ctx->watches, out_ptr, wlen, (uint32_t)pc, cur_label,
+                              r->line);
+    }
+    regs->HL = (uint64_t)(uint32_t)n;
+    zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                     r->m);
+    *ctx->pc = pc + 1;
+    return 1;
+  }
+
+  if (strcmp(callee, "zi_cap_open") == 0) {
+    if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
+    uint32_t req_ptr = 0;
+    if (!zabi_u32_from_u64(regs->HL, &req_ptr)) {
+      regs->HL = (uint64_t)(uint32_t)ZI_E_INVALID;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
+    zi_handle_t h = zi_cap_open((zi_ptr_t)req_ptr);
+    regs->HL = (uint64_t)(uint32_t)h;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
     *ctx->pc = pc + 1;
@@ -368,7 +409,16 @@ int zem_exec_call_env_time_proc(zem_exec_ctx_t *ctx, const record_t *r,
 
   if (strcmp(callee, "zi_handle_hflags") == 0) {
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
-    regs->HL = 0;
+    uint32_t h_u = 0;
+    if (!zabi_u32_from_u64(regs->HL, &h_u)) {
+      regs->HL = 0;
+      zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
+                       r->m);
+      *ctx->pc = pc + 1;
+      return 1;
+    }
+    uint32_t flags = zi_handle_hflags((zi_handle_t)(int32_t)h_u);
+    regs->HL = (uint64_t)flags;
     zem_regprov_note(regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
                      r->m);
     *ctx->pc = pc + 1;

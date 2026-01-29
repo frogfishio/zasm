@@ -15,7 +15,7 @@ zABI 2.x replaces the retired legacy “stream ABI” (`req_read/res_write/_ctl`
 - `main(req: i32, res: i32) -> ()` (WASM runner entrypoint)
   - Required by `zrun`.
   - Must close `res` via `zi_end(res)` before returning.
-  - Note: `lembeh_handle` is legacy/deprecated.
+  - Note: legacy `lembeh_handle` entrypoints are not supported.
 - `memory` (WASM linear memory)
   - Required for any ABI calls that read/write guest memory.
 
@@ -27,8 +27,8 @@ Core syscalls (required):
 
 - `zi_abi_version() -> i32`
   - Must return `0x00020005` for zABI 2.5.
-- `zi_abi_features() -> i64`
-  - Feature bitset (0 for “no optional features”).
+- `zi_ctl(req_ptr: i64, req_len: i32, resp_ptr: i64, resp_cap: i32) -> i32`
+  - Control-plane request/response used for discovery and structured host queries.
 - `zi_alloc(size: i32) -> i64`
   - Allocates `size` bytes in guest memory; returns guest pointer/offset or negative error.
 - `zi_free(ptr: i64) -> i32`
@@ -39,13 +39,13 @@ Core syscalls (required):
   - Writes `len` bytes from guest memory at `src_ptr`; returns bytes written or negative error.
 - `zi_end(h: i32) -> i32`
   - Closes a handle/stream; returns `0` or negative error.
-- `zi_telemetry(topic_ptr: i32, topic_len: i32, msg_ptr: i32, msg_len: i32) -> i32`
+- `zi_telemetry(topic_ptr: i64, topic_len: i32, msg_ptr: i64, msg_len: i32) -> i32`
   - Best-effort debug/telemetry channel; returns `0` or negative error.
 
 Notes:
 
 - In wasm32, `*_ptr` values are passed as `i64` but represent a **u32 linear-memory offset**.
-- Optional subsystems (caps/fs/async/etc.) extend the `env.zi_*` surface and must be negotiated via `zi_abi_features()`.
+- Optional subsystems (caps/fs/async/etc.) extend the `env.zi_*` surface and are discovered via `zi_ctl` (e.g. CAPS_LIST).
 
 ## Globals
 
@@ -68,7 +68,11 @@ Notes:
 ## Capability gating
 
 - Hosts MUST provide at least the core syscalls above.
-- Optional syscalls must be feature-gated and must fail closed when not supported.
+- Optional subsystems MUST fail closed when not supported.
+
+Discovery:
+
+- Capability discovery/negotiation is performed via `zi_ctl` (ZCL1 frames), not a feature bitset.
 
 ## ABI decisions
 
@@ -94,9 +98,9 @@ Notes:
 ## Versioning
 
 - Hosts and guests MUST reject unknown or mismatched ABI versions.
-- Feature negotiation is via `zi_abi_features()` (bitset).
+- Capability discovery/negotiation is via `zi_ctl` (structured control-plane).
 
 ## Compatibility
 
 - zABI version is **2.0** (`0x00020000`).
-- Backward-compatible additions MAY be introduced in later minor versions gated by `zi_abi_features()`.
+- Backward-compatible additions MAY be introduced in later minor versions gated by `zi_ctl` discovery.

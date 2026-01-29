@@ -1,21 +1,20 @@
 <!-- SPDX-FileCopyrightText: 2025 Frogfish -->
 <!-- SPDX-License-Identifier: GPL-3.0-or-later -->
 
-# zABI 2.0 (Normative)
+# zABI 2.5 (Normative)
 
-This document defines the required host ABI for ZASM-generated modules (**zABI 2.0**).
+This document defines the required host ABI for ZASM-generated modules (**zABI 2.5**).
 All conforming modules and hosts MUST follow this contract.
 
-zABI 2.0 replaces the retired legacy “stream ABI” (`req_read/res_write`).
+zABI 2.5 replaces the retired legacy “stream ABI” (`req_read/res_write`).
 
 ## Module interface
 
 ### Exports
 
-- `lembeh_handle(req: i32, res: i32) -> ()` (WASM runner entrypoint wrapper)
-  - Required for `zrun` today.
-  - Must call the module’s internal `$main` and then close `res` via `zi_end(res)`.
-  - Note: the export name is legacy; the ABI surface is zABI 2.0.
+- `main(req: i32, res: i32) -> ()` (WASM runner entrypoint)
+  - Required by `zrun`.
+  - Must close `res` via `zi_end(res)` before returning.
 - `memory` (WASM linear memory)
   - Required for ABI calls that read/write guest memory.
 
@@ -25,14 +24,14 @@ All zABI imports live under module name `"env"`.
 
 Core syscalls (required):
 
-- `zi_abi_version() -> i32` (must return `0x00020000`)
-- `zi_abi_features() -> i64`
+- `zi_abi_version() -> i32` (must return `0x00020005`)
+- `zi_ctl(req_ptr: i64, req_len: i32, resp_ptr: i64, resp_cap: i32) -> i32`
 - `zi_alloc(size: i32) -> i64`
 - `zi_free(ptr: i64) -> i32`
 - `zi_read(h: i32, dst_ptr: i64, cap: i32) -> i32`
 - `zi_write(h: i32, src_ptr: i64, len: i32) -> i32`
 - `zi_end(h: i32) -> i32`
-- `zi_telemetry(topic_ptr: i32, topic_len: i32, msg_ptr: i32, msg_len: i32) -> i32`
+- `zi_telemetry(topic_ptr: i64, topic_len: i32, msg_ptr: i64, msg_len: i32) -> i32`
 
 ## Globals
 
@@ -52,9 +51,13 @@ Core syscalls (required):
 ## Capability gating
 
 - Hosts MUST provide at least the core syscalls above.
-- Optional syscalls must be feature-gated and fail closed when not supported.
+- Optional subsystems MUST fail closed when not supported.
+
+Discovery:
+
+- Capability discovery/negotiation is performed via `zi_ctl` (ZCL1 frames), not a feature bitset.
 
 ## Compatibility
 
-- zABI version is **2.0** (`0x00020000`).
-- Backward-compatible additions MAY be introduced in later minor versions gated by `zi_abi_features()`.
+- zABI version is **2.5** (`0x00020005`).
+- Backward-compatible additions MAY be introduced in later minor versions gated by `zi_ctl` discovery.

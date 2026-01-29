@@ -6,8 +6,8 @@
 This is a minimal C interface for hosts that integrate ZASM modules without WebAssembly.
 It targets the retired legacy stream ABI and is kept for reference only.
 
-Note: modern zABI modules use `main(req, res)` as the entrypoint export for `zrun`.
-This legacy interface uses `lembeh_handle(req, res)`.
+Note: modern zABI modules use `main(req, res)` as the module entrypoint for `zrun`.
+This legacy interface is kept for reference only; native apps use a normal `int main(...)`.
 
 ## Files
 
@@ -27,7 +27,7 @@ static int32_t host_alloc(int32_t size);
 static void host_free(int32_t ptr);
 static int32_t host_ctl(int32_t req_ptr, int32_t req_len, int32_t resp_ptr, int32_t resp_cap);
 
-extern void lembeh_handle(int32_t req, int32_t res);
+extern void guest_entry(int32_t req, int32_t res);
 
 int main(void) {
   lembeh_host_vtable_t host = {
@@ -41,10 +41,10 @@ int main(void) {
   };
   lembeh_bind_host(&host);
   lembeh_bind_memory(guest_mem, guest_mem_cap);
-  return lembeh_invoke(lembeh_handle, 0, 0);
+  return lembeh_invoke(guest_entry, 0, 0);
 }
 ```
 
 ## Contract
 
-This interface documents the retired stream ABI; it is not the zABI 2.0 host surface.
+This interface documents the retired stream ABI; it is not the zABI host surface.

@@ -35,25 +35,6 @@ static wasm_functype_t* functype_void_to_i32(void) {
   return wasm_functype_new(&params, &results);
 }
 
-static wasm_functype_t* functype_void_to_i64(void) {
-  wasm_valtype_vec_t params;
-  wasm_valtype_vec_new_empty(&params);
-  wasm_valtype_vec_t results;
-  wasm_valtype_vec_new_uninitialized(&results, 1);
-  results.data[0] = wasm_valtype_new_i64();
-  return wasm_functype_new(&params, &results);
-}
-
-static wasm_functype_t* functype_i32_i32_to_void(void) {
-  wasm_valtype_vec_t params;
-  wasm_valtype_vec_new_uninitialized(&params, 2);
-  params.data[0] = wasm_valtype_new_i32();
-  params.data[1] = wasm_valtype_new_i32();
-  wasm_valtype_vec_t results;
-  wasm_valtype_vec_new_empty(&results);
-  return wasm_functype_new(&params, &results);
-}
-
 static wasm_functype_t* functype_i32_i64_i32_to_i32(void) {
   wasm_valtype_vec_t params;
   wasm_valtype_vec_new_uninitialized(&params, 3);
@@ -98,16 +79,6 @@ static wasm_functype_t* functype_i32_i64_i32_i32_to_i32(void) {
   wasm_valtype_vec_t results;
   wasm_valtype_vec_new_uninitialized(&results, 1);
   results.data[0] = wasm_valtype_new_i32();
-  return wasm_functype_new(&params, &results);
-}
-
-static wasm_functype_t* functype_i64_to_i64(void) {
-  wasm_valtype_vec_t params;
-  wasm_valtype_vec_new_uninitialized(&params, 1);
-  params.data[0] = wasm_valtype_new_i64();
-  wasm_valtype_vec_t results;
-  wasm_valtype_vec_new_uninitialized(&results, 1);
-  results.data[0] = wasm_valtype_new_i64();
   return wasm_functype_new(&params, &results);
 }
 
@@ -188,19 +159,6 @@ static wasm_functype_t* functype_i32_to_i32(void) {
   return wasm_functype_new(&params, &results);
 }
 
-static wasm_functype_t* functype_i32_i32_i32_i32_to_i32(void) {
-  wasm_valtype_vec_t params;
-  wasm_valtype_vec_new_uninitialized(&params, 4);
-  params.data[0] = wasm_valtype_new_i32();
-  params.data[1] = wasm_valtype_new_i32();
-  params.data[2] = wasm_valtype_new_i32();
-  params.data[3] = wasm_valtype_new_i32();
-  wasm_valtype_vec_t results;
-  wasm_valtype_vec_new_uninitialized(&results, 1);
-  results.data[0] = wasm_valtype_new_i32();
-  return wasm_functype_new(&params, &results);
-}
-
 static wasm_functype_t* functype_i64_i32_i64_i32_to_i32(void) {
   wasm_valtype_vec_t params;
   wasm_valtype_vec_new_uninitialized(&params, 4);
@@ -224,16 +182,14 @@ static wasm_functype_t* functype_i64_to_i32(void) {
   return wasm_functype_new(&params, &results);
 }
 
-static wasm_trap_t* zrun_stub_i32_i32_to_void(void* env, wasmtime_caller_t* caller,
-                                              const wasmtime_val_t* args, size_t nargs,
-                                              wasmtime_val_t* results, size_t nresults) {
-  (void)env;
-  (void)caller;
-  (void)args;
-  (void)nargs;
-  (void)results;
-  (void)nresults;
-  return NULL;
+static wasm_functype_t* functype_i64_to_i64(void) {
+  wasm_valtype_vec_t params;
+  wasm_valtype_vec_new_uninitialized(&params, 1);
+  params.data[0] = wasm_valtype_new_i64();
+  wasm_valtype_vec_t results;
+  wasm_valtype_vec_new_uninitialized(&results, 1);
+  results.data[0] = wasm_valtype_new_i64();
+  return wasm_functype_new(&params, &results);
 }
 
 static wasm_trap_t* zrun_stub_ret_i32_nosys(void* env, wasmtime_caller_t* caller,
@@ -282,12 +238,6 @@ int zrun_link_zabi_imports(wasmtime_store_t* store, wasmtime_linker_t* linker,
   ty = functype_void_to_i32();
   err = wasmtime_linker_define_func(linker, LIT("env"), LIT("zi_abi_version"), ty,
                                     zrun_zi_abi_version, env, NULL);
-  wasm_functype_delete(ty);
-  if (err) { zrun_print_error(err); return 1; }
-
-  ty = functype_void_to_i64();
-  err = wasmtime_linker_define_func(linker, LIT("env"), LIT("zi_abi_features"), ty,
-                                    zrun_zi_abi_features, env, NULL);
   wasm_functype_delete(ty);
   if (err) { zrun_print_error(err); return 1; }
 

@@ -3,7 +3,7 @@
 
 # zrun
 
-Local runner for modules that export `lembeh_handle(req,res)` and use zABI 2.0 imports under `"env"`. Accepts `.wat` or `.wasm` inputs.
+Local runner for modules that export `main` and use zABI 2.5 imports under `"env"`. Accepts `.wat` or `.wasm` inputs.
 
 ## Usage
 

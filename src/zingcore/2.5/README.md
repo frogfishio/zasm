@@ -6,22 +6,23 @@ We are intentionally freezing the existing vendor snapshot under `src/zem/zingco
 
 ## Goals
 
-- Treat **zABI** as a product surface: predictable, testable, and hard to misuse.
-- Provide a **host-side runtime** implementing the zABI 2.5 imports (`env.zi_*`) and capability model.
-- Make semantics **precise** and **portable** (no “accidental” behavior from platform quirks).
-- Keep codebase modular and auditable (avoid a monolithic `zingcore.c`).
 
 ## Non-goals (for now)
 
-- Replacing the current `zingcore2.2_final` usage in `zem`/`zrun` immediately.
-- Maintaining ABI1/underscore primitive compatibility.
-
 ## Design principles (“by the book”)
-
-- **Specification-first**: behavior is defined by docs/tests; implementation follows.
-- **Stable public headers** live in `zingcore/include/`.
 - **No constructor side effects** in product code paths unless explicitly intended and tested.
   - Cap/selector registration should be explicit and deterministic.
+
+### Native “all caps” hostlib
+
+For native-hosted programs (including objects produced by `lower`) that want a
+permissive, C-like environment, use `zi_hostlib25_init_all()`.
+
+- Wires zingcore25 for native pointers via `zi_mem_v1_native_init()`.
+- Exposes stdio as handles `0`/`1`/`2` (stdin/stdout/stderr).
+- Registers the currently implemented golden capabilities.
+
+See `zingcore/include/zi_hostlib25.h`.
 - **Enumerability**: capability/selector introspection should be first-class (no test-only hacks).
 - **Errors are structured**: stable error codes + stable messages where possible.
 - **Strictness**: invalid inputs are rejected consistently; no silent truncation.

@@ -11,11 +11,12 @@ out="$(bin/zem --caps)"
 # Must include the header line.
 echo "$out" | grep -q '^caps:'
 
-# With libzingcap_async linked, async/default should be registered.
-echo "$out" | grep -q 'async/default'
+# With zingcore25 linked, async/default + selectors should be present.
+echo "$out" | grep -q '^\- async/default '
+echo "$out" | grep -q '^async/default\.selectors:'
+echo "$out" | grep -q 'async/default ping\.v1'
 
-# With libzingcap_exec linked, exec selectors should be present.
-echo "$out" | grep -q '^exec\.selectors:'
-echo "$out" | grep -q 'exec/run'
+# sys/info@v1 is part of the 2.5 reference set.
+echo "$out" | grep -q '^\- sys/info '
 
 echo "ok"

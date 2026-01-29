@@ -2809,22 +2809,6 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
         continue;
       }
 
-      if (strcmp(callee, "zi_abi_features") == 0) {
-        if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
-        // Minimal feature bits exposed by zem.
-        // u64 return uses (DE:HL) as (hi32:lo32).
-        const uint64_t feats = (1ull << 2) /* ZI_FEAT_TIME */ |
-                               (1ull << 4) /* ZI_FEAT_PROC */;
-        regs.HL = (uint64_t)(uint32_t)(feats & 0xffffffffu);
-        regs.DE = (uint64_t)(uint32_t)(feats >> 32);
-        zem_regprov_note(&regprov, ZEM_REG_HL, (uint32_t)pc, cur_label, r->line,
-                         r->m);
-        zem_regprov_note(&regprov, ZEM_REG_DE, (uint32_t)pc, cur_label, r->line,
-                         r->m);
-        pc++;
-        continue;
-      }
-
       if (strcmp(callee, "zi_alloc") == 0) {
         if (trace_enabled && trace_pending) trace_meta.call_is_prim = 1;
         int32_t size = (int32_t)(uint32_t)regs.HL;

@@ -372,7 +372,7 @@ zasm is intended to be used as core infrastructure. The goal is a small surface 
   - unknown mnemonics/directives/operand forms are hard errors
   - unknown/duplicate symbols are hard errors
   - JSONL parse errors are hard errors with line numbers
-- **Single-module output**: one WAT module that exports `lembeh_handle(req,res)` and uses zABI 2.0 imports under `"env"`.
+- **Single-module output**: one WAT module that exports `main` and uses zABI 2.5 imports under `"env"`.
 
 ### Should-have (quality improvements)
 

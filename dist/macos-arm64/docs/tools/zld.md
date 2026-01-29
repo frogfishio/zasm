@@ -8,7 +8,7 @@
 ## MVP capabilities (current)
 
 - Imports zABI 2.5 syscalls under module `"env"` (e.g. `zi_read`, `zi_write`, `zi_end`, `zi_alloc`, `zi_free`, `zi_telemetry`).
-- Exports `lembeh_handle(req, res)` which calls `$main`, then `zi_end(res)`.
+- Exports `main` (module entrypoint).
 - Emits a `__heap_base` global for the allocator to seed dynamic memory.
 - Supports Zilog-mode subset used by `examples/hello.asm`:
   - `LD HL, <sym|num>`

@@ -17,6 +17,7 @@ LIB := $(BUILD)/libzingcore25.a
 
 SRC := \
 	$(SRCDIR)/zingcore25.c \
+	$(SRCDIR)/zi_hostlib25.c \
 	$(SRCDIR)/zi_runtime25.c \
 	$(SRCDIR)/zi_handles25.c \
 	$(SRCDIR)/zi_zcl1.c \
@@ -41,6 +42,7 @@ SRC := \
 
 OBJ := \
 	$(BUILD)/zingcore25.o \
+	$(BUILD)/zi_hostlib25.o \
 	$(BUILD)/zi_runtime25.o \
 	$(BUILD)/zi_handles25.o \
 	$(BUILD)/zi_zcl1.o \

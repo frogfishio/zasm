@@ -316,19 +316,6 @@ wasm_trap_t* zrun_zi_abi_version(void* env, wasmtime_caller_t* caller,
   return NULL;
 }
 
-wasm_trap_t* zrun_zi_abi_features(void* env, wasmtime_caller_t* caller,
-                                 const wasmtime_val_t* args, size_t nargs,
-                                 wasmtime_val_t* results, size_t nresults) {
-  (void)caller;
-  (void)args;
-  (void)nargs;
-  if (nresults < 1) return NULL;
-  results[0].kind = WASMTIME_I64;
-  results[0].of.i64 = 0;
-  tracef((zrun_abi_env_t*)env, "zi_abi_features -> 0");
-  return NULL;
-}
-
 wasm_trap_t* zrun_zi_ctl(void* env, wasmtime_caller_t* caller,
                          const wasmtime_val_t* args, size_t nargs,
                          wasmtime_val_t* results, size_t nresults) {

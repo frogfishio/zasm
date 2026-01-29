@@ -10,6 +10,166 @@
 #include "zem_exec_internal.h"
 #include "zem_srcmap.h"
 
+#include "zem_host.h"
+
+#include "zingcore25.h"
+#include "zi_sysabi25.h"
+#include "zi_handles25.h"
+#include "zi_runtime25.h"
+
+#include "zi_async_default25.h"
+#include "zi_event_bus25.h"
+#include "zi_file_fs25.h"
+#include "zi_net_tcp25.h"
+#include "zi_proc_argv25.h"
+#include "zi_proc_env25.h"
+#include "zi_proc_hopper25.h"
+#include "zi_sys_info25.h"
+
+typedef struct {
+  zem_buf_t *mem;
+} zem_zi_mem_ctx_t;
+
+typedef struct {
+  const zem_proc_t *proc;
+  uint32_t *stdin_pos;
+} zem_zi_host_ctx_t;
+
+static int zem_zi_ptr_to_u32(zi_ptr_t ptr, uint32_t *out) {
+  if (!out) return 0;
+  uint32_t lo = (uint32_t)ptr;
+  uint64_t hi = (uint64_t)ptr & 0xffffffff00000000ull;
+  if (hi == 0 || hi == 0xffffffff00000000ull) {
+    *out = lo;
+    return 1;
+  }
+  return 0;
+}
+
+static int zem_zi_map_ro(void *ctx, zi_ptr_t ptr, zi_size32_t len,
+                         const uint8_t **out) {
+  if (out) *out = NULL;
+  zem_zi_mem_ctx_t *m = (zem_zi_mem_ctx_t *)ctx;
+  if (!m || !m->mem || !m->mem->bytes || !out) return 0;
+  uint32_t p = 0;
+  if (!zem_zi_ptr_to_u32(ptr, &p)) return 0;
+  uint64_t end64 = (uint64_t)p + (uint64_t)len;
+  if (end64 > m->mem->len) return 0;
+  *out = (const uint8_t *)(m->mem->bytes + p);
+  return 1;
+}
+
+static int zem_zi_map_rw(void *ctx, zi_ptr_t ptr, zi_size32_t len, uint8_t **out) {
+  if (out) *out = NULL;
+  zem_zi_mem_ctx_t *m = (zem_zi_mem_ctx_t *)ctx;
+  if (!m || !m->mem || !m->mem->bytes || !out) return 0;
+  uint32_t p = 0;
+  if (!zem_zi_ptr_to_u32(ptr, &p)) return 0;
+  uint64_t end64 = (uint64_t)p + (uint64_t)len;
+  if (end64 > m->mem->len) return 0;
+  *out = (uint8_t *)(m->mem->bytes + p);
+  return 1;
+}
+
+// Provide stdio + cap handle routing for zingcore's core syscalls.
+// zingcore's default `zi_read/write/end` dispatches to host hooks first, so
+// our host hooks must handle both stdio handles and cap handles.
+static int32_t zem_host_read(void *ctx, zi_handle_t h, zi_ptr_t dst_ptr, zi_size32_t cap) {
+  zem_zi_host_ctx_t *hc = (zem_zi_host_ctx_t *)ctx;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_rw) return ZI_E_NOSYS;
+
+  if (cap == 0) return 0;
+
+  if (h == 0) {
+    uint8_t *dst = NULL;
+    if (!mem->map_rw(mem->ctx, dst_ptr, cap, &dst)) return ZI_E_BOUNDS;
+
+    // If zem captured stdin for deterministic replay/certs, read from that buffer.
+    if (hc && hc->proc && hc->proc->stdin_bytes && hc->stdin_pos) {
+      uint32_t p = *hc->stdin_pos;
+      uint32_t n = 0;
+      if (p < hc->proc->stdin_len) {
+        uint32_t avail = hc->proc->stdin_len - p;
+        n = (uint32_t)((avail < cap) ? avail : cap);
+        memcpy(dst, hc->proc->stdin_bytes + p, (size_t)n);
+        *hc->stdin_pos = p + n;
+      }
+      return (int32_t)n;
+    }
+
+    return req_read((int32_t)h, dst, (size_t)cap);
+  }
+
+  const zi_handle_ops_v1 *ops = NULL;
+  void *hctx = NULL;
+  if (zi_handle25_lookup(h, &ops, &hctx, NULL) && ops && ops->read) {
+    return ops->read(hctx, dst_ptr, cap);
+  }
+  return ZI_E_NOSYS;
+}
+
+static int32_t zem_host_write(void *ctx, zi_handle_t h, zi_ptr_t src_ptr, zi_size32_t len) {
+  (void)ctx;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return ZI_E_NOSYS;
+
+  if (len == 0) return 0;
+
+  if (h == 1 || h == 2) {
+    const uint8_t *src = NULL;
+    if (!mem->map_ro(mem->ctx, src_ptr, len, &src)) return ZI_E_BOUNDS;
+    return res_write((int32_t)h, src, (size_t)len);
+  }
+
+  const zi_handle_ops_v1 *ops = NULL;
+  void *hctx = NULL;
+  if (zi_handle25_lookup(h, &ops, &hctx, NULL) && ops && ops->write) {
+    return ops->write(hctx, src_ptr, len);
+  }
+  return ZI_E_NOSYS;
+}
+
+static int32_t zem_host_end(void *ctx, zi_handle_t h) {
+  (void)ctx;
+
+  if (h == 1 || h == 2) {
+    res_end((int32_t)h);
+    return ZI_OK;
+  }
+  if (h == 0) {
+    // stdin close is a no-op.
+    return ZI_OK;
+  }
+
+  const zi_handle_ops_v1 *ops = NULL;
+  void *hctx = NULL;
+  if (!zi_handle25_lookup(h, &ops, &hctx, NULL) || !ops) return ZI_E_NOSYS;
+
+  int32_t r = ZI_OK;
+  if (ops->end) r = ops->end(hctx);
+  (void)zi_handle25_release(h);
+  return r;
+}
+
+static int32_t zem_host_telemetry(void *ctx, zi_ptr_t topic_ptr, zi_size32_t topic_len,
+                                  zi_ptr_t msg_ptr, zi_size32_t msg_len) {
+  (void)ctx;
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return ZI_E_NOSYS;
+
+  const uint8_t *topic = NULL;
+  const uint8_t *msg = NULL;
+  if (topic_len && !mem->map_ro(mem->ctx, topic_ptr, topic_len, &topic)) return ZI_E_BOUNDS;
+  if (msg_len && !mem->map_ro(mem->ctx, msg_ptr, msg_len, &msg)) return ZI_E_BOUNDS;
+
+  telemetry(topic_len ? (const char *)topic : "", (int32_t)topic_len,
+            msg_len ? (const char *)msg : "", (int32_t)msg_len);
+  return 0;
+}
+
 int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
                      const zem_symtab_t *syms, const zem_symtab_t *labels,
                      const zem_dbg_cfg_t *dbg_cfg, const char *const *pc_srcs,
@@ -21,6 +181,14 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   uint64_t *cov_hits = NULL;
   zem_regs_t regs;
   memset(&regs, 0, sizeof(regs));
+
+  // Owned env snapshot for zingcore25 proc/env cap.
+  // We build envp-style "KEY=VAL" strings from zem's env snapshot.
+  char **zi_envp = NULL;
+  uint32_t zi_envc = 0;
+
+  // Position cursor for deterministic/captured stdin.
+  uint32_t stdin_pos = 0;
 
   const int dbg_enabled = (dbg_cfg && dbg_cfg->enabled);
   const int trace_enabled = (dbg_cfg && dbg_cfg->trace);
@@ -72,6 +240,79 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   uint32_t heap_top = (uint32_t)mem->len;
   const uint32_t hop_base = heap_top;
   uint32_t zi_time_ms = 0;
+
+  // Wire zingcore25 to the current run's linear memory so zi_ctl/zi_cap_* and
+  // cap handle I/O (via zi_read/zi_write/zi_end) operate on the same memory.
+  // This is process-global state, but zem is single-threaded.
+  (void)zingcore25_init();
+  (void)zi_handles25_init();
+
+  // Register built-in capabilities/selectors.
+  (void)zi_async_default25_register();
+  (void)zi_async_default25_register_selectors();
+  (void)zi_event_bus25_register();
+  (void)zi_file_fs25_register();
+  (void)zi_net_tcp25_register();
+  (void)zi_proc_argv25_register();
+  (void)zi_proc_env25_register();
+  (void)zi_proc_hopper25_register();
+  (void)zi_sys_info25_register();
+  zem_zi_mem_ctx_t zi_mem_ctx = {.mem = mem};
+  zi_mem_v1 zi_mem = {.ctx = &zi_mem_ctx, .map_ro = zem_zi_map_ro, .map_rw = zem_zi_map_rw};
+  zi_runtime25_set_mem(&zi_mem);
+
+  zem_zi_host_ctx_t zi_host_ctx = {.proc = proc, .stdin_pos = &stdin_pos};
+  zi_host_v1 zi_host = {0};
+  zi_host.ctx = &zi_host_ctx;
+  zi_host.read = zem_host_read;
+  zi_host.write = zem_host_write;
+  zi_host.end = zem_host_end;
+  zi_host.telemetry = zem_host_telemetry;
+  zi_runtime25_set_host(&zi_host);
+
+  if (proc) {
+    // Used by proc/* capabilities; safe to set even if not used.
+    zi_runtime25_set_argv((int)proc->argc, proc->argv);
+
+    // Used by proc/env capability.
+    zi_envc = proc->envc;
+    if (zi_envc) {
+      zi_envp = (char **)calloc(zi_envc, sizeof(char *));
+      if (!zi_envp) {
+        rc = zem_exec_fail_simple("OOM building env snapshot");
+        goto done;
+      }
+      for (uint32_t i = 0; i < zi_envc; i++) {
+        const char *k = proc->env[i].key;
+        const char *v = proc->env[i].val;
+        uint32_t klen = proc->env[i].key_len;
+        uint32_t vlen = proc->env[i].val_len;
+        if (!k) k = "";
+        if (!v) v = "";
+        size_t need64 = (size_t)klen + 1u + (size_t)vlen + 1u;
+        if (need64 > SIZE_MAX) {
+          rc = zem_exec_fail_simple("env snapshot overflow");
+          goto done;
+        }
+        zi_envp[i] = (char *)malloc(need64);
+        if (!zi_envp[i]) {
+          rc = zem_exec_fail_simple("OOM building env snapshot");
+          goto done;
+        }
+        memcpy(zi_envp[i], k, (size_t)klen);
+        zi_envp[i][klen] = '=';
+        memcpy(zi_envp[i] + klen + 1u, v, (size_t)vlen);
+        zi_envp[i][klen + 1u + vlen] = 0;
+      }
+      zi_runtime25_set_env((int)zi_envc, (const char *const *)zi_envp);
+    } else {
+      zi_runtime25_set_env(0, NULL);
+    }
+  } else {
+    // Avoid leaking a previous run's snapshot into the current run.
+    zi_runtime25_set_argv(0, NULL);
+    zi_runtime25_set_env(0, NULL);
+  }
 
   // Initialize shake state after heap base is finalized for this run.
   shake_state_reset_for_run(dbg_cfg);
@@ -174,8 +415,6 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   zem_regs_t trace_before;
   zem_trace_meta_t trace_meta;
   int prev_iter_executed = 0;
-
-  uint32_t stdin_pos = 0;
 
   size_t pc = 0;
   zem_watchset_t watches;
@@ -469,6 +708,17 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   }
 
 done:
+  // Clear zingcore25 wiring to avoid dangling pointers to stack locals.
+  zi_runtime25_set_host(NULL);
+  zi_runtime25_set_mem(NULL);
+  zi_runtime25_set_argv(0, NULL);
+  zi_runtime25_set_env(0, NULL);
+
+  if (zi_envp) {
+    for (uint32_t i = 0; i < zi_envc; i++) free(zi_envp[i]);
+    free(zi_envp);
+  }
+
   if (cov_enabled && cov_hits && dbg_cfg && dbg_cfg->coverage_take_hits && dbg_cfg->coverage_take_n) {
     *dbg_cfg->coverage_take_hits = cov_hits;
     *dbg_cfg->coverage_take_n = recs ? recs->n : 0;

@@ -151,7 +151,7 @@ static void diag_emit(const char* level, const char* file, int line, const char*
 
 static void print_help(void) {
   fprintf(stdout,
-          "zrun — local runner for zABI 2.0 modules\n"
+          "zrun — local runner for zABI 2.5 modules\n"
           "\n"
           "Usage:\n"
           "  zrun [--trace] [--strict] [--mem <size>] [--verbose] [--json] <module.wat|module.wasm>\n"

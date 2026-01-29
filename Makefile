@@ -768,14 +768,14 @@ lower: $(LOWER_OBJ) | dirs
 
 # ---- zem (IR v1.1 emulator) ----
 
-ZEM_HOST_BUILD := $(BUILD)/zem_host
-ZEM_HOST_LIBZING := $(ZEM_HOST_BUILD)/libzingcore.a
-ZEM_HOST_LIBHOPPER := $(ZEM_HOST_BUILD)/libhopper.a
-ZEM_HOST_LIBCAP_ASYNC := $(ZEM_HOST_BUILD)/libzingcap_async.a
-ZEM_HOST_LIBCAP_EXEC := $(ZEM_HOST_BUILD)/libzingcap_exec.a
+# zem is a zABI 2.5 reference host: link against zingcore25 directly.
+ZEM_ZINGCORE25_DIR := src/zingcore/2.5
+ZEM_ZINGCORE25_BUILD := $(BUILD)/zingcore25
+ZEM_ZINGCORE25_LIB := $(ZEM_ZINGCORE25_BUILD)/libzingcore25.a
 
 ZEM_OBJ := \
 	$(ZEM_BUILD)/main.o \
+	$(ZEM_BUILD)/zem_host.o \
 	$(ZEM_BUILD)/zem_debug.o \
 	$(ZEM_BUILD)/zem_fuzz.o \
 	$(ZEM_BUILD)/zem_srcmap.o \
@@ -812,42 +812,36 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/zduel.o
 
 
+
+ZEM_CPPFLAGS := $(CPPFLAGS) -Isrc/zem -I$(ZEM_ZINGCORE25_DIR)/zingcore/include
+
 $(ZEM_BUILD)/%.o: src/zem/%.c $(VERSION_HEADER) src/zem/zem_types.h | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -c $< -o $@
+	$(CC) $(ZEM_CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(ZEM_BUILD)/exec/%.o: src/zem/exec/%.c $(VERSION_HEADER) src/zem/zem_types.h | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zem -Isrc/zem/exec -c $< -o $@
+	$(CC) $(ZEM_CPPFLAGS) $(CFLAGS) -Isrc/zem/exec -c $< -o $@
 
 $(ZEM_BUILD)/jsonl.o: src/zld/jsonl.c | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
 
-zem-host: | dirs
-	$(MAKE) -C src/zem/host \
-	  BUILD="$(abspath $(ZEM_HOST_BUILD))" \
+zingcore25: | dirs
+	$(MAKE) -C $(ZEM_ZINGCORE25_DIR) \
+	  BUILD="$(abspath $(ZEM_ZINGCORE25_BUILD))" \
 	  CC="$(CC)" \
 	  CFLAGS="$(CFLAGS)" \
 	  AR="$(AR)" \
 	  ARFLAGS="$(ARFLAGS)" \
-	  $(abspath $(ZEM_HOST_LIBZING)) $(abspath $(ZEM_HOST_LIBHOPPER)) \
-	  $(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC))
+	  $(abspath $(ZEM_ZINGCORE25_LIB))
 
-zem: zem-host $(ZEM_OBJ) | dirs
-	@cap_link_flags=""; \
-	if [ "$(UNAME_S)" = "Darwin" ]; then \
-	  cap_link_flags="-Wl,-force_load,$(abspath $(ZEM_HOST_LIBCAP_ASYNC)) -Wl,-force_load,$(abspath $(ZEM_HOST_LIBCAP_EXEC))"; \
-	elif [ "$(UNAME_S)" = "Linux" ]; then \
-	  cap_link_flags="-Wl,--whole-archive $(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC)) -Wl,--no-whole-archive"; \
-	else \
-	  cap_link_flags="$(abspath $(ZEM_HOST_LIBCAP_ASYNC)) $(abspath $(ZEM_HOST_LIBCAP_EXEC))"; \
-	fi; \
-	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_HOST_LIBZING) $$cap_link_flags $(ZEM_HOST_LIBHOPPER) -o $(BIN)/zem $(LDFLAGS)
+zem: zingcore25 $(ZEM_OBJ) | dirs
+	$(CC) $(CFLAGS) $(ZEM_OBJ) $(ZEM_ZINGCORE25_LIB) -o $(BIN)/zem $(LDFLAGS)
 	ln -sf $(PLATFORM)/zem $(BIN_ROOT)/zem
 
 # Allow explicit file target builds, e.g. `make bin/$(PLATFORM)/zem`.
 $(BIN)/zem: zem
 	@true
 
-.PHONY: zem zem-host
+.PHONY: zem zingcore25
 
 # ---- zop (opcode JSONL -> raw bytes) ----
 

@@ -29,11 +29,7 @@ zABI 2.5 represents a **major version bump** with breaking changes. The core phi
 
 ### 1. Removed: `zi_abi_features`
 
-**2.2_final**:
-```c
-uint64_t features = zi_abi_features();
-if (features & ZI_FEATURE_CAPS) { ... }
-```
+**2.2_final**: used a `zi_abi_features()` bitset for discovery/negotiation.
 
 **2.5 (replacement)**:
 ```c

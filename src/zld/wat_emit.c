@@ -2165,18 +2165,11 @@ static int emit_function_body(const char* fname, const recvec_t* recs, size_t st
           continue;
         }
         if (strcmp(callee, "zi_abi_features") == 0) {
-          // u64 return uses (DE:HL) as (hi32:lo32).
-          printf("        call $zi_abi_features\n");
-          printf("        local.set $tmp64\n");
-          printf("        local.get $tmp64\n");
-          printf("        i32.wrap_i64\n");
-          emit_store_reg32("HL", "HL");
-          printf("        local.get $tmp64\n");
-          printf("        i64.const 32\n");
-          printf("        i64.shr_u\n");
-          printf("        i32.wrap_i64\n");
-          emit_store_reg32("DE", "DE");
-          continue;
+          fprintf(stderr,
+                  "zld: zi_abi_features removed in zABI 2.5; use zi_ctl CAPS_LIST at line %d\n",
+                  r->line);
+          rc = 1;
+          goto cleanup;
         }
         if (strcmp(callee, "zi_alloc") == 0) {
           printf("        local.get $HL\n");
@@ -2897,7 +2890,7 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   // exports that don't resolve within this module.
   for (size_t i=0;i<exports.n;i++) {
     if (strcmp(exports.v[i].name, "lembeh_handle") == 0) {
-      fprintf(stderr, "zld: lembeh_handle is deprecated; use main\n");
+      fprintf(stderr, "zld: lembeh_handle is not supported; use main\n");
       funcvec_free(&funcs);
       datavec_free(&data);
       gsymtab_free(&g);
@@ -2927,7 +2920,6 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   printf("(module\n");
   printf("  ;; zABI host surface (syscall-style zi_*)\n");
   printf("  (import \"env\" \"zi_abi_version\"   (func $zi_abi_version   (result i32)))\n");
-  printf("  (import \"env\" \"zi_abi_features\"  (func $zi_abi_features  (result i64)))\n");
   printf("  (import \"env\" \"zi_ctl\"           (func $zi_ctl           (param i64 i32 i64 i32) (result i32)))\n");
   printf("  (import \"env\" \"zi_read\"          (func $zi_read          (param i32 i64 i32) (result i32)))\n");
   printf("  (import \"env\" \"zi_write\"         (func $zi_write         (param i32 i64 i32) (result i32)))\n");
@@ -3036,7 +3028,6 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   }
 
   // Entrypoint: export "main" directly.
-  // NOTE: legacy packs used to export "lembeh_handle" as the entrypoint.
   printf("  (export \"main\" (func $main))\n");
 
   for (size_t i=0;i<exports.n;i++) {
