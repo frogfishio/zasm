@@ -64,4 +64,10 @@ typedef struct {
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out);
 void cg_free(cg_blob_t *out);
 
+/* Optional: override the implicit entry-function heuristic.
+ * When set, cg_emit_arm64 will treat this label as a function entry.
+ * Pass NULL to clear.
+ */
+void cg_set_entry_label_override(const char *label);
+
 #endif /* ZINGCC_CODEGEN_H */

@@ -11,6 +11,12 @@ static uint64_t cg_now_ns(void) {
   return (t * (uint64_t)tb.numer) / (uint64_t)tb.denom;
 }
 
+static const char *g_entry_label_override = NULL;
+
+void cg_set_entry_label_override(const char *label) {
+  g_entry_label_override = label;
+}
+
 typedef struct {
   const char *key;
   symtab_entry *val;
@@ -433,6 +439,7 @@ static void emit_adrp_add(cg_blob_t *out, cg_profile_t *prof, uint32_t *w, size_
 
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   if (!ir || !out) return -1;
+  const char *entry_override = (g_entry_label_override && g_entry_label_override[0]) ? g_entry_label_override : NULL;
   const int profile_enabled = out->profile_enabled;
   memset(out,0,sizeof(*out));
   out->profile_enabled = profile_enabled;
@@ -512,13 +519,19 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   /* Determine function entry labels: first label, labels named "main", labels prefixed with "fn_", and labels that are CALL targets. */
   const uint64_t t_func0 = prof ? cg_now_ns() : 0;
+  int override_found = 0;
   for (size_t i = 0; i < n_labels; i++) {
     int is_func = 0;
-    if (!first_label_seen) { is_func = 1; first_label_seen = 1; }
+    if (entry_override && label_list[i].name && strcmp(label_list[i].name, entry_override) == 0) { is_func = 1; override_found = 1; }
+    if (!entry_override && !first_label_seen) { is_func = 1; first_label_seen = 1; }
     if (label_list[i].name && strcmp(label_list[i].name, "main") == 0) is_func = 1;
     if (label_list[i].name && strncmp(label_list[i].name, "fn_", 3) == 0) is_func = 1;
     if (label_list[i].name && seen_has(call_targets, n_calls, label_list[i].name)) is_func = 1;
     if (is_func) func_count++;
+  }
+  if (entry_override && !override_found) {
+    if (prof) prof->func_detect_ns = cg_now_ns() - t_func0;
+    CG_FAIL(NULL, "--entry-label symbol not found in input labels");
   }
   if (func_count == 0 && any_instr) func_count = 1;
   if (prof) prof->func_detect_ns = cg_now_ns() - t_func0;
@@ -556,7 +569,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     if (e->kind == IR_ENTRY_LABEL) {
       if (e->u.label.name) {
         int is_func = 0;
-        if (!func_seen) is_func = 1;
+        if (entry_override && strcmp(e->u.label.name, entry_override) == 0) is_func = 1;
+        if (!entry_override && !func_seen) is_func = 1;
         if (strcmp(e->u.label.name, "main") == 0) is_func = 1;
         if (strncmp(e->u.label.name, "fn_", 3) == 0) is_func = 1;
         if (seen_has(call_targets, n_calls, e->u.label.name)) is_func = 1;
@@ -566,6 +580,18 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           func_has_prologue = 0;
         }
         symtab_update(&ctx, out->syms, e->u.label.name, pcw*4);
+
+        /* Emit the function prologue at the function entry label.
+         * This ensures any immediately-following label is placed after the
+         * prologue (distinct address), avoiding accidental stack growth when
+         * branching to a basic-block label that would otherwise share the
+         * function entry address.
+         */
+        if (is_func && !func_has_prologue) {
+          w[pcw++] = enc_stp_fp_lr();
+          w[pcw++] = enc_mov_fp_sp();
+          func_has_prologue = 1;
+        }
       }
       if (prof) prof->pass2_labels_ns += cg_now_ns() - t_e0;
       continue;

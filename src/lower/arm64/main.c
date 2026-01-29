@@ -44,6 +44,7 @@ static void usage(const char *prog) {
     "  --emit-pc-map Write JSON mapping of code offsets to IR ids/lines\n"
     "  --emit-lldb   Write an LLDB trace script to the given path\n"
     "  --trace-func  Function symbol to trace (default: main)\n"
+    "  --entry-label Override implicit entry label (disables first-label heuristic)\n"
     "  --trace-syms  Comma list of symbols to dump at trace breakpoints\n"
     "  --trace-regs  Comma list of registers (e.g. w0,x0) to dump\n"
     "  --profile     Print per-phase timings to stderr\n"
@@ -480,6 +481,7 @@ int main(int argc, char **argv) {
   int json_dump = 0;
   const char *emit_lldb_path = NULL;
   const char *trace_func = "main";
+  const char *entry_label = NULL;
   const char *trace_syms = NULL;
   const char *trace_regs = NULL;
   int profile = 0;
@@ -510,6 +512,7 @@ int main(int argc, char **argv) {
     if (strcmp(a, "--emit-pc-map") == 0 && argi < argc) { emit_pc_map_path = argv[argi++]; continue; }
     if (strcmp(a, "--emit-lldb") == 0 && argi < argc) { emit_lldb_path = argv[argi++]; continue; }
     if (strcmp(a, "--trace-func") == 0 && argi < argc) { trace_func = argv[argi++]; continue; }
+    if (strcmp(a, "--entry-label") == 0 && argi < argc) { entry_label = argv[argi++]; continue; }
     if (strcmp(a, "--trace-syms") == 0 && argi < argc) { trace_syms = argv[argi++]; continue; }
     if (strcmp(a, "--trace-regs") == 0 && argi < argc) { trace_regs = argv[argi++]; continue; }
     if (strcmp(a, "--input") == 0 && argi < argc) { inputs[nin++] = argv[argi++]; continue; }
@@ -543,6 +546,9 @@ int main(int argc, char **argv) {
     if (!fp) { perror("open input"); rc = 1; continue; }
     ir_prog_t prog;
     ir_init(&prog);
+
+    /* Configure optional entry label override for codegen. */
+    cg_set_entry_label_override(entry_label);
 
     const uint64_t t_parse0 = profile ? now_ns() : 0;
     if (json_ir_read(fp, &prog) != 0) {
