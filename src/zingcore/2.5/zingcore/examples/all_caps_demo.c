@@ -1,6 +1,8 @@
 #include "zingcore25.h"
 
 #include "zi_caps.h"
+#include "zi_async_default25.h"
+#include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
 #include "zi_handles25.h"
 #include "zi_net_tcp25.h"
@@ -8,6 +10,7 @@
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
 #include "zi_runtime25.h"
+#include "zi_sys_info25.h"
 #include "zi_sysabi25.h"
 
 #include <errno.h>
@@ -576,6 +579,648 @@ static int dump_env_via_cap(const char *const *envp) {
   return 1;
 }
 
+static void zcl1_write_u64(uint8_t *p, uint64_t v) {
+  zcl1_write_u32(p + 0, (uint32_t)(v & 0xFFFFFFFFu));
+  zcl1_write_u32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFu));
+}
+
+static uint64_t zcl1_read_u64(const uint8_t *p) {
+  uint64_t lo = (uint64_t)zcl1_read_u32(p + 0);
+  uint64_t hi = (uint64_t)zcl1_read_u32(p + 4);
+  return lo | (hi << 32);
+}
+
+static void print_load_milli(const char *label, uint32_t milli) {
+  fprintf(stderr, "%s=%u.%03u", label, milli / 1000u, milli % 1000u);
+}
+
+static int sys_info_smoke(void) {
+  uint8_t req[40];
+  build_open_req(req, ZI_CAP_KIND_SYS, ZI_CAP_NAME_INFO, NULL, 0);
+
+  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (h < 3) {
+    fprintf(stderr, "sys/info open failed: %d\n", h);
+    return 0;
+  }
+
+  uint8_t resp[4096];
+
+  // INFO
+  uint32_t info_flags = 0;
+  uint32_t info_cpu = 0;
+  uint32_t info_ps = 0;
+  {
+    uint8_t fr[24];
+    build_zcl1_req(fr, (uint16_t)ZI_SYS_INFO_OP_INFO, 30, NULL, 0);
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "sys/info INFO write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "sys/info INFO read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "sys/info INFO bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t pl = zcl1_read_u32(resp + 20);
+    if (pl < 16) {
+      fprintf(stderr, "sys/info INFO payload too small\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24 + 0) != 1u) {
+      fprintf(stderr, "sys/info INFO version mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    info_flags = zcl1_read_u32(resp + 24 + 4);
+    info_cpu = zcl1_read_u32(resp + 24 + 8);
+    info_ps = zcl1_read_u32(resp + 24 + 12);
+  }
+
+  // TIME_NOW
+  uint64_t realtime_ns = 0;
+  uint64_t monotonic_ns = 0;
+  {
+    uint8_t fr[24];
+    build_zcl1_req(fr, (uint16_t)ZI_SYS_INFO_OP_TIME_NOW, 31, NULL, 0);
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "sys/info TIME_NOW write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "sys/info TIME_NOW read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "sys/info TIME_NOW bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t pl = zcl1_read_u32(resp + 20);
+    if (pl != 20) {
+      fprintf(stderr, "sys/info TIME_NOW payload size mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24 + 0) != 1u) {
+      fprintf(stderr, "sys/info TIME_NOW version mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    realtime_ns = zcl1_read_u64(resp + 24 + 4);
+    monotonic_ns = zcl1_read_u64(resp + 24 + 12);
+  }
+
+  // RANDOM_SEED
+  {
+    uint8_t fr[24];
+    build_zcl1_req(fr, (uint16_t)ZI_SYS_INFO_OP_RANDOM_SEED, 32, NULL, 0);
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "sys/info RANDOM_SEED write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "sys/info RANDOM_SEED read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "sys/info RANDOM_SEED bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t pl = zcl1_read_u32(resp + 20);
+    if (pl != 40) {
+      fprintf(stderr, "sys/info RANDOM_SEED payload size mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24 + 0) != 1u) {
+      fprintf(stderr, "sys/info RANDOM_SEED version mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    uint32_t seed_len = zcl1_read_u32(resp + 24 + 4);
+    if (seed_len != 32u) {
+      fprintf(stderr, "sys/info RANDOM_SEED seed_len mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    const uint8_t *seed = resp + 24 + 8;
+    uint8_t acc = 0;
+    for (uint32_t i = 0; i < 32; i++) acc |= seed[i];
+    if (acc == 0) {
+      fprintf(stderr, "sys/info RANDOM_SEED all-zero seed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+  }
+
+  // STATS
+  {
+    uint8_t fr[24];
+    build_zcl1_req(fr, (uint16_t)ZI_SYS_INFO_OP_STATS, 33, NULL, 0);
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "sys/info STATS write failed\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "sys/info STATS read failed: %d\n", n);
+        (void)zi_end(h);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 24 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "sys/info STATS bad response\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t pl = zcl1_read_u32(resp + 20);
+    if (pl < 16) {
+      fprintf(stderr, "sys/info STATS payload too small\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24 + 0) != 1u) {
+      fprintf(stderr, "sys/info STATS version mismatch\n");
+      (void)zi_end(h);
+      return 0;
+    }
+
+    uint32_t flags = zcl1_read_u32(resp + 24 + 4);
+    uint64_t stats_realtime_ns = zcl1_read_u64(resp + 24 + 8);
+    uint32_t off = 24u + 16u;
+
+    fprintf(stderr, "sys/stats v1 flags=0x%08x realtime_ns=%llu", flags, (unsigned long long)stats_realtime_ns);
+
+    if (flags & 0x1u) {
+      if (off + 12u > 24u + pl) {
+        fprintf(stderr, "\n");
+        fprintf(stderr, "sys/info STATS load section truncated\n");
+        (void)zi_end(h);
+        return 0;
+      }
+      uint32_t l1 = zcl1_read_u32(resp + off + 0);
+      uint32_t l5 = zcl1_read_u32(resp + off + 4);
+      uint32_t l15 = zcl1_read_u32(resp + off + 8);
+      off += 12u;
+      fprintf(stderr, " ");
+      print_load_milli("load1", l1);
+      fprintf(stderr, " ");
+      print_load_milli("load5", l5);
+      fprintf(stderr, " ");
+      print_load_milli("load15", l15);
+    }
+
+    if (flags & 0x2u) {
+      if (off + 20u > 24u + pl) {
+        fprintf(stderr, "\n");
+        fprintf(stderr, "sys/info STATS mem section truncated\n");
+        (void)zi_end(h);
+        return 0;
+      }
+      uint64_t mem_total = zcl1_read_u64(resp + off + 0);
+      uint64_t mem_avail = zcl1_read_u64(resp + off + 8);
+      uint32_t pressure = zcl1_read_u32(resp + off + 16);
+      off += 20u;
+      fprintf(stderr, " mem_total=%llu mem_avail=%llu pressure=%u.%03u", (unsigned long long)mem_total,
+              (unsigned long long)mem_avail, pressure / 1000u, pressure % 1000u);
+    }
+
+    fprintf(stderr, "\n");
+  }
+
+  fprintf(stderr, "sys/info v1 cpu_count=%u page_size=%u flags=0x%08x realtime_ns=%llu monotonic_ns=%llu\n", info_cpu,
+          info_ps, info_flags, (unsigned long long)realtime_ns, (unsigned long long)monotonic_ns);
+
+  (void)zi_end(h);
+  return 1;
+}
+
+static int event_bus_smoke(void) {
+  // Open two event/bus handles: subscriber + publisher.
+  uint8_t req_sub[40];
+  uint8_t req_pub[40];
+  build_open_req(req_sub, ZI_CAP_KIND_EVENT, ZI_CAP_NAME_BUS, NULL, 0);
+  build_open_req(req_pub, ZI_CAP_KIND_EVENT, ZI_CAP_NAME_BUS, NULL, 0);
+
+  zi_handle_t h_sub = zi_cap_open((zi_ptr_t)(uintptr_t)req_sub);
+  zi_handle_t h_pub = zi_cap_open((zi_ptr_t)(uintptr_t)req_pub);
+  if (h_sub < 3 || h_pub < 3) {
+    fprintf(stderr, "event/bus open failed: sub=%d pub=%d\n", h_sub, h_pub);
+    return 0;
+  }
+
+  const char *topic = "ui.click";
+  const char *data = "left";
+  uint32_t topic_len = (uint32_t)strlen(topic);
+  uint32_t data_len = (uint32_t)strlen(data);
+
+  // SUBSCRIBE on subscriber.
+  uint32_t sub_id = 0;
+  {
+    uint8_t payload[128];
+    uint32_t off = 0;
+    zcl1_write_u32(payload + off, topic_len);
+    off += 4;
+    memcpy(payload + off, topic, topic_len);
+    off += topic_len;
+    zcl1_write_u32(payload + off, 0u);
+    off += 4;
+
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_EVENT_BUS_OP_SUBSCRIBE, 20, payload, off);
+    if (zi_write(h_sub, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)(24u + off)) != (int32_t)(24u + off)) {
+      fprintf(stderr, "event/bus SUBSCRIBE write failed\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    uint8_t resp[256];
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h_sub, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "event/bus SUBSCRIBE read failed: %d\n", n);
+        (void)zi_end(h_sub);
+        (void)zi_end(h_pub);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+
+    if (got < 28 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "event/bus SUBSCRIBE bad response\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    sub_id = zcl1_read_u32(resp + 24);
+    if (sub_id == 0) {
+      fprintf(stderr, "event/bus SUBSCRIBE returned sub_id=0\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+  }
+
+  // PUBLISH on publisher (rid=22); expect delivered=1.
+  {
+    uint8_t payload[256];
+    uint32_t off = 0;
+    zcl1_write_u32(payload + off, topic_len);
+    off += 4;
+    memcpy(payload + off, topic, topic_len);
+    off += topic_len;
+    zcl1_write_u32(payload + off, data_len);
+    off += 4;
+    memcpy(payload + off, data, data_len);
+    off += data_len;
+
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_EVENT_BUS_OP_PUBLISH, 22, payload, off);
+    if (zi_write(h_pub, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)(24u + off)) != (int32_t)(24u + off)) {
+      fprintf(stderr, "event/bus PUBLISH write failed\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    uint8_t resp[256];
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h_pub, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "event/bus PUBLISH read failed: %d\n", n);
+        (void)zi_end(h_sub);
+        (void)zi_end(h_pub);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 28 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "event/bus PUBLISH bad response\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24) != 1u) {
+      fprintf(stderr, "event/bus PUBLISH expected delivered=1\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+  }
+
+  // Subscriber must receive EVENT (op=100) with rid=22.
+  {
+    uint8_t ev[512];
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h_sub, (zi_ptr_t)(uintptr_t)(ev + got), (zi_size32_t)(sizeof(ev) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "event/bus EVENT read failed: %d\n", n);
+        (void)zi_end(h_sub);
+        (void)zi_end(h_pub);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(ev + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+
+    if (got < 24 || zcl1_status(ev) != 1) {
+      fprintf(stderr, "event/bus EVENT bad frame\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    uint16_t op = (uint16_t)ev[6] | (uint16_t)((uint16_t)ev[7] << 8);
+    uint32_t rid = zcl1_read_u32(ev + 8);
+    if (op != (uint16_t)ZI_EVENT_BUS_EV_EVENT || rid != 22u) {
+      fprintf(stderr, "event/bus EVENT op/rid mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    uint32_t pl_len = zcl1_read_u32(ev + 20);
+    if (pl_len < 16) {
+      fprintf(stderr, "event/bus EVENT payload too small\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    const uint8_t *pl = ev + 24;
+    uint32_t got_sub_id = zcl1_read_u32(pl + 0);
+    uint32_t got_topic_len = zcl1_read_u32(pl + 4);
+    if (got_sub_id != sub_id || got_topic_len != topic_len) {
+      fprintf(stderr, "event/bus EVENT sub/topic mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    if (8u + got_topic_len + 4u > pl_len) {
+      fprintf(stderr, "event/bus EVENT payload bounds mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    if (memcmp(pl + 8, topic, topic_len) != 0) {
+      fprintf(stderr, "event/bus EVENT topic bytes mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    uint32_t off = 8u + got_topic_len;
+    uint32_t got_data_len = zcl1_read_u32(pl + off);
+    off += 4;
+    if (off + got_data_len != pl_len || got_data_len != data_len) {
+      fprintf(stderr, "event/bus EVENT data bounds mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    if (memcmp(pl + off, data, data_len) != 0) {
+      fprintf(stderr, "event/bus EVENT data mismatch\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+  }
+
+  // UNSUBSCRIBE.
+  {
+    uint8_t payload[4];
+    zcl1_write_u32(payload + 0, sub_id);
+
+    uint8_t fr[24 + sizeof(payload)];
+    build_zcl1_req(fr, (uint16_t)ZI_EVENT_BUS_OP_UNSUBSCRIBE, 30, payload, (uint32_t)sizeof(payload));
+    if (zi_write(h_sub, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr)) != (int32_t)sizeof(fr)) {
+      fprintf(stderr, "event/bus UNSUBSCRIBE write failed\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+
+    uint8_t resp[256];
+    uint32_t got = 0;
+    for (;;) {
+      int32_t n = zi_read(h_sub, (zi_ptr_t)(uintptr_t)(resp + got), (zi_size32_t)(sizeof(resp) - got));
+      if (n == ZI_E_AGAIN) continue;
+      if (n < 0) {
+        fprintf(stderr, "event/bus UNSUBSCRIBE read failed: %d\n", n);
+        (void)zi_end(h_sub);
+        (void)zi_end(h_pub);
+        return 0;
+      }
+      if (n == 0) break;
+      got += (uint32_t)n;
+      if (got >= 24) {
+        uint32_t pl = zcl1_read_u32(resp + 20);
+        if (got >= 24u + pl) break;
+      }
+    }
+    if (got < 28 || zcl1_status(resp) != 1) {
+      fprintf(stderr, "event/bus UNSUBSCRIBE bad response\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+    if (zcl1_read_u32(resp + 24) != 1u) {
+      fprintf(stderr, "event/bus UNSUBSCRIBE expected removed=1\n");
+      (void)zi_end(h_sub);
+      (void)zi_end(h_pub);
+      return 0;
+    }
+  }
+
+  (void)zi_end(h_sub);
+  (void)zi_end(h_pub);
+  return 1;
+}
+
+static int async_smoke(void) {
+  // Open async/default (no params).
+  uint8_t req[40];
+  build_open_req(req, ZI_CAP_KIND_ASYNC, ZI_CAP_NAME_DEFAULT, NULL, 0);
+
+  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (h < 3) {
+    fprintf(stderr, "async/default open failed: %d\n", h);
+    return 0;
+  }
+
+  // INVOKE ping.v1 (future_id=1, no params)
+  uint8_t payload[128];
+  uint32_t off = 0;
+  const char *kind = ZI_CAP_KIND_ASYNC;
+  const char *name = ZI_CAP_NAME_DEFAULT;
+  const char *sel = "ping.v1";
+  uint32_t klen = (uint32_t)strlen(kind);
+  uint32_t nlen = (uint32_t)strlen(name);
+  uint32_t slen = (uint32_t)strlen(sel);
+
+  zcl1_write_u32(payload + off, klen);
+  off += 4;
+  memcpy(payload + off, kind, klen);
+  off += klen;
+  zcl1_write_u32(payload + off, nlen);
+  off += 4;
+  memcpy(payload + off, name, nlen);
+  off += nlen;
+  zcl1_write_u32(payload + off, slen);
+  off += 4;
+  memcpy(payload + off, sel, slen);
+  off += slen;
+  zcl1_write_u64(payload + off, 1u);
+  off += 8;
+  zcl1_write_u32(payload + off, 0u);
+  off += 4;
+
+  uint8_t fr[24 + sizeof(payload)];
+  build_zcl1_req(fr, (uint16_t)ZI_ASYNC_OP_INVOKE, 10, payload, off);
+  if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)(24u + off)) != (int32_t)(24u + off)) {
+    fprintf(stderr, "async/default invoke write failed\n");
+    (void)zi_end(h);
+    return 0;
+  }
+
+  uint8_t buf[4096];
+  uint32_t got = 0;
+  for (;;) {
+    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(sizeof(buf) - got));
+    if (n == ZI_E_AGAIN) continue;
+    if (n < 0) {
+      fprintf(stderr, "async/default invoke read failed: %d\n", n);
+      (void)zi_end(h);
+      return 0;
+    }
+    if (n == 0) break;
+    got += (uint32_t)n;
+    if (got == sizeof(buf)) break;
+    // Likely got everything; the handle returns E_AGAIN once drained.
+    break;
+  }
+
+  int saw_future_ok = 0;
+  uint32_t pos = 0;
+  while (pos + 24 <= got) {
+    uint32_t plen = zcl1_read_u32(buf + pos + 20);
+    uint32_t flen = 24u + plen;
+    if (pos + flen > got) break;
+    uint16_t op = (uint16_t)buf[pos + 6] | (uint16_t)((uint16_t)buf[pos + 7] << 8);
+    uint32_t status = zcl1_read_u32(buf + pos + 12);
+    if (status != 1) {
+      fprintf(stderr, "async/default frame error status\n");
+      (void)zi_end(h);
+      return 0;
+    }
+    if (op == (uint16_t)ZI_ASYNC_EV_FUTURE_OK) {
+      if (plen < 12) {
+        fprintf(stderr, "async/default future_ok payload too small\n");
+        (void)zi_end(h);
+        return 0;
+      }
+      uint64_t fid = (uint64_t)zcl1_read_u32(buf + pos + 24 + 0) | ((uint64_t)zcl1_read_u32(buf + pos + 24 + 4) << 32);
+      uint32_t vlen = zcl1_read_u32(buf + pos + 24 + 8);
+      if (fid != 1u || 12u + vlen != plen) {
+        fprintf(stderr, "async/default future_ok payload mismatch\n");
+        (void)zi_end(h);
+        return 0;
+      }
+      if (vlen != 4 || memcmp(buf + pos + 24 + 12, "pong", 4) != 0) {
+        fprintf(stderr, "async/default future_ok value mismatch\n");
+        (void)zi_end(h);
+        return 0;
+      }
+      saw_future_ok = 1;
+    }
+    pos += flen;
+  }
+
+  (void)zi_end(h);
+  return saw_future_ok;
+}
+
 static int fs_smoke(void) {
   const char *root = getenv("ZI_FS_ROOT");
   const char *guest_path = "/all_caps_demo.txt";
@@ -681,11 +1326,19 @@ int main(int argc, char **argv) {
   (void)zi_cap_register(&cap_stdio_v1);
   (void)zi_cap_register(&cap_demo_echo_v1);
   (void)zi_cap_register(&cap_demo_version_v1);
+  (void)zi_async_default25_register();
+  (void)zi_event_bus25_register();
   (void)zi_file_fs25_register();
   (void)zi_net_tcp25_register();
   (void)zi_proc_argv25_register();
   (void)zi_proc_env25_register();
   (void)zi_proc_hopper25_register();
+  (void)zi_sys_info25_register();
+
+  if (!zi_async_default25_register_selectors()) {
+    fprintf(stderr, "async/default selector registration failed\n");
+    return 1;
+  }
 
   // Wire stdio handles.
   (void)zi_handles25_init();
@@ -714,6 +1367,21 @@ int main(int argc, char **argv) {
 
   if (!dump_env_via_cap((const char *const *)environ)) {
     fprintf(stderr, "env cap failed\n");
+    return 1;
+  }
+
+  if (!async_smoke()) {
+    fprintf(stderr, "async/default smoke failed\n");
+    return 1;
+  }
+
+  if (!event_bus_smoke()) {
+    fprintf(stderr, "event/bus smoke failed\n");
+    return 1;
+  }
+
+  if (!sys_info_smoke()) {
+    fprintf(stderr, "sys/info smoke failed\n");
     return 1;
   }
 

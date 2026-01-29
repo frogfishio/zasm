@@ -2,11 +2,14 @@
 
 #include "zi_runtime25.h"
 #include "zi_caps.h"
+#include "zi_async_default25.h"
+#include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
 #include "zi_net_tcp25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
+#include "zi_sys_info25.h"
 
 #include <string.h>
 
@@ -136,6 +139,16 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
     return zi_file_fs25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
+  // async/default v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_ASYNC) == 0 && strcmp(found->name, ZI_CAP_NAME_DEFAULT) == 0 && found->version == 1) {
+    return zi_async_default25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
+  // event/bus v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_EVENT) == 0 && strcmp(found->name, ZI_CAP_NAME_BUS) == 0 && found->version == 1) {
+    return zi_event_bus25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
   // proc/argv v1 (no params)
   if (strcmp(found->kind, ZI_CAP_KIND_PROC) == 0 && strcmp(found->name, ZI_CAP_NAME_ARGV) == 0 && found->version == 1) {
     if (params_len != 0) return (zi_handle_t)ZI_E_INVALID;
@@ -156,6 +169,11 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   // net/tcp v1
   if (strcmp(found->kind, ZI_CAP_KIND_NET) == 0 && strcmp(found->name, ZI_CAP_NAME_TCP) == 0 && found->version == 1) {
     return zi_net_tcp25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
+  // sys/info v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_SYS) == 0 && strcmp(found->name, ZI_CAP_NAME_INFO) == 0 && found->version == 1) {
+    return zi_sys_info25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
   return (zi_handle_t)ZI_E_DENIED;

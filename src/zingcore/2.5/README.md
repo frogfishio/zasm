@@ -178,6 +178,36 @@ Supported ops (ZCL1 `op`):
 
 Note: this initial golden cap uses a small built-in catalog (layout_id=1) suitable for smoke/conformance tests.
 
+## Async capability (golden)
+
+zingcore 2.5 exposes a basic async invocation surface as a capability:
+
+- kind: `"async"`
+- name: `"default"`
+- version: `1`
+
+Open semantics:
+
+- `zi_cap_open` with kind/name matching `async/default` returns a **read-write** handle.
+- Open params must be empty (`params_len=0`).
+
+I/O semantics:
+
+- Requests are written as ZCL1 frames to the handle.
+- The cap writes back responses and may append additional **event** frames to the same stream.
+
+Supported request ops (ZCL1 `op`):
+
+- `1` LIST (empty payload) → payload is a packed list of registered async selectors.
+- `2` INVOKE → routes to a registered selector in the `zi_async` registry and emits ACK + future completion events.
+- `3` CANCEL → cancels an in-flight future if the selector provides a cancel callback; emits `FUTURE_CANCEL` on success.
+
+Built-in selectors (for smoke/conformance):
+
+- `ping.v1` → ACK + `FUTURE_OK("pong")`
+- `fail.v1` → ACK + `FUTURE_FAIL(code="demo.fail")`
+- `hold.v1` → ACK only; must be cancelled via CANCEL
+
 ## TCP capability (golden)
 
 zingcore 2.5 exposes basic TCP client connections as a capability:

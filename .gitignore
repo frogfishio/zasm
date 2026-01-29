@@ -5,5 +5,8 @@ bin
 node_modules
 out
 
+# Build/publish artifacts
+src/zingcore/*/dist
+
 # Temporary source drops (vendored elsewhere)
 src/zingcore/*/hopper_source
