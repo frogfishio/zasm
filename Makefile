@@ -124,6 +124,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 	  test-zem-zi-write
 	  test-zem-zi-read test-zem-zi-abi-version
 	  test-zem-caps
+	  test-repro-ctl-write-divergence
 
 all: zas zld
 
@@ -163,7 +164,7 @@ dist: build
 	$(MAKE) clean
 	$(MAKE) dist-$(PLATFORM)
 
-DIST_TOOLS := zas zld zlnt zop zxc zir
+DIST_TOOLS := zas zld ircheck zlnt zop zxc zir
 ifneq ($(NO_ZRUN),1)
   DIST_TOOLS += zrun
 endif
@@ -257,6 +258,7 @@ test-validation: test-zem-zi-enum-alloc
 test-validation: test-zem-zi-proc-env
 test-validation: test-zem-inherit-env
 test-validation: test-zem-caps
+test-validation: test-repro-ctl-write-divergence
 test-validation: test-zem-sniff-ret-trunc
 test-validation: test-zem-sniff-hop-bad-args
 test-validation: test-zem-sniff-zi-read-bad-args
@@ -327,6 +329,9 @@ test-zem-zi-read: zas zem
 
 test-zem-zi-abi-version: zas zem
 	sh test/zem_zi_abi_version.sh
+
+test-repro-ctl-write-divergence: zem lower
+	sh test/repro/repro_ctl_write_divergence.sh
 
 test-zem-zi-hop-alloc: zas zem
 	sh test/zem_zi_hop_alloc.sh
