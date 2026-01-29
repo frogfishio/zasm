@@ -13,6 +13,47 @@
 
 #include "zi_sysabi25.h"
 
+static int is_reg_name_sym(const operand_t *o) {
+  if (!o || o->t != JOP_SYM || !o->s) return 0;
+  return strcmp(o->s, "HL") == 0 || strcmp(o->s, "DE") == 0 ||
+         strcmp(o->s, "BC") == 0 || strcmp(o->s, "IX") == 0 ||
+         strcmp(o->s, "A") == 0;
+}
+
+static int maybe_load_call_immediates_into_regs(zem_exec_ctx_t *ctx,
+                                               const record_t *r,
+                                               const zem_symtab_t *syms,
+                                               zem_regs_t *regs) {
+  if (!ctx || !r || !regs) return 0;
+  if (r->nops <= 1) return 0;
+
+  // If all extra operands are register names (e.g. CALL zi_write, HL, DE, BC)
+  // then this is an explicit arg-register list; ignore it.
+  int all_regs = 1;
+  for (size_t i = 1; i < r->nops; i++) {
+    if (!is_reg_name_sym(&r->ops[i])) {
+      all_regs = 0;
+      break;
+    }
+  }
+  if (all_regs) return 0;
+
+  // Otherwise treat the extra operands as immediate argument values and map
+  // them onto HL, DE, BC, IX in order.
+  const size_t n = (r->nops - 1 > 4) ? 4 : (r->nops - 1);
+  uint64_t v[4] = {0, 0, 0, 0};
+  for (size_t i = 0; i < n; i++) {
+    if (!op_to_u64(syms, regs, &r->ops[i + 1], &v[i])) {
+      return 0;
+    }
+  }
+  if (n >= 1) regs->HL = v[0];
+  if (n >= 2) regs->DE = v[1];
+  if (n >= 3) regs->BC = v[2];
+  if (n >= 4) regs->IX = v[3];
+  return 1;
+}
+
 static int32_t req_read_maybe_captured(const zem_proc_t *proc, uint32_t *pos,
                                       int32_t handle, void *ptr, size_t cap) {
   if (handle == 0 && proc && proc->stdin_bytes && pos) {
@@ -37,6 +78,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   size_t pc = *ctx->pc;
   zem_regs_t *regs = ctx->regs;
   zem_buf_t *mem = ctx->mem;
+  const zem_symtab_t *syms = ctx->syms;
   const zem_dbg_cfg_t *dbg_cfg = ctx->dbg_cfg;
   zem_regprov_t *regprov = ctx->regprov;
   zem_watchset_t *watches = ctx->watches;
@@ -121,6 +163,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "zi_write") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t handle_u = 0;
     uint32_t ptr = 0;
@@ -175,6 +218,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "res_write") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t handle_u = 0;
     uint32_t ptr = 0;
@@ -205,6 +249,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "zi_read") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t handle_u = 0;
     uint32_t ptr = 0;
@@ -284,6 +329,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "req_read") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t handle_u = 0;
     uint32_t ptr = 0;
@@ -335,6 +381,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "zi_end") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     int32_t handle = (int32_t)(uint32_t)regs->HL;
     int32_t rc = zi_end(handle);
@@ -346,6 +393,7 @@ int zem_exec_call_io(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
   }
 
   if (strcmp(callee, "zi_ctl") == 0) {
+    (void)maybe_load_call_immediates_into_regs(ctx, r, syms, regs);
     if (trace_enabled && trace_pending && trace_meta) trace_meta->call_is_prim = 1;
     uint32_t req_ptr = 0;
     uint32_t req_len = 0;

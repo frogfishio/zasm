@@ -1,0 +1,17 @@
+{"ir":"zasm-v1.1","k":"dir","d":"EXTERN","args":[{"t":"str","v":"c"},{"t":"str","v":"zi_ctl"},{"t":"sym","v":"zi_ctl"}],"loc":{"line":1}}
+{"ir":"zasm-v1.1","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"zir_main"}],"loc":{"line":2}}
+
+{"ir":"zasm-v1.1","k":"label","name":"zir_main","loc":{"line":4}}
+{"ir":"zasm-v1.1","k":"instr","m":"DROP","ops":[{"t":"reg","v":"HL"}],"loc":{"line":5}}
+{"ir":"zasm-v1.1","k":"instr","m":"CALL","ops":[{"t":"sym","v":"zi_ctl"},{"t":"sym","v":"req"},{"t":"num","v":24},{"t":"sym","v":"resp"},{"t":"num","v":512}],"loc":{"line":6}}
+{"ir":"zasm-v1.1","k":"instr","m":"CP","ops":[{"t":"reg","v":"HL"},{"t":"num","v":0}],"loc":{"line":7}}
+{"ir":"zasm-v1.1","k":"instr","m":"JR","ops":[{"t":"sym","v":"LE"},{"t":"lbl","v":"fail"}],"loc":{"line":8}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":0}],"loc":{"line":9}}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[],"loc":{"line":10}}
+
+{"ir":"zasm-v1.1","k":"label","name":"fail","loc":{"line":12}}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":1}],"loc":{"line":13}}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[],"loc":{"line":14}}
+
+{"ir":"zasm-v1.1","k":"dir","d":"DB","name":"req","args":[{"t":"num","v":90},{"t":"num","v":67},{"t":"num","v":76},{"t":"num","v":49},{"t":"num","v":1},{"t":"num","v":0},{"t":"num","v":1},{"t":"num","v":0},{"t":"num","v":1},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0},{"t":"num","v":0}],"loc":{"line":16}}
+{"ir":"zasm-v1.1","k":"dir","d":"RESB","name":"resp","args":[{"t":"num","v":512}],"loc":{"line":17}}

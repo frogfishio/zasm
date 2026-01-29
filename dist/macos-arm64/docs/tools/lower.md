@@ -102,10 +102,27 @@ LLDB script notes:
   # usage: lldb /tmp/a.out -s /tmp/trace.lldb
   ```
 
+  - Native zABI 2.5 “echo” (no legacy `_in/_out`):
+    ```
+    # 1) Lower IR to an object
+    lower --input examples/echo_zabi25_native.jsonl --o /tmp/echo_zabi25_native.o
+
+    # 2) Link a tiny C runner + zingcore25 hostlib
+    cc -Isrc/zingcore/2.5/zingcore/include \
+      examples/echo_zabi25_native_runner.c \
+      /tmp/echo_zabi25_native.o \
+      build/zingcore25/libzingcore25.a \
+      -o /tmp/echo_zabi25_native
+
+    # 3) Smoke
+    printf 'hello\n' | /tmp/echo_zabi25_native
+    ```
+
 ### Notes
 
 - IR `id`/`src_ref` are preserved; relocs carry `ir_id` for cross-reference.
 - Symbol table dedupes by name; `--strict` currently errors on missing decls.
+- Avoid branching back to a function entry label: `lower` injects a prologue before the first instruction, so if your loop label shares the same address as the function label you’ll effectively re-run the prologue every iteration (stack growth). Put loop labels after at least one real instruction.
 - `--dump-asm` is a raw hex word dump; use `otool -tV <bin>` for full disassembly.
 - `refs` in JSON outputs are de-duplicated per symbol for easier tooling.
 - The Mach-O writer emits deterministic objects (no timestamps).

@@ -666,7 +666,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       trace_before = regs;
       memset(&trace_meta, 0, sizeof(trace_meta));
       trace_meta.sp_before = (uint32_t)sp;
-      if (op == ZEM_OP_CALL && r->nops == 1 && r->ops[0].t == JOP_SYM &&
+      if (op == ZEM_OP_CALL && r->nops >= 1 && r->ops[0].t == JOP_SYM &&
           r->ops[0].s) {
         trace_meta.call_target = r->ops[0].s;
       }

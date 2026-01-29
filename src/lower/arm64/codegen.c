@@ -644,8 +644,6 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
         w[pcw++] = enc_ldp_fp_lr();
       }
       w[pcw++] = enc_ret();
-      in_func = 0;
-      func_has_prologue = 0;
       continue;
     }
 
