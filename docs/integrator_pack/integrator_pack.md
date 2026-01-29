@@ -3,6 +3,8 @@
 
 # Integrator Pack (Third-Party Compiler Authors)
 
+NOTE: This directory is a legacy bundle format. For the supported, ready-made distribution (tools + libs + headers + docs for `zem` + `lower`), use `dist/integration-pack/`.
+
 This pack defines the normative contract for compilers that emit JSONL IR for `zld`.
 Use it to validate that your compiler output is compatible with the zasm toolchain
 without assuming a `zas` frontend.
@@ -52,7 +54,7 @@ make dist-integrator-pack
 ## Required guarantees
 
 - **Schema compliance:** record shape, identifiers, operand kinds, directive enums.
-- **Version tag:** `ir: "zasm-v1.1"` is mandatory.
+- **Version tag:** `ir: "zasm-v1.0"` is mandatory.
 - **ABI behavior:** entrypoint, syscall surface, and allocation contract must match `docs/spec/abi.md`.
 
 ## Recommended outputs

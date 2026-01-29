@@ -108,7 +108,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
   zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
-  integrator-pack dist-integrator-pack \
+	integrator-pack dist-integrator-pack integration-pack dist-integration-pack \
   test-asm-suite \
   test-hello test-wat test-loop-wat test-loop \
   test-ld-regreg test-add-hl-imm test-data-directives test-compare-conds \
@@ -674,6 +674,12 @@ integrator-pack:
 
 dist-integrator-pack:
 	./docs/integrator_pack/pack.sh $(CURDIR)/dist/integrator_pack
+
+integration-pack:
+	./docs/integration_pack/pack.sh $(CURDIR)/integration_pack
+
+dist-integration-pack:
+	./docs/integration_pack/pack.sh $(CURDIR)/dist/integration-pack
 
 clean:
 	rm -rf $(BUILD) $(BIN_ROOT)
