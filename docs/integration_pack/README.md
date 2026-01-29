@@ -18,7 +18,7 @@ Where `<platform>` is currently `macos-arm64`.
 
 Inside a platform folder:
 
-- `bin/` — tool binaries (`lower`, `zld`, `zem`, ...)
+- `bin/` — tool binaries (`lower`, `zld`, `zem`, `ircheck`, ...)
 - `lib/` — libraries (`libzingcore25.a`)
 - `include/` — C/C++ headers (zasm public headers + zingcore25 headers)
 - `docs/` — tool + spec docs
@@ -39,6 +39,11 @@ Or directly:
 ## Quick starts
 
 ### Validate IR output (JSONL)
+
+- `./dist/integration-pack/macos-arm64/bin/ircheck < your.jsonl`
+- `./dist/integration-pack/macos-arm64/bin/ircheck --tool your.jsonl`
+
+`zld --conform=strict --verify` is still useful as a compiler-side validator:
 
 - `./dist/integration-pack/macos-arm64/bin/zld --conform=strict --verify < your.jsonl`
 - `./dist/integration-pack/macos-arm64/conformance/conform_zld.sh`

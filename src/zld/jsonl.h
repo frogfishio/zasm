@@ -36,6 +36,10 @@ typedef struct {
 } operand_t;
 
 typedef struct {
+  // IR version tag (parsed from "ir").
+  // 10 => zasm-v1.0
+  // 11 => zasm-v1.1
+  int ir;
   rec_kind_t k;
   int line;          // optional: from loc.line if present, else -1
 

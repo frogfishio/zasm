@@ -67,7 +67,7 @@ for f in LICENSE LICENSE-ASM COPYRIGHT TRADEMARK VERSION CHANGELOG.md; do
 done
 
 # Tools
-for tool in lower zem zld; do
+for tool in lower zem zld ircheck; do
   if [ ! -f "$tool_src/$tool" ]; then
     echo "missing tool: $tool_src/$tool" >&2
     exit 2
@@ -93,7 +93,7 @@ for f in abi.md ir.md isa.md; do
     rsync -a "$root_dir/docs/spec/$f" "$platform_out/docs/spec/$f"
   fi
 done
-for f in zem.md lower.md zld.md; do
+for f in zem.md lower.md zld.md ircheck.md; do
   if [ -f "$root_dir/docs/tools/$f" ]; then
     rsync -a "$root_dir/docs/tools/$f" "$platform_out/docs/tools/$f"
   fi

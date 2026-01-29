@@ -43,6 +43,7 @@ LOWER_BUILD := $(BUILD)/lower
 CLOAK_BUILD := $(BUILD)/cloak
 CLOAK_TEST_BUILD := $(BUILD)/cloak_tests
 ZEM_BUILD := $(BUILD)/zem
+IRCHECK_BUILD := $(BUILD)/ircheck
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -106,6 +107,7 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 .PHONY: \
 	all clean zas zld zrun zlnt zop zxc zxc-lib zir lower dirs install install-devtools \
 	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
+	ircheck \
   zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
   test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
 	integrator-pack dist-integrator-pack integration-pack dist-integration-pack \
@@ -125,15 +127,16 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld zrun zlnt zop zxc zir zem lower
+build: zas zld ircheck zrun zlnt zop zxc zir zem lower
 
 pipeline: build
 	./scripts/pipeline.sh --skip-build
 
-install: zas zld zrun zlnt zop zxc zir zem lower
+install: zas zld ircheck zrun zlnt zop zxc zir zem lower
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
+	@install -m 0755 $(BIN)/ircheck $(DESTDIR)$(BINDIR)/ircheck
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
 	@install -m 0755 $(BIN)/zlnt $(DESTDIR)$(BINDIR)/zlnt
 	@install -m 0755 $(BIN)/zop $(DESTDIR)$(BINDIR)/zop
@@ -148,7 +151,7 @@ install-devtools: zasm-bin-wrap
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -235,7 +238,7 @@ test-runtime: test-cat test-upper test-stream test-alloc test-isa-smoke test-fiz
 
 test-negative: test-unknownsym test-badcond test-badlabel test-badmem
 
-test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld
+test-validation: test-wat-validate test-wasm-opt test-zlnt test-opcode-golden test-conform-zld test-conform-ircheck
 test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-zir-canon-assign-ids
@@ -654,6 +657,9 @@ test-abi-ctl: zrun
 test-conform-zld: zld
 	test/conform_zld.sh
 
+test-conform-ircheck: ircheck
+	test/conform_ircheck.sh
+
 test-cloak-smoke: zcloak zcloak-jit cloak-example test-cloak-jit
 
 test-cloak-jit: zcloak-jit
@@ -675,10 +681,11 @@ integrator-pack:
 dist-integrator-pack:
 	./docs/integrator_pack/pack.sh $(CURDIR)/dist/integrator_pack
 
-integration-pack:
+
+integration-pack: lower zem zld ircheck
 	./docs/integration_pack/pack.sh $(CURDIR)/integration_pack
 
-dist-integration-pack:
+dist-integration-pack: lower zem zld ircheck
 	./docs/integration_pack/pack.sh $(CURDIR)/dist/integration-pack
 
 clean:
@@ -746,6 +753,28 @@ zld: $(ZLD_OBJ) | dirs
 	ln -sf $(PLATFORM)/zld $(BIN_ROOT)/zld
 
 .PHONY: zld
+
+# ---- ircheck (IR stream checker / certifier) ----
+
+IRCHECK_SRC := \
+  src/ircheck/main.c \
+  src/zld/jsonl.c
+
+IRCHECK_OBJ := \
+  $(IRCHECK_BUILD)/main.o \
+  $(IRCHECK_BUILD)/jsonl.o
+
+$(IRCHECK_BUILD)/main.o: src/ircheck/main.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -Isrc/ircheck -c $< -o $@
+
+$(IRCHECK_BUILD)/jsonl.o: src/zld/jsonl.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
+
+ircheck: $(IRCHECK_OBJ) | dirs
+	$(CC) $(CFLAGS) $(IRCHECK_OBJ) -o $(BIN)/ircheck $(LDFLAGS)
+	ln -sf $(PLATFORM)/ircheck $(BIN_ROOT)/ircheck
+
+.PHONY: ircheck
 
 # ---- lower (IR -> Mach-O arm64) ----
 

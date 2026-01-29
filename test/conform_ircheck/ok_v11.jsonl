@@ -1,0 +1,3 @@
+{"ir":"zasm-v1.1","k":"meta","producer":"ircheck-tests"}
+{"ir":"zasm-v1.1","k":"src","id":0,"file":"ok_v11.jsonl","line":1,"text":"RET"}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[],"src_ref":0,"loc":{"line":3}}

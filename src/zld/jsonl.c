@@ -253,14 +253,15 @@ static long parse_json_int(const char** p, int* ok) {
 }
 
 // IR version tagging is mandatory; this is our compatibility gate for the pipeline.
-static int parse_ir_version(const char* line) {
+static int parse_ir_version(const char* line, int* out_ir) {
   const char* p = json_find_field_value(line, "ir");
   if (!p) return 0;
   p = skip_ws(p);
   char* v = parse_json_string(&p);
   if (!v) return 0;
   int ok = -1;
-  if (strcmp(v, "zasm-v1.0") == 0 || strcmp(v, "zasm-v1.1") == 0) ok = 1;
+  if (strcmp(v, "zasm-v1.0") == 0) { ok = 1; if (out_ir) *out_ir = 10; }
+  else if (strcmp(v, "zasm-v1.1") == 0) { ok = 1; if (out_ir) *out_ir = 11; }
   free(v);
   return ok;
 }
@@ -278,7 +279,7 @@ static int parse_loc_line(const char* line) {
   return ok ? (int)v : -1;
 }
 
-static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out_ok) {
+static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out_ok, int ir_version) {
   *out_n = 0; *out_ok = 0;
   const char* p = start;
   p = skip_ws(p);
@@ -330,6 +331,9 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
         op.s = parse_json_string(&v2p);
         if (!op.s) break;
       } else if (*pb == '"') {
+        // Legacy v1 base string means register. In v1.1, mem.base must be an
+        // object (Reg|Sym) per schema.
+        if (ir_version >= 11) break;
         const char* v2p = pb;
         op.s = parse_json_string(&v2p);
         if (!op.s) break;
@@ -396,6 +400,7 @@ static operand_t* parse_operand_array(const char* start, size_t* out_n, int* out
 
 int parse_jsonl_record(const char* line, record_t* out) {
   memset(out, 0, sizeof(*out));
+  out->ir = 0;
   out->line = parse_loc_line(line);
   out->id = -1;
   out->src_ref = -1;
@@ -403,7 +408,7 @@ int parse_jsonl_record(const char* line, record_t* out) {
   out->src_line = -1;
   out->src_col = -1;
 
-  int ir_ok = parse_ir_version(line);
+  int ir_ok = parse_ir_version(line, &out->ir);
   if (ir_ok == 0) return 10;
   if (ir_ok < 0) return 11;
 
@@ -440,7 +445,7 @@ int parse_jsonl_record(const char* line, record_t* out) {
     const char* pops = json_find_field_value(line, "ops");
     if (!pops) { free(kind); return 2; }
     int ok = 0;
-    out->ops = parse_operand_array(pops, &out->nops, &ok);
+    out->ops = parse_operand_array(pops, &out->nops, &ok, out->ir);
     if (!ok) { free(kind); return 2; }
     /* normalize reg/lbl -> sym for downstream emitter expectations */
     for (size_t i = 0; i < out->nops; i++) {
@@ -486,7 +491,7 @@ int parse_jsonl_record(const char* line, record_t* out) {
     const char* pargs = json_find_field_value(line, "args");
     if (!pargs) { free(kind); return 3; }
     int ok = 0;
-    out->args = parse_operand_array(pargs, &out->nargs, &ok);
+    out->args = parse_operand_array(pargs, &out->nargs, &ok, out->ir);
     if (!ok) { free(kind); return 3; }
     for (size_t i = 0; i < out->nargs; i++) {
       if (out->args[i].t == JOP_REG || out->args[i].t == JOP_LBL) {
