@@ -1,66 +1,81 @@
 <p align="center">
   <strong>zasm</strong><br>
-  <em>A Deterministic Virtual ISA and Cross-Compilation Toolchain</em>
+  <em>A Deterministic Virtual CPU + IR Toolchain (WASM, native, and more)</em>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.5-blue" alt="Version">
   <img src="https://img.shields.io/badge/license-GPL--3.0-green" alt="License">
-  <img src="https://img.shields.io/badge/targets-arm64%20%7C%20x86__64%20%7C%20WASM%20%7C%20RV64I-orange" alt="Targets">
+  <img src="https://img.shields.io/badge/targets-arm64%20%7C%20x86__64%20%7C%20WASM%20%7C%20Mach--O%20%7C%20RV64I%20(planned)%20%7C%20JVM%2FCLR%20(planned)-orange" alt="Targets">
 </p>
 
 ---
 
 ## What is zasm?
 
-**zasm** is a custom virtual instruction set architecture (ISA) and cross-compilation toolchain designed for **deterministic**, **auditable**, and **sandboxed** code execution across multiple hardware targets.
+**zasm** is a compiler-and-runtime stack for **deterministic**, **auditable**, and **sandboxed** execution.
 
-At its core, zasm defines a **64-bit register-based virtual processor** with a clean opcode encoding, which can be:
+At the bottom, it defines a stable virtual CPU (the “ZASM64 / ZX64” model) with a concrete opcode encoding that can be:
 
-- **Interpreted** via the included cloak runtime
-- **JIT-compiled** to native arm64 or x86_64 machine code
-- **Ahead-of-time compiled** to WebAssembly (WASM)
-- **Translated** to other ISAs (RISC-V RV64I planned)
+- **Interpreted** (reference execution)
+- **JIT-compiled** to native machine code (arm64 / x86_64; more planned)
+- **AOT-lowered** to **WebAssembly** (WAT/WASM)
+- **Packaged** as a portable opcode container for shipping and replay
 
-Beyond the core CPU profile, future work explores specialized profiles:
-**zASMA** (accelerator/GPU), **zASMF** (FPGA), and **zASM32** (Cortex‑M class).
-These are parked specs today and are not implemented yet.
+But zasm is no longer “just a cute ISA”: it has grown into a **multi-IR toolchain** where:
 
-The assembly syntax uses Z80-inspired mnemonics for human readability—but this is **not a Z80 emulator**. It is a modern, purpose-built virtual silicon designed for cross-platform deterministic execution with formal ABI contracts.
+- **Higher-level languages** can compile into a stable, streaming IR (SIR) and then lower through zasm layers.
+- The host boundary is defined by a normative, capability-gated ABI (**zABI 2.x**, `env.zi_*`).
+- Complex data lives in a controlled arena/record system (Hopper), enabling “memory-safe by default” frontends.
 
-> **Status:** v1.0.5 — Normative specs for ISA, IR, ABI, and opcode encoding are stable. Breaking changes trigger major version bumps.
+### Product lines (execution models)
+
+zasm supports three closely-related runtime profiles:
+
+- **ZX64** — classic register-machine virtual CPU (the stable baseline).
+- **Z64+S** — ZX64 plus the optional **stacker coprocessor** (explicit stack substrate for mixed-work loads).
+- **ZX64S** — a **stack-machine** runtime (stacker as the *whole CPU*; stacker-only control flow).
+
+These are **compile-time/lowering-time choices** (no runtime auto-switch). If a target/runtime doesn’t support a requested profile, lowering fails.
+
+> **Status:** v1.0.5 — core contracts are stable (ISA/IR/ABI/opcode encoding). Breaking changes trigger major version bumps.
 
 ---
 
 ## Architecture Overview
 
-```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                              SOURCE (.asm)                                  │
-│                     Human-readable Z80-style mnemonics                      │
+│                         FRONTENDS (many languages)                           │
+│              Oberon / C89 / DSLs / etc. → SIR (streaming typed IR)           │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
+                                    │
+                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            zas (Assembler)                                  │
-│               Parses source → Emits versioned JSONL IR                      │
+│                         zasm layer (ZIR / zasm IR)                           │
+│               Lowering, tooling, analysis, minimization, replay              │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-                                      ▼
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        SOURCE (.asm) / zas (Assembler)                       │
+│         Human-readable mnemonics → Emits versioned JSONL IR / opcode stream  │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    │
+                                    ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            zlnt (Analyzer)                                  │
 │          Static analysis on JSONL IR (recommended safety gate)               │
 └─────────────────────────────────────────────────────────────────────────────┘
-                                      │
-              ┌───────────────────────┼───────────────────────┐
-              │                       │                       │
-              ▼                       ▼                       ▼
+                                    │
+            ┌───────────────────────┼───────────────────────┐
+            │                       │                       │
+            ▼                       ▼                       ▼
 ┌─────────────────────┐   ┌─────────────────────┐   ┌─────────────────────────┐
 │   zld (Linker)      │   │   zop (Packer)      │   │  Third-Party Compilers  │
 │   JSONL → WAT/WASM  │   │   JSONL → .zasm.bin │   │  (Your DSL → JSONL IR)  │
 └─────────────────────┘   └─────────────────────┘   └─────────────────────────┘
-          │                         │
-          ▼                         ▼
+        │                         │
+        ▼                         ▼
 ┌─────────────────────┐   ┌─────────────────────────────────────────────────┐
 │   WebAssembly       │   │              libzxc (Cross-Compiler)            │
 │   (Any WASM host)   │   │   Opcode bytes → Native machine code            │
@@ -68,16 +83,15 @@ The assembly syntax uses Z80-inspired mnemonics for human readability—but this
                           │   │   arm64     │   x86_64    │  RV64I (soon) │ │
                           │   └─────────────┴─────────────┴───────────────┘ │
                           └─────────────────────────────────────────────────┘
-                                            │
-                                            ▼
+                                          │
+                                          ▼
                           ┌─────────────────────────────────────────────────┐
                           │           Cloak Runtime (Sandbox)               │
-                          │   Capability-gated execution with ABI contract  │
+                          │   Capability-gated execution with zABI 2.x      │
                           │   • zrun (WASM via wasmtime)                    │
                           │   • zcloak (Pure C interpreter)                 │
                           │   • zcloak-jit (JIT via libzxc)                 │
                           └─────────────────────────────────────────────────┘
-```
 
 ---
 
@@ -85,7 +99,7 @@ The assembly syntax uses Z80-inspired mnemonics for human readability—but this
 
 ### 🎯 Custom Virtual ISA (Not an Emulator)
 
-zasm defines a **64-bit register-based instruction set** with:
+zasm defines a **64-bit virtual CPU** (ZX64) with:
 
 - **Fixed 32-bit base instruction word** with extension words for large immediates
 - **16-register file** (5 currently mapped: HL, DE, A, BC, IX)
@@ -106,16 +120,29 @@ Every aspect of zasm is built for **byte-for-byte reproducibility**:
 
 This makes zasm ideal for **content-addressable systems**, **blockchain execution**, and **reproducible builds**.
 
+### 🧱 More than an ISA: streaming IR + tooling
+
+zasm is built around **line-oriented, versioned IR streams (JSONL)** so tools can operate on real programs:
+
+- interpret and debug (reference semantics)
+- trace execution and memory events
+- compute and merge coverage
+- delta-minimize and triage failures
+- strip unreachable code and dead regions
+- analyze repetition (n-grams) and bloat
+
+This is the “compiler stack” part: a stable representation you can pipe through real toolchains.
+
 ### 🛡️ Capability-Gated Sandboxing
 
-The **Cloak** runtime model enforces a strict capability boundary:
+The runtime boundary is defined by a **normative host ABI** (zABI 2.x):
 
-- **All host interactions** use explicit primitives prefixed with `_` (e.g., `_in`, `_out`, `_alloc`, `_ctl`)
-- **No ambient authority**—if it's not in the ABI, it doesn't exist
-- **Fail-closed security**—disallowed primitives cause instantiation failure
-- **Full auditability**—every side effect is visible in source
+- **All host interactions** go through explicit `env.zi_*` syscalls (e.g. `zi_read`, `zi_write`, `zi_alloc`, `zi_ctl`).
+- **No ambient authority** — if it’s not in the ABI surface, it doesn’t exist.
+- **Fail-closed security** — missing capabilities are rejected via discovery/negotiation (`zi_ctl`).
+- **Auditability** — host effects are explicit and can be traced, replayed, minimized, and certified.
 
-The `_ctl` control plane uses **ZCL1 framing** for capability discovery and extension, allowing hosts to expose new features without changing the core ABI.
+This keeps zasm modules portable across hosts while preserving a strict sandbox contract.
 
 ### 🔌 Multi-Target Cross-Compilation
 
@@ -145,6 +172,7 @@ zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
 zasm ships with **normative specifications** that third-party tools can rely on:
 
 - **ISA Spec** (`docs/spec/isa.md`) — Registers, instructions, directives
+- | docs/spec/stacker.md | Stacker profile (coprocessor) and ZX64S addendum (stack CPU) |
 - **ABI Spec** (`docs/spec/abi.md`) — Host primitives, memory model, handle semantics
 - **IR Spec** (`docs/spec/ir.md`) — JSONL intermediate representation
 - **Opcode Spec** (`docs/spec/opcode_encoding.md`) — Binary encoding for native backends
@@ -198,9 +226,9 @@ The `(DE, BC)` = `(ptr, len)` slice convention (with `HL` as a handle for `zi_re
 
 ## Quick Start
 
-## Deliverables =
+## Deliverables
 
-For end users, zasm is delivered as **self-contained compiled binaries** (e.g. `bin/<platform>/*`, with convenience symlinks under `bin/`). ==
+For end users, zasm is delivered as **self-contained compiled binaries** (e.g. `bin/<platform>/*`, with convenience symlinks under `bin/`).
 
 The repository may contain scripts used for development, testing, or internal workflows; they are not part of the user-facing product surface.
 
@@ -272,6 +300,7 @@ JIT error semantics:
 | Document | Description |
 |----------|-------------|
 | [docs/architecture.md](./docs/architecture.md) | System design and pipeline overview |
+| docs/spec/stacker.md | Stacker profile (coprocessor) and ZX64S addendum (stack CPU) |
 | [docs/developers.md](./docs/developers.md) | Getting started guide |
 | [docs/spec/isa.md](./docs/spec/isa.md) | **Normative** instruction set specification |
 | [docs/spec/abi.md](./docs/spec/abi.md) | **Normative** host ABI and capability model |
