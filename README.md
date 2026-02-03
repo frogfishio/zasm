@@ -44,6 +44,7 @@ These are **compile-time/lowering-time choices** (no runtime auto-switch). If a 
 
 ## Architecture Overview
 
+```text
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                         FRONTENDS (many languages)                           │
 │              Oberon / C89 / DSLs / etc. → SIR (streaming typed IR)           │
@@ -77,11 +78,11 @@ These are **compile-time/lowering-time choices** (no runtime auto-switch). If a 
         │                         │
         ▼                         ▼
 ┌─────────────────────┐   ┌─────────────────────────────────────────────────┐
-│   WebAssembly       │   │              libzxc (Cross-Compiler)            │
-│   (Any WASM host)   │   │   Opcode bytes → Native machine code            │
-└─────────────────────┘   │   ┌─────────────┬─────────────┬───────────────┐ │
-                          │   │   arm64     │   x86_64    │  RV64I (soon) │ │
-                          │   └─────────────┴─────────────┴───────────────┘ │
+│   WebAssembly       │   │              libzxc (Cross-Compiler)             │
+│   (Any WASM host)   │   │   Opcode bytes → Native machine code             │
+└─────────────────────┘   │   ┌─────────────┬─────────────┬───────────────┐  │
+                          │   │   arm64     │   x86_64    │  RV64I (soon) │  │
+                          │   └─────────────┴─────────────┴───────────────┘  │
                           └─────────────────────────────────────────────────┘
                                           │
                                           ▼
@@ -92,6 +93,7 @@ These are **compile-time/lowering-time choices** (no runtime auto-switch). If a 
                           │   • zcloak (Pure C interpreter)                 │
                           │   • zcloak-jit (JIT via libzxc)                 │
                           └─────────────────────────────────────────────────┘
+```
 
 ---
 
