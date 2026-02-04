@@ -9,14 +9,19 @@
 - [ ] Zem: target-independent optimization pipeline (for zasm JSONL)
   - [x] Add `zem --opt-out <path>` to emit optimized JSONL (semantic-preserving) (`--opt dead-cf`)
   - [x] Build basic blocks + CFG from labels/terminators (initial use: `--opt cfg-simplify` reachability + trivial JR cleanup)
-  - [ ] Reachability + CFG simplification (unreachable removal, jump threading, block merge)
+  - [ ] Reachability + CFG simplification
+    - [x] Unreachable removal (whole-program)
+    - [x] Jump threading through one-instr trampolines
+    - [x] Label alias cleanup (multiple labels bound to same instruction)
+    - [x] Fold unconditional `JR <lbl>` to `RET` when target is a `RET`
+    - [ ] Block merge (true empty-block / fallthrough merge beyond label cleanup)
   - [ ] Block-local redundant load elimination
   - [ ] Block-local redundant store elimination
   - [ ] Copy propagation / temp forwarding (within block first)
   - [ ] Constant folding + simple instcombine on common zasm idioms
   - [ ] Dead code elimination for pure computations (requires def/use; start block-local)
   - [ ] Dead store elimination for slots proven never read (conservative alias rules)
-  - [ ] Add “do-no-harm” validation mode: run original vs optimized in `zem` and compare stdout/stderr/rc
+  - [x] Add “do-no-harm” validation mode: run original vs optimized in `zem` and compare stdout/stderr/rc (`--opt-validate`)
 
 - [ ] Zem: reusable profiling + facts emission
   - [ ] Extend beyond `--pgo-len-out`: add optional hotness (block/edge counts) output

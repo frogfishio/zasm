@@ -119,4 +119,54 @@ grep -q '"threaded_jumps":' "$TMP/thread.stats.jsonl"
 
 ./bin/zem "$TMP/thread.opt.jsonl" >/dev/null
 
+# Scenario 4: label aliasing (multiple labels for same block start).
+cat >"$TMP/alias.jsonl" <<'EOF'
+{"ir":"zasm-v1.1","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"zir_main"}]}
+{"ir":"zasm-v1.1","k":"label","name":"zir_main"}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":0}]}
+{"ir":"zasm-v1.1","k":"instr","m":"JR","ops":[{"t":"lbl","v":"B"}]}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":1}]}
+{"ir":"zasm-v1.1","k":"label","name":"A"}
+{"ir":"zasm-v1.1","k":"label","name":"B"}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":2}]}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[]}
+EOF
+
+./bin/zem --opt cfg-simplify --opt-out "$TMP/alias.opt.jsonl" "$TMP/alias.jsonl" >/dev/null
+
+# The alias label B should be removed, and the JR should target A.
+if grep -q '"k":"label".*"name":"B"' "$TMP/alias.opt.jsonl"; then
+  echo "expected alias label B removed" >&2
+  exit 1
+fi
+grep -q '"m":"JR"' "$TMP/alias.opt.jsonl"
+grep -q '"v":"A"' "$TMP/alias.opt.jsonl"
+
+./bin/zem "$TMP/alias.opt.jsonl" >/dev/null
+
+# Scenario 5: fold unconditional JR-to-RET.
+cat >"$TMP/jr_ret.jsonl" <<'EOF'
+{"ir":"zasm-v1.1","k":"dir","d":"PUBLIC","args":[{"t":"sym","v":"zir_main"}]}
+{"ir":"zasm-v1.1","k":"label","name":"zir_main"}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":0}]}
+{"ir":"zasm-v1.1","k":"instr","m":"JR","ops":[{"t":"lbl","v":"Lret"}]}
+{"ir":"zasm-v1.1","k":"instr","m":"LD","ops":[{"t":"reg","v":"HL"},{"t":"num","v":1}]}
+{"ir":"zasm-v1.1","k":"label","name":"Lret"}
+{"ir":"zasm-v1.1","k":"instr","m":"RET","ops":[]}
+EOF
+
+./bin/zem --opt cfg-simplify --opt-out "$TMP/jr_ret.opt.jsonl" "$TMP/jr_ret.jsonl" >/dev/null
+
+# The explicit JR should be gone, and the Lret block should be pruned.
+if grep -q '"m":"JR"' "$TMP/jr_ret.opt.jsonl"; then
+  echo "expected JR folded away" >&2
+  exit 1
+fi
+if grep -q '"name":"Lret"' "$TMP/jr_ret.opt.jsonl"; then
+  echo "expected Lret label pruned" >&2
+  exit 1
+fi
+
+./bin/zem "$TMP/jr_ret.opt.jsonl" >/dev/null
+
 echo ok

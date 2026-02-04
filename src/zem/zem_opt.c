@@ -25,6 +25,7 @@ typedef struct {
   uint64_t removed_dead_instr;
   uint64_t removed_unreachable_instr;
   uint64_t removed_jr_fallthrough;
+  uint64_t folded_jr_to_ret;
   uint64_t threaded_jumps;
   uint64_t removed_labels;
   uint64_t cfg_blocks;
@@ -116,6 +117,7 @@ static int zem_opt_write_stats_jsonl(FILE *out, const char *mode,
   fprintf(out, ",\"removed_dead_instr\":%" PRIu64, st->removed_dead_instr);
   fprintf(out, ",\"removed_unreachable_instr\":%" PRIu64, st->removed_unreachable_instr);
   fprintf(out, ",\"removed_jr_fallthrough\":%" PRIu64, st->removed_jr_fallthrough);
+  fprintf(out, ",\"folded_jr_to_ret\":%" PRIu64, st->folded_jr_to_ret);
   fprintf(out, ",\"threaded_jumps\":%" PRIu64, st->threaded_jumps);
   fprintf(out, ",\"removed_labels\":%" PRIu64, st->removed_labels);
   fprintf(out, ",\"cfg_blocks\":%" PRIu64, st->cfg_blocks);
@@ -381,6 +383,104 @@ static const char *zem_opt_thread_resolve(const zem_opt_thread_map_t *m,
   return cur;
 }
 
+static int zem_opt_is_public_label_name(const zem_symtab_t *public_syms,
+                                        const char *lbl) {
+  if (!public_syms || !lbl || !*lbl) return 0;
+  int is_ptr = 0;
+  uint32_t v = 0;
+  return zem_symtab_get(public_syms, lbl, &is_ptr, &v) ? 1 : 0;
+}
+
+static int zem_opt_build_public_symtab(const recvec_t *recs,
+                                       zem_symtab_t *out_public) {
+  if (!recs || !out_public) return 0;
+  zem_symtab_init(out_public);
+  for (size_t i = 0; i < recs->n; i++) {
+    const record_t *r = &recs->v[i];
+    if (r->k == JREC_DIR && r->d && strcmp(r->d, "PUBLIC") == 0 && r->nargs >= 1 &&
+        r->args[0].t == JOP_SYM && r->args[0].s) {
+      (void)zem_symtab_put(out_public, r->args[0].s, 0, 1);
+    }
+  }
+  return 1;
+}
+
+// Build a conservative label-alias map for code labels that attach to the same
+// instruction PC. We only map (and later drop) non-PUBLIC aliases.
+static int zem_opt_build_alias_map(const recvec_t *recs,
+                                   const zem_symtab_t *labels,
+                                   const uint32_t *next_instr_after,
+                                   const zem_symtab_t *public_syms,
+                                   zem_opt_thread_map_t *out_alias) {
+  if (!recs || !labels || !next_instr_after || !out_alias) return 0;
+  memset(out_alias, 0, sizeof(*out_alias));
+  zem_symtab_init(&out_alias->idx);
+
+  const char **canon_for_pc = (const char **)calloc(recs->n ? recs->n : 1,
+                                                   sizeof(const char *));
+  if (!canon_for_pc) return 0;
+
+  for (size_t i = 0; i < recs->n; i++) {
+    const record_t *r = &recs->v[i];
+    if (r->k != JREC_LABEL || !r->label || !*r->label) continue;
+
+    uint32_t tpc = next_instr_after[i];
+    if (tpc >= recs->n || recs->v[tpc].k != JREC_INSTR) continue;
+
+    // Only alias labels that the label index considers code labels.
+    int is_ptr = 0;
+    uint32_t lpc = 0;
+    if (!zem_symtab_get(labels, r->label, &is_ptr, &lpc) || lpc != tpc) continue;
+
+    const char *cur = canon_for_pc[tpc];
+    if (!cur) {
+      canon_for_pc[tpc] = r->label;
+      continue;
+    }
+
+    if (strcmp(cur, r->label) == 0) continue;
+
+    int cur_pub = zem_opt_is_public_label_name(public_syms, cur);
+    int new_pub = zem_opt_is_public_label_name(public_syms, r->label);
+    int cur_main = strcmp(cur, "zir_main") == 0;
+    int new_main = strcmp(r->label, "zir_main") == 0;
+
+    // Choose a canonical label per PC: prefer zir_main, then PUBLIC, then first.
+    int choose_new = 0;
+    if (!cur_main && new_main) {
+      choose_new = 1;
+    } else if (!cur_pub && new_pub && !new_main) {
+      choose_new = 1;
+    }
+
+    if (choose_new) {
+      // Map old canonical to new canonical if it's droppable.
+      if (!cur_pub && !cur_main) {
+        (void)zem_opt_thread_map_add(out_alias, cur, r->label);
+      }
+      canon_for_pc[tpc] = r->label;
+      // Also map this label itself to the new canonical if droppable (no-op).
+      continue;
+    }
+
+    // Map new label to existing canonical if droppable.
+    if (!new_pub && !new_main) {
+      (void)zem_opt_thread_map_add(out_alias, r->label, cur);
+    }
+  }
+
+  free(canon_for_pc);
+  return 1;
+}
+
+static const char *zem_opt_resolve_cf_target(const zem_opt_thread_map_t *alias,
+                                             const zem_opt_thread_map_t *thread,
+                                             const char *lbl) {
+  lbl = zem_opt_thread_resolve(alias, lbl);
+  lbl = zem_opt_thread_resolve(thread, lbl);
+  return lbl;
+}
+
 static int zem_opt_build_thread_map(const recvec_t *recs,
                                     const zem_symtab_t *labels,
                                     const uint32_t *next_instr_after,
@@ -460,6 +560,7 @@ static int zem_opt_build_thread_map(const recvec_t *recs,
 static uint8_t *zem_opt_cfg_reachability(const recvec_t *recs,
                                          const zem_symtab_t *labels,
                                          const uint32_t *next_instr_after,
+                                         const zem_opt_thread_map_t *alias,
                                          const zem_opt_thread_map_t *thread,
                                          zem_opt_stats_t *st) {
   if (!recs || !labels || !next_instr_after) return NULL;
@@ -484,6 +585,22 @@ static uint8_t *zem_opt_cfg_reachability(const recvec_t *recs,
     q[qt++] = entry;
   }
 
+  // PUBLIC labels are additional entrypoints: don't prune exported code.
+  for (size_t i = 0; i < recs->n; i++) {
+    const record_t *r = &recs->v[i];
+    if (r->k != JREC_DIR || !r->d || strcmp(r->d, "PUBLIC") != 0) continue;
+    if (r->nargs < 1 || r->args[0].t != JOP_SYM || !r->args[0].s) continue;
+    int is_ptr = 0;
+    uint32_t tpc = 0;
+    if (zem_symtab_get(labels, r->args[0].s, &is_ptr, &tpc) && tpc < recs->n &&
+        recs->v[tpc].k == JREC_INSTR) {
+      if (!reach[tpc]) {
+        reach[tpc] = 1;
+        q[qt++] = tpc;
+      }
+    }
+  }
+
   while (qh < qt) {
     uint32_t pc = q[qh++];
     if (pc >= recs->n) continue;
@@ -496,19 +613,22 @@ static uint8_t *zem_opt_cfg_reachability(const recvec_t *recs,
     if (strcmp(r->m, "RET") == 0) {
       // no edges
     } else if (zem_opt_is_uncond_jr(r, &tgt)) {
-      tgt = zem_opt_thread_resolve(thread, tgt);
+      tgt = zem_opt_resolve_cf_target(alias, thread, tgt);
       int is_ptr = 0;
       uint32_t tpc = 0;
       if (tgt && zem_symtab_get(labels, tgt, &is_ptr, &tpc) && tpc < recs->n &&
           recs->v[tpc].k == JREC_INSTR) {
-        if (!reach[tpc]) {
-          reach[tpc] = 1;
-          q[qt++] = tpc;
+        // An unconditional JR to a RET is equivalent to RET.
+        if (!zem_opt_is_ret(&recs->v[tpc])) {
+          if (!reach[tpc]) {
+            reach[tpc] = 1;
+            q[qt++] = tpc;
+          }
+          if (st) st->cfg_edges++;
         }
-        if (st) st->cfg_edges++;
       }
     } else if (zem_opt_is_cond_jr(r, &tgt)) {
-      tgt = zem_opt_thread_resolve(thread, tgt);
+      tgt = zem_opt_resolve_cf_target(alias, thread, tgt);
       int is_ptr = 0;
       uint32_t tpc = 0;
       if (tgt && zem_symtab_get(labels, tgt, &is_ptr, &tpc) && tpc < recs->n &&
@@ -530,7 +650,7 @@ static uint8_t *zem_opt_cfg_reachability(const recvec_t *recs,
       // CALL reaches its callee if it is an internal label.
       const char *callee = NULL;
       if (zem_opt_is_call(r, &callee)) {
-        callee = zem_opt_thread_resolve(thread, callee);
+        callee = zem_opt_resolve_cf_target(alias, thread, callee);
         int is_ptr = 0;
         uint32_t cpc = 0;
         if (callee && zem_symtab_get(labels, callee, &is_ptr, &cpc) && cpc < recs->n &&
@@ -650,13 +770,34 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
     return zem_failf("OOM building next-instr index");
   }
 
+  zem_symtab_t public_syms;
+  zem_symtab_init(&public_syms);
+  if (!zem_opt_build_public_symtab(&recs, &public_syms)) {
+    free(next_instr_after);
+    zem_symtab_free(&labels);
+    recvec_free(&recs);
+    return zem_failf("OOM building PUBLIC symtab");
+  }
+
   zem_opt_thread_map_t thread;
   memset(&thread, 0, sizeof(thread));
   if (!zem_opt_build_thread_map(&recs, &labels, next_instr_after, &thread)) {
+    zem_symtab_free(&public_syms);
     free(next_instr_after);
     zem_symtab_free(&labels);
     recvec_free(&recs);
     return zem_failf("OOM building jump-thread map");
+  }
+
+  zem_opt_thread_map_t alias;
+  memset(&alias, 0, sizeof(alias));
+  if (!zem_opt_build_alias_map(&recs, &labels, next_instr_after, &public_syms, &alias)) {
+    zem_opt_thread_map_free(&thread);
+    zem_symtab_free(&public_syms);
+    free(next_instr_after);
+    zem_symtab_free(&labels);
+    recvec_free(&recs);
+    return zem_failf("OOM building label-alias map");
   }
 
   st->cfg_edges = 0;
@@ -664,9 +805,11 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
   zem_opt_cfg_count_blocks(&recs, &labels, next_instr_after, st);
 
   uint8_t *reach =
-      zem_opt_cfg_reachability(&recs, &labels, next_instr_after, &thread, st);
+      zem_opt_cfg_reachability(&recs, &labels, next_instr_after, &alias, &thread, st);
   if (!reach) {
+    zem_opt_thread_map_free(&alias);
     zem_opt_thread_map_free(&thread);
+    zem_symtab_free(&public_syms);
     free(next_instr_after);
     zem_symtab_free(&labels);
     recvec_free(&recs);
@@ -686,22 +829,58 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
   }
   for (size_t pc = 0; pc < recs.n; pc++) {
     const record_t *r = &recs.v[pc];
-    if (r->k != JREC_INSTR) continue;
-    const char *lbl = NULL;
-    if (zem_opt_is_uncond_jr(r, &lbl)) {
-      lbl = zem_opt_thread_resolve(&thread, lbl);
-      if (lbl) (void)zem_symtab_put(&keep, lbl, 0, 1);
-    } else if (zem_opt_is_cond_jr(r, &lbl)) {
-      lbl = zem_opt_thread_resolve(&thread, lbl);
-      if (lbl) (void)zem_symtab_put(&keep, lbl, 0, 1);
-    }
-    const char *callee = NULL;
-    if (zem_opt_is_call(r, &callee)) {
-      callee = zem_opt_thread_resolve(&thread, callee);
-      int is_ptr = 0;
-      uint32_t cpc = 0;
-      if (callee && zem_symtab_get(&labels, callee, &is_ptr, &cpc)) {
-        (void)zem_symtab_put(&keep, callee, 0, 1);
+    if (r->k == JREC_INSTR) {
+      const char *lbl = NULL;
+      if (zem_opt_is_uncond_jr(r, &lbl)) {
+        const char *res = zem_opt_resolve_cf_target(&alias, &thread, lbl);
+        int is_ptr = 0;
+        uint32_t tpc = 0;
+        if (res && zem_symtab_get(&labels, res, &is_ptr, &tpc) && tpc < recs.n &&
+            recs.v[tpc].k == JREC_INSTR && zem_opt_is_ret(&recs.v[tpc])) {
+          // This JR can fold to RET; don't keep the target just for it.
+        } else if (res) {
+          (void)zem_symtab_put(&keep, res, 0, 1);
+        }
+      } else if (zem_opt_is_cond_jr(r, &lbl)) {
+        const char *res = zem_opt_resolve_cf_target(&alias, &thread, lbl);
+        if (res) (void)zem_symtab_put(&keep, res, 0, 1);
+      }
+
+      const char *callee = NULL;
+      if (zem_opt_is_call(r, &callee)) {
+        const char *res = zem_opt_resolve_cf_target(&alias, &thread, callee);
+        int is_ptr = 0;
+        uint32_t cpc = 0;
+        if (res && zem_symtab_get(&labels, res, &is_ptr, &cpc)) {
+          (void)zem_symtab_put(&keep, res, 0, 1);
+        }
+      }
+
+      // Keep any code label referenced in non-control-flow contexts, since we
+      // won't rewrite those operands.
+      if (!zem_opt_is_uncond_jr(r, NULL) && !zem_opt_is_cond_jr(r, NULL) &&
+          !zem_opt_is_call(r, NULL)) {
+        for (size_t oi = 0; oi < r->nops; oi++) {
+          const operand_t *o = &r->ops[oi];
+          if ((o->t != JOP_SYM && o->t != JOP_LBL) || !o->s || !*o->s) continue;
+          int is_ptr = 0;
+          uint32_t tpc = 0;
+          if (zem_symtab_get(&labels, o->s, &is_ptr, &tpc) && tpc < recs.n &&
+              recs.v[tpc].k == JREC_INSTR) {
+            (void)zem_symtab_put(&keep, o->s, 0, 1);
+          }
+        }
+      }
+    } else if (r->k == JREC_DIR) {
+      for (size_t ai = 0; ai < r->nargs; ai++) {
+        const operand_t *a = &r->args[ai];
+        if ((a->t != JOP_SYM && a->t != JOP_LBL) || !a->s || !*a->s) continue;
+        int is_ptr = 0;
+        uint32_t tpc = 0;
+        if (zem_symtab_get(&labels, a->s, &is_ptr, &tpc) && tpc < recs.n &&
+            recs.v[tpc].k == JREC_INSTR) {
+          (void)zem_symtab_put(&keep, a->s, 0, 1);
+        }
       }
     }
   }
@@ -723,9 +902,11 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
     }
     if (!in) {
       free(reach);
+      zem_opt_thread_map_free(&alias);
       free(next_instr_after);
       zem_symtab_free(&labels);
       recvec_free(&recs);
+      zem_symtab_free(&public_syms);
       free(line_buf);
       return zem_failf("cannot open %s: %s", path, strerror(errno));
     }
@@ -768,10 +949,12 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
         }
 
         const char *jr_lbl = NULL;
-        if (!drop &&
-            (zem_opt_is_uncond_jr(&r, &jr_lbl) || zem_opt_is_cond_jr(&r, &jr_lbl)) &&
+        int is_uncond = 0;
+        int is_cond = 0;
+        if (!drop && ((is_uncond = zem_opt_is_uncond_jr(&r, &jr_lbl)) ||
+                      (is_cond = zem_opt_is_cond_jr(&r, &jr_lbl))) &&
             jr_lbl && pc < recs.n) {
-          const char *res = zem_opt_thread_resolve(&thread, jr_lbl);
+          const char *res = zem_opt_resolve_cf_target(&alias, &thread, jr_lbl);
           if (res && strcmp(res, jr_lbl) != 0) {
             // Patch operand string (preserve record ownership).
             size_t opi = (r.nops == 1) ? 0 : 1;
@@ -783,13 +966,37 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
             }
           }
 
-          int is_ptr = 0;
-          uint32_t tpc = 0;
-          uint32_t fall = next_instr_after[pc];
-          const char *eff = zem_opt_thread_resolve(&thread, jr_lbl);
-          if (eff && zem_symtab_get(&labels, eff, &is_ptr, &tpc) && tpc == fall) {
-            st->removed_jr_fallthrough++;
-            drop = 1;
+          // Fold unconditional JR to a RET target into a RET.
+          if (is_uncond && res) {
+            int is_ptr = 0;
+            uint32_t tpc = 0;
+            if (zem_symtab_get(&labels, res, &is_ptr, &tpc) && tpc < recs.n &&
+                recs.v[tpc].k == JREC_INSTR && zem_opt_is_ret(&recs.v[tpc])) {
+              free(r.m);
+              r.m = strdup("RET");
+              for (size_t oi = 0; oi < r.nops; oi++) {
+                free(r.ops[oi].s);
+                r.ops[oi].s = NULL;
+              }
+              free(r.ops);
+              r.ops = NULL;
+              r.nops = 0;
+              if (r.m) {
+                st->folded_jr_to_ret++;
+                modified_instr = 1;
+              }
+            }
+          }
+
+          // Drop trivial fallthrough JR if still a JR.
+          if (!drop && strcmp(r.m, "JR") == 0 && res) {
+            int is_ptr = 0;
+            uint32_t tpc = 0;
+            uint32_t fall = next_instr_after[pc];
+            if (zem_symtab_get(&labels, res, &is_ptr, &tpc) && tpc == fall) {
+              st->removed_jr_fallthrough++;
+              drop = 1;
+            }
           }
         }
 
@@ -797,7 +1004,7 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
         // drop newly-unreachable trampolines via reachability.
         const char *callee = NULL;
         if (!drop && zem_opt_is_call(&r, &callee) && callee) {
-          const char *res = zem_opt_thread_resolve(&thread, callee);
+          const char *res = zem_opt_resolve_cf_target(&alias, &thread, callee);
           if (res && strcmp(res, callee) != 0) {
             free(r.ops[0].s);
             r.ops[0].s = strdup(res);
@@ -816,12 +1023,31 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
         uint32_t lpc = 0;
         if (zem_symtab_get(&labels, r.label, &is_ptr, &lpc) && lpc < recs.n &&
             recs.v[lpc].k == JREC_INSTR) {
-          uint32_t idx = 0;
-          if (zem_symtab_get(&thread.idx, r.label, &is_ptr, &idx)) {
-            uint32_t keepv = 0;
-            if (!zem_symtab_get(&keep, r.label, &is_ptr, &keepv)) {
-              // Don't drop if it's the first label-ish entry.
-              if (strcmp(r.label, "zir_main") != 0) {
+          uint32_t keepv = 0;
+          int kept = zem_symtab_get(&keep, r.label, &is_ptr, &keepv) ? 1 : 0;
+
+          // If the labeled instruction became unreachable, drop the label too
+          // (unless it must be kept).
+          if (!kept && strcmp(r.label, "zir_main") != 0 && lpc < recs.n &&
+              !reach[lpc]) {
+            st->removed_labels++;
+            drop = 1;
+          }
+
+          // Drop non-PUBLIC code label aliases for the same PC.
+          const char *canon = zem_opt_thread_resolve(&alias, r.label);
+          if (canon && strcmp(canon, r.label) != 0 && !kept &&
+              strcmp(r.label, "zir_main") != 0) {
+            st->removed_labels++;
+            drop = 1;
+          }
+
+          // Drop one-instruction trampoline labels that become unreferenced
+          // after threading.
+          if (!drop) {
+            uint32_t idx = 0;
+            if (zem_symtab_get(&thread.idx, r.label, &is_ptr, &idx)) {
+              if (!kept && strcmp(r.label, "zir_main") != 0) {
                 st->removed_labels++;
                 drop = 1;
               }
@@ -867,10 +1093,12 @@ static int zem_opt_process_cfg_simplify(const char **inputs, int ninputs,
 
   free(line_buf);
   zem_symtab_free(&keep);
+  zem_opt_thread_map_free(&alias);
   zem_opt_thread_map_free(&thread);
   free(reach);
   free(next_instr_after);
   zem_symtab_free(&labels);
+  zem_symtab_free(&public_syms);
   recvec_free(&recs);
   return 1;
 }
@@ -1109,9 +1337,10 @@ int zem_opt_program(const char *mode, const char **inputs, int ninputs,
           "zem: opt: mode=%s removed_dead_instr=%" PRIu64
       " removed_unreachable_instr=%" PRIu64
       " removed_jr_fallthrough=%" PRIu64
+      " folded_jr_to_ret=%" PRIu64
       " cfg_blocks=%" PRIu64 " cfg_edges=%" PRIu64 "\n",
       mode, st.removed_dead_instr, st.removed_unreachable_instr,
-      st.removed_jr_fallthrough, st.cfg_blocks, st.cfg_edges);
+      st.removed_jr_fallthrough, st.folded_jr_to_ret, st.cfg_blocks, st.cfg_edges);
 
   return 0;
 }
