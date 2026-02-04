@@ -31,6 +31,7 @@
 #include "zem_hash.h"
 #include "zem_rep.h"
 #include "zem_strip.h"
+#include "zem_opt.h"
 #include "zem_trace.h"
 #include "zem_util.h"
 
@@ -130,6 +131,7 @@ static void print_help(FILE *out) {
   "      [--fuzz --fuzz-iters N [--fuzz-len N] [--fuzz-mutations N] [--fuzz-seed S]\n",
   "            [--fuzz-out PATH] [--fuzz-crash-out PATH] [--fuzz-print-every N] [--fuzz-continue]]\n",
       "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
+      "      [--opt MODE [--opt-out PATH] [--opt-stats-out PATH] [--opt-validate]]\n",
       "      [--rep-scan --rep-n N --rep-mode MODE --rep-out PATH [--rep-coverage-jsonl PATH] [--rep-diag]]\n",
       "      [--stdin PATH] [--emit-cert DIR] [--cert-max-mem-events N]\n",
       "      [--debug] [--debug-script PATH] [--debug-events] [--debug-events-only]\n",
@@ -151,6 +153,11 @@ static void print_help(FILE *out) {
       "  --strip-profile PATH Coverage JSONL produced by --coverage-out\n",
       "  --strip-out PATH   Write stripped IR JSONL to PATH (default: stdout)\n",
       "  --strip-stats-out PATH Write strip stats JSONL to PATH (or '-' for stderr)\n",
+      "  --opt MODE         Rewrite IR JSONL with a small semantics-preserving optimizer (no execution)\n",
+      "                    MODE: dead-cf | cfg-simplify\n",
+      "  --opt-out PATH     Write optimized IR JSONL to PATH (default: stdout)\n",
+      "  --opt-stats-out PATH Write opt stats JSONL to PATH (or '-' for stderr)\n",
+      "  --opt-validate     Execute original vs optimized and require matching rc/stdout/stderr\n",
       "  --rep-scan         Analyze IR JSONL for repetition (no execution)\n",
       "  --rep-n N          N-gram length (e.g. 8)\n",
       "  --rep-mode MODE    MODE: exact | shape\n",
@@ -408,6 +415,200 @@ static int proc_env_put_kv(zem_proc_t *p, const char *kv) {
   return proc_env_put(p, kv, (uint32_t)klen, v, (uint32_t)vlen);
 }
 
+typedef struct {
+  int rc;
+  uint64_t out_hash;
+  uint64_t err_hash;
+  uint64_t out_len;
+  uint64_t err_len;
+  char out_preview[4096];
+  size_t out_preview_n;
+  char err_preview[4096];
+  size_t err_preview_n;
+} zem_opt_validate_run_t;
+
+static uint64_t fnv1a64_update_u8(uint64_t h, const void *data, size_t n) {
+  const uint8_t *p = (const uint8_t *)data;
+  for (size_t i = 0; i < n; i++) {
+    h ^= (uint64_t)p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static void zem_hash_file_stream(FILE *fp, uint64_t *out_hash, uint64_t *out_len,
+                                 char *preview, size_t preview_cap,
+                                 size_t *out_preview_n) {
+  if (out_hash) *out_hash = zem_fnv1a64_init();
+  if (out_len) *out_len = 0;
+  if (out_preview_n) *out_preview_n = 0;
+  if (!fp) return;
+
+  uint8_t buf[8192];
+  uint64_t h = zem_fnv1a64_init();
+  uint64_t nbytes = 0;
+  size_t pn = 0;
+  for (;;) {
+    size_t nr = fread(buf, 1, sizeof(buf), fp);
+    if (nr == 0) break;
+    h = fnv1a64_update_u8(h, buf, nr);
+    nbytes += (uint64_t)nr;
+    if (preview && preview_cap && pn < preview_cap) {
+      size_t to_copy = nr;
+      if (to_copy > (preview_cap - pn)) to_copy = (preview_cap - pn);
+      memcpy(preview + pn, buf, to_copy);
+      pn += to_copy;
+    }
+  }
+
+  if (out_hash) *out_hash = h;
+  if (out_len) *out_len = nbytes;
+  if (out_preview_n) *out_preview_n = pn;
+}
+
+static int zem_exec_capture(const char *const *inputs, int ninputs,
+                            const zem_proc_t *proc,
+                            const char *stdin_source_name,
+                            zem_opt_validate_run_t *out_run) {
+  if (!inputs || ninputs <= 0 || !proc || !out_run) return 0;
+  memset(out_run, 0, sizeof(*out_run));
+
+  recvec_t recs;
+  const char **pc_srcs = NULL;
+  int rc = zem_build_program((const char **)inputs, ninputs, &recs, &pc_srcs);
+  if (rc != 0) {
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = rc;
+    return 1;
+  }
+
+  zem_buf_t mem;
+  zem_symtab_t syms;
+  rc = zem_build_data_and_symbols(&recs, &mem, &syms);
+  if (rc != 0) {
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = rc;
+    return 1;
+  }
+
+  zem_symtab_t labels;
+  rc = zem_build_label_index(&recs, &labels);
+  if (rc != 0) {
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = rc;
+    return 1;
+  }
+
+  zem_srcmap_t srcmap;
+  if (!zem_build_srcmap(&recs, &srcmap)) {
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = zem_failf("OOM building srcmap");
+    return 1;
+  }
+
+  zem_dbg_cfg_t dbg;
+  memset(&dbg, 0, sizeof(dbg));
+  dbg.debug_events_only = 1;
+
+  FILE *cap_out = tmpfile();
+  FILE *cap_err = tmpfile();
+  if (!cap_out || !cap_err) {
+    if (cap_out) fclose(cap_out);
+    if (cap_err) fclose(cap_err);
+    zem_srcmap_free(&srcmap);
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = zem_failf("OOM creating tmpfile for validation capture");
+    return 1;
+  }
+
+  fflush(stdout);
+  fflush(stderr);
+  int saved_out = dup(STDOUT_FILENO);
+  int saved_err = dup(STDERR_FILENO);
+  if (saved_out < 0 || saved_err < 0) {
+    if (saved_out >= 0) close(saved_out);
+    if (saved_err >= 0) close(saved_err);
+    fclose(cap_out);
+    fclose(cap_err);
+    zem_srcmap_free(&srcmap);
+    zem_symtab_free(&labels);
+    zem_buf_free(&mem);
+    zem_symtab_free(&syms);
+    recvec_free(&recs);
+    free((void *)pc_srcs);
+    out_run->rc = zem_failf("failed to dup stdout/stderr for validation capture");
+    return 1;
+  }
+
+  (void)dup2(fileno(cap_out), STDOUT_FILENO);
+  (void)dup2(fileno(cap_err), STDERR_FILENO);
+
+  int run_rc = zem_exec_program(&recs, &mem, &syms, &labels, &dbg, pc_srcs,
+                                &srcmap, proc, stdin_source_name);
+
+  fflush(stdout);
+  fflush(stderr);
+  (void)dup2(saved_out, STDOUT_FILENO);
+  (void)dup2(saved_err, STDERR_FILENO);
+  close(saved_out);
+  close(saved_err);
+
+  out_run->rc = run_rc;
+
+  rewind(cap_out);
+  rewind(cap_err);
+  zem_hash_file_stream(cap_out, &out_run->out_hash, &out_run->out_len,
+                       out_run->out_preview, sizeof(out_run->out_preview),
+                       &out_run->out_preview_n);
+  zem_hash_file_stream(cap_err, &out_run->err_hash, &out_run->err_len,
+                       out_run->err_preview, sizeof(out_run->err_preview),
+                       &out_run->err_preview_n);
+
+  fclose(cap_out);
+  fclose(cap_err);
+
+  zem_srcmap_free(&srcmap);
+  zem_symtab_free(&labels);
+  zem_buf_free(&mem);
+  zem_symtab_free(&syms);
+  recvec_free(&recs);
+  free((void *)pc_srcs);
+  return 1;
+}
+
+static int copy_path_to_stream(const char *path, FILE *out) {
+  if (!path || !out) return 0;
+  FILE *in = fopen(path, "rb");
+  if (!in) return 0;
+  uint8_t buf[8192];
+  for (;;) {
+    size_t nr = fread(buf, 1, sizeof(buf), in);
+    if (nr == 0) break;
+    if (fwrite(buf, 1, nr, out) != nr) {
+      fclose(in);
+      return 0;
+    }
+  }
+  fclose(in);
+  return 1;
+}
+
 int main(int argc, char **argv) {
   int tool_rc = maybe_dispatch_extra_tool(argc, argv);
   if (tool_rc >= 0) return tool_rc;
@@ -419,6 +620,11 @@ int main(int argc, char **argv) {
   const char *strip_profile = NULL;
   const char *strip_out = NULL;
   const char *strip_stats_out = NULL;
+
+  const char *opt_mode = NULL;
+  const char *opt_out = NULL;
+  const char *opt_stats_out = NULL;
+  int opt_validate = 0;
 
   int rep_scan = 0;
   int rep_diag = 0;
@@ -539,6 +745,31 @@ int main(int argc, char **argv) {
         return zem_failf("--strip-stats-out requires a path");
       }
       strip_stats_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--opt") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--opt requires a mode");
+      }
+      opt_mode = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--opt-validate") == 0) {
+      opt_validate = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--opt-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--opt-out requires a path");
+      }
+      opt_out = argv[++i];
+      continue;
+    }
+    if (strcmp(argv[i], "--opt-stats-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--opt-stats-out requires a path");
+      }
+      opt_stats_out = argv[++i];
       continue;
     }
     if (strcmp(argv[i], "--rep-scan") == 0) {
@@ -1170,6 +1401,30 @@ int main(int argc, char **argv) {
     return zem_failf("--rep-scan cannot be combined with --strip");
   }
 
+  if (opt_validate && !opt_mode) {
+    return zem_failf("--opt-validate requires --opt MODE");
+  }
+
+  if (opt_mode) {
+    if (strip_mode) return zem_failf("--opt cannot be combined with --strip");
+    if (rep_scan) return zem_failf("--opt cannot be combined with --rep-scan");
+    if (fuzz) return zem_failf("--opt cannot be combined with --fuzz");
+    if (shake) return zem_failf("--opt cannot be combined with --shake");
+    if (emit_cert_dir) return zem_failf("--opt cannot be combined with --emit-cert");
+    if (dbg.enabled || dbg.debug_events || dbg.debug_events_only) {
+      return zem_failf("--opt cannot be combined with --debug/--debug-events");
+    }
+    if (dbg.trace || dbg.trace_mem || dbg.coverage || dbg.pgo_len_out) {
+      return zem_failf("--opt cannot be combined with execution tracing/coverage options");
+    }
+    if (trace_jsonl_out) {
+      return zem_failf("--opt cannot be combined with --trace-jsonl-out");
+    }
+    if (stdin_path && !opt_validate) {
+      return zem_failf("--opt cannot be combined with --stdin (opt is a rewrite step, not a run); use --opt-validate if you want execution");
+    }
+  }
+
   if (fuzz) {
     if (emit_cert_dir) return zem_failf("--fuzz cannot be combined with --emit-cert");
     if (dbg.enabled || dbg.debug_events || dbg.debug_events_only) {
@@ -1204,6 +1459,168 @@ int main(int argc, char **argv) {
     }
     return zem_strip_program(strip_mode, inputs, ninputs, strip_profile, strip_out,
                              strip_stats_out);
+  }
+
+  if (opt_mode) {
+    // Default to stdout.
+    if (!opt_out) opt_out = "-";
+
+    if (!opt_validate) {
+      return zem_opt_program(opt_mode, inputs, ninputs, opt_out, opt_stats_out);
+    }
+
+    // Validation mode: rewrite to a temp file, execute original vs optimized,
+    // and only emit optimized output if behavior matches.
+
+    // Materialize stdin IR (if used) into a temp file so we can run optimizer
+    // and executor without consuming stdin twice.
+    const char *vin[256];
+    int vnin = ninputs;
+    for (int ii = 0; ii < vnin; ii++) vin[ii] = inputs[ii];
+
+    char ir_tmp_path[] = "/tmp/zem_ir_XXXXXX";
+    int have_ir_tmp = 0;
+    if (program_uses_stdin) {
+      uint8_t *ir_bytes = NULL;
+      size_t ir_len = 0;
+      if (!slurp_stream(stdin, &ir_bytes, &ir_len)) {
+        free(ir_bytes);
+        return zem_failf("failed to read IR JSONL from stdin for --opt-validate");
+      }
+      int fd = mkstemp(ir_tmp_path);
+      if (fd < 0) {
+        free(ir_bytes);
+        return zem_failf("failed to create temp file for stdin IR: %s", strerror(errno));
+      }
+      FILE *fp = fdopen(fd, "wb");
+      if (!fp) {
+        close(fd);
+        unlink(ir_tmp_path);
+        free(ir_bytes);
+        return zem_failf("failed to open temp file for stdin IR");
+      }
+      if (ir_len && fwrite(ir_bytes, 1, ir_len, fp) != ir_len) {
+        fclose(fp);
+        unlink(ir_tmp_path);
+        free(ir_bytes);
+        return zem_failf("failed to write stdin IR temp file");
+      }
+      fclose(fp);
+      free(ir_bytes);
+      have_ir_tmp = 1;
+      for (int ii = 0; ii < vnin; ii++) {
+        if (vin[ii] && strcmp(vin[ii], "-") == 0) vin[ii] = ir_tmp_path;
+      }
+    }
+
+    // Capture guest stdin if provided.
+    zem_proc_t vproc = proc;
+    uint8_t *guest_stdin_bytes = NULL;
+    size_t guest_stdin_len = 0;
+    const char *v_stdin_source_name = stdin_source_name;
+    if (stdin_path && *stdin_path) {
+      int ok = slurp_path(stdin_path, &guest_stdin_bytes, &guest_stdin_len);
+      if (!ok) {
+        if (have_ir_tmp) unlink(ir_tmp_path);
+        free(guest_stdin_bytes);
+        return zem_failf("failed to read --stdin file: %s (%s)", stdin_path, strerror(errno));
+      }
+      if (guest_stdin_len > UINT32_MAX) {
+        if (have_ir_tmp) unlink(ir_tmp_path);
+        free(guest_stdin_bytes);
+        return zem_failf("--stdin too large");
+      }
+      vproc.stdin_bytes = guest_stdin_bytes;
+      vproc.stdin_len = (uint32_t)guest_stdin_len;
+      if (!v_stdin_source_name) v_stdin_source_name = stdin_path;
+    }
+
+    char opt_tmp_path[] = "/tmp/zem_opt_XXXXXX";
+    int ofd = mkstemp(opt_tmp_path);
+    if (ofd < 0) {
+      if (have_ir_tmp) unlink(ir_tmp_path);
+      free(guest_stdin_bytes);
+      return zem_failf("failed to create temp file for optimized IR: %s", strerror(errno));
+    }
+    close(ofd);
+
+    int orc = zem_opt_program(opt_mode, vin, vnin, opt_tmp_path, opt_stats_out);
+    if (orc != 0) {
+      unlink(opt_tmp_path);
+      if (have_ir_tmp) unlink(ir_tmp_path);
+      free(guest_stdin_bytes);
+      return orc;
+    }
+
+    zem_opt_validate_run_t base_run;
+    zem_opt_validate_run_t opt_run;
+    const char *opt_inputs[1];
+    opt_inputs[0] = opt_tmp_path;
+    if (!zem_exec_capture(vin, vnin, &vproc, v_stdin_source_name, &base_run) ||
+        !zem_exec_capture(opt_inputs, 1, &vproc, v_stdin_source_name, &opt_run)) {
+      unlink(opt_tmp_path);
+      if (have_ir_tmp) unlink(ir_tmp_path);
+      free(guest_stdin_bytes);
+      return zem_failf("--opt-validate internal failure");
+    }
+
+    int match = 1;
+    if (base_run.rc != opt_run.rc) match = 0;
+    if (base_run.out_len != opt_run.out_len || base_run.out_hash != opt_run.out_hash) match = 0;
+    if (base_run.err_len != opt_run.err_len || base_run.err_hash != opt_run.err_hash) match = 0;
+
+    if (!match) {
+      fprintf(stderr,
+              "zem: opt-validate: mismatch\n"
+              "  base: rc=%d stdout=%" PRIu64 "B hash=0x%016" PRIx64 " stderr=%" PRIu64 "B hash=0x%016" PRIx64 "\n"
+              "  opt:  rc=%d stdout=%" PRIu64 "B hash=0x%016" PRIx64 " stderr=%" PRIu64 "B hash=0x%016" PRIx64 "\n",
+              base_run.rc, base_run.out_len, base_run.out_hash, base_run.err_len, base_run.err_hash,
+              opt_run.rc, opt_run.out_len, opt_run.out_hash, opt_run.err_len, opt_run.err_hash);
+
+      fprintf(stderr, "-- base stdout (first %zu bytes) --\n", base_run.out_preview_n);
+      fwrite(base_run.out_preview, 1, base_run.out_preview_n, stderr);
+      if (base_run.out_preview_n && base_run.out_preview[base_run.out_preview_n - 1] != '\n') fputc('\n', stderr);
+      fprintf(stderr, "-- opt stdout (first %zu bytes) --\n", opt_run.out_preview_n);
+      fwrite(opt_run.out_preview, 1, opt_run.out_preview_n, stderr);
+      if (opt_run.out_preview_n && opt_run.out_preview[opt_run.out_preview_n - 1] != '\n') fputc('\n', stderr);
+
+      fprintf(stderr, "-- base stderr (first %zu bytes) --\n", base_run.err_preview_n);
+      fwrite(base_run.err_preview, 1, base_run.err_preview_n, stderr);
+      if (base_run.err_preview_n && base_run.err_preview[base_run.err_preview_n - 1] != '\n') fputc('\n', stderr);
+      fprintf(stderr, "-- opt stderr (first %zu bytes) --\n", opt_run.err_preview_n);
+      fwrite(opt_run.err_preview, 1, opt_run.err_preview_n, stderr);
+      if (opt_run.err_preview_n && opt_run.err_preview[opt_run.err_preview_n - 1] != '\n') fputc('\n', stderr);
+
+      unlink(opt_tmp_path);
+      if (have_ir_tmp) unlink(ir_tmp_path);
+      free(guest_stdin_bytes);
+      return 2;
+    }
+
+    // Emit validated optimized IR to requested destination.
+    int emit_ok = 1;
+    if (strcmp(opt_out, "-") == 0) {
+      emit_ok = copy_path_to_stream(opt_tmp_path, stdout);
+      unlink(opt_tmp_path);
+    } else {
+      if (rename(opt_tmp_path, opt_out) != 0) {
+        FILE *of = fopen(opt_out, "wb");
+        if (!of) {
+          emit_ok = 0;
+        } else {
+          emit_ok = copy_path_to_stream(opt_tmp_path, of);
+          fclose(of);
+        }
+        unlink(opt_tmp_path);
+      }
+    }
+
+    if (have_ir_tmp) unlink(ir_tmp_path);
+    free(guest_stdin_bytes);
+    if (!emit_ok) {
+      return zem_failf("failed to emit validated optimized IR");
+    }
+    return 0;
   }
 
   if (rep_scan) {

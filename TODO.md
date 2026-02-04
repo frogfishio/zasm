@@ -7,8 +7,8 @@
   - [ ] Decide what must be verified by hash (module identity) vs what can be best-effort
 
 - [ ] Zem: target-independent optimization pipeline (for zasm JSONL)
-  - [ ] Add `zem --opt-out <path>` to emit optimized JSONL (semantic-preserving)
-  - [ ] Build basic blocks + CFG from labels/terminators
+  - [x] Add `zem --opt-out <path>` to emit optimized JSONL (semantic-preserving) (`--opt dead-cf`)
+  - [x] Build basic blocks + CFG from labels/terminators (initial use: `--opt cfg-simplify` reachability + trivial JR cleanup)
   - [ ] Reachability + CFG simplification (unreachable removal, jump threading, block merge)
   - [ ] Block-local redundant load elimination
   - [ ] Block-local redundant store elimination

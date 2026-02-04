@@ -283,6 +283,9 @@ test-validation: test-zem-rep-scan
 test-validation: test-zem-rep-render-from-report
 test-validation: test-zem-strip-uncovered-ret
 test-validation: test-zem-strip-uncovered-delete
+test-validation: test-zem-opt-dead-cf
+test-validation: test-zem-opt-cfg-simplify
+test-validation: test-zem-opt-validate
 test-validation: test-zem-shake-smoke
 test-validation: test-zem-shake-redzone test-zem-shake-quarantine test-zem-shake-io-chunking
 test-validation: test-zem-ir-v11-parser-robust
@@ -296,6 +299,9 @@ test-validation: test-zem-pgo-len-out
 # Not included in test-all/test-validation.
 test-zem-debloat-hello-big: zem
 	sh test/zem_debloat_hello_big.sh
+
+test-zem-opt-validate: zas zem
+	sh test/zem_opt_validate.sh
 
 # Convenience wrapper for the "zem-first" pre-pass prototype.
 # Usage:
@@ -466,6 +472,12 @@ test-zem-strip-uncovered-ret: zas zem
 
 test-zem-strip-uncovered-delete: zas zem
 	sh test/zem_strip_uncovered_delete.sh
+
+test-zem-opt-dead-cf: zas zem
+	sh test/zem_opt_dead_cf.sh
+
+test-zem-opt-cfg-simplify: zas zem
+	sh test/zem_opt_cfg_simplify.sh
 
 test-zas-opcodes-directives: zas zop
 	sh test/zas_opcodes_directives.sh
@@ -891,6 +903,7 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/exec/zem_exec_call_label.o \
 	$(ZEM_BUILD)/zem_rep.o \
 	$(ZEM_BUILD)/zem_strip.o \
+	$(ZEM_BUILD)/zem_opt.o \
 	$(ZEM_BUILD)/zem_pgo_len.o \
 	$(ZEM_BUILD)/zem_hash.o \
 	$(ZEM_BUILD)/zem_mem.o \
