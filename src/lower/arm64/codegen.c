@@ -12,9 +12,18 @@ static uint64_t cg_now_ns(void) {
 }
 
 static const char *g_entry_label_override = NULL;
+static const cg_pgo_len_profile_t *g_pgo_len_profile = NULL;
 
 void cg_set_entry_label_override(const char *label) {
   g_entry_label_override = label;
+}
+
+void cg_set_pgo_len_profile(const cg_pgo_len_profile_t *prof) {
+  g_pgo_len_profile = prof;
+}
+
+static int cg_pgo_enabled(void) {
+  return g_pgo_len_profile != NULL;
 }
 
 typedef struct {
@@ -341,6 +350,32 @@ static uint32_t enc_clz(int is64,uint8_t rd,uint8_t rn){return (is64?0xDAC01000u
 static uint32_t enc_rbit(int is64,uint8_t rd,uint8_t rn){return (is64?0xDAC00000u:0x5AC00000u)|((uint32_t)rn<<5)|rd;}
 static uint32_t enc_cls(int is64,uint8_t rd,uint8_t rn){return (is64?0xDAC01400u:0x5AC01400u)|((uint32_t)rn<<5)|rd;}
 
+static void emit_mem_fill_helper(uint32_t *w, size_t *pcw) {
+  /* HL=dst(x0), A=byte(x3), BC=len(x2) */
+  size_t loop = *pcw;
+  w[(*pcw)++] = enc_cbz(1, 2, 4); /* skip body (4 inst) to ret */
+  w[(*pcw)++] = enc_str_b(3, 0, 0);
+  w[(*pcw)++] = enc_add_imm(1, 0, 0, 1);
+  w[(*pcw)++] = enc_sub_imm(1, 2, 2, 1);
+  int32_t back = (int32_t)((int64_t)(loop+1) - (int64_t)(*pcw));
+  w[(*pcw)++] = enc_cbnz(1, 2, back);
+  w[(*pcw)++] = enc_ret();
+}
+
+static void emit_mem_ldir_helper(uint32_t *w, size_t *pcw) {
+  /* DE=dst(x1), HL=src(x0), BC=len(x2) */
+  size_t loop = *pcw;
+  w[(*pcw)++] = enc_cbz(1, 2, 6); /* skip body if len==0 */
+  w[(*pcw)++] = enc_ldr_b(5, 0, 0);
+  w[(*pcw)++] = enc_str_b(5, 1, 0);
+  w[(*pcw)++] = enc_add_imm(1, 0, 0, 1);
+  w[(*pcw)++] = enc_add_imm(1, 1, 1, 1);
+  w[(*pcw)++] = enc_sub_imm(1, 2, 2, 1);
+  int32_t back = (int32_t)((int64_t)(loop+1) - (int64_t)(*pcw));
+  w[(*pcw)++] = enc_cbnz(1, 2, back);
+  w[(*pcw)++] = enc_ret();
+}
+
 static int map_reg(const char *sym) {
   if (!sym) return -1;
   if (strcmp(sym, "HL") == 0) return 0;  /* x0 */
@@ -541,8 +576,24 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   /* Second sizing loop for instructions. */
   const uint64_t t_size0 = prof ? cg_now_ns() : 0;
+  int saw_fill = 0;
+  int saw_ldir = 0;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
-    if (e->kind == IR_ENTRY_INSTR) code_words += estimate_instr_words(e);
+    if (e->kind == IR_ENTRY_INSTR) {
+      code_words += estimate_instr_words(e);
+      if (cg_pgo_enabled()) {
+        const char *m = e->u.instr.mnem ? e->u.instr.mnem : "";
+        if (strcmp(m, "FILL") == 0) saw_fill = 1;
+        if (strcmp(m, "LDIR") == 0) saw_ldir = 1;
+      }
+    }
+  }
+  /* If PGO is enabled, reserve space for out-of-line mem helpers when used.
+   * Note: we keep the original per-instr size estimates (conservative), and add helpers.
+   */
+  if (cg_pgo_enabled()) {
+    if (saw_fill) code_words += 6; /* fill helper */
+    if (saw_ldir) code_words += 8; /* ldir helper */
   }
   if (prof) prof->instr_size_ns = cg_now_ns() - t_size0;
 
@@ -562,9 +613,12 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   int in_func = 0;
   int func_has_prologue = 0;
   int func_seen = 0;
+  int need_fill_helper = 0;
+  int need_ldir_helper = 0;
 
   const uint64_t t_pass20 = prof ? cg_now_ns() : 0;
-  for (ir_entry_t *e = ir->head; e; e = e->next) {
+  size_t rec_pc = 0;
+  for (ir_entry_t *e = ir->head; e; e = e->next, rec_pc++) {
     const uint64_t t_e0 = prof ? cg_now_ns() : 0;
     if (e->kind == IR_ENTRY_LABEL) {
       if (e->u.label.name) {
@@ -789,30 +843,46 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     }
 
     if (strcmp(m,"FILL")==0) {
-      /* HL=dst(x0), A=byte(x2), BC=len(x3) */
+      if (cg_pgo_enabled()) {
+        (void)symtab_add(&ctx, &out->syms, "__zasm_mem_fill", (size_t)-1);
+        w[pcw] = enc_bl_placeholder();
+        add_reloc(out, prof, (uint32_t)(pcw*4), 2, "__zasm_mem_fill", (uint32_t)e->loc.line, e->id);
+        pcw++;
+        need_fill_helper = 1;
+        continue;
+      }
+      /* HL=dst(x0), A=byte(x3), BC=len(x2) */
       size_t loop = pcw;
       /* if len==0 jump to exit */
-      w[pcw++] = enc_cbz(1, 3, 4); /* skip body (4 inst) to exit */
-      w[pcw++] = enc_str_b(2, 0, 0);
+      w[pcw++] = enc_cbz(1, 2, 4); /* skip body (4 inst) to exit */
+      w[pcw++] = enc_str_b(3, 0, 0);
       w[pcw++] = enc_add_imm(1, 0, 0, 1);
-      w[pcw++] = enc_sub_imm(1, 3, 3, 1);
+      w[pcw++] = enc_sub_imm(1, 2, 2, 1);
       /* back-edge */
       int32_t back = (int32_t)((int64_t)(loop+1) - (int64_t)(pcw));
-      w[pcw++] = enc_cbnz(1, 3, back);
+      w[pcw++] = enc_cbnz(1, 2, back);
       continue;
     }
 
     if (strcmp(m,"LDIR")==0) {
-      /* DE=dst(x1), HL=src(x0), BC=len(x3) */
+      if (cg_pgo_enabled()) {
+        (void)symtab_add(&ctx, &out->syms, "__zasm_mem_ldir", (size_t)-1);
+        w[pcw] = enc_bl_placeholder();
+        add_reloc(out, prof, (uint32_t)(pcw*4), 2, "__zasm_mem_ldir", (uint32_t)e->loc.line, e->id);
+        pcw++;
+        need_ldir_helper = 1;
+        continue;
+      }
+      /* DE=dst(x1), HL=src(x0), BC=len(x2) */
       size_t loop = pcw;
-      w[pcw++] = enc_cbz(1, 3, 6); /* skip body if len==0 */
+      w[pcw++] = enc_cbz(1, 2, 6); /* skip body if len==0 */
       w[pcw++] = enc_ldr_b(5, 0, 0);
       w[pcw++] = enc_str_b(5, 1, 0);
       w[pcw++] = enc_add_imm(1, 0, 0, 1);
       w[pcw++] = enc_add_imm(1, 1, 1, 1);
-      w[pcw++] = enc_sub_imm(1, 3, 3, 1);
+      w[pcw++] = enc_sub_imm(1, 2, 2, 1);
       int32_t back = (int32_t)((int64_t)(loop+1) - (int64_t)(pcw));
-      w[pcw++] = enc_cbnz(1, 3, back);
+      w[pcw++] = enc_cbnz(1, 2, back);
       continue;
     }
 
@@ -1121,6 +1191,16 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     CG_FAIL(e, "unsupported mnemonic");
 
     /* unreachable */
+  }
+
+  /* Emit any out-of-line helpers used by this module (PGO mode). */
+  if (need_fill_helper) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_fill", pcw*4);
+    emit_mem_fill_helper(w, &pcw);
+  }
+  if (need_ldir_helper) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_ldir", pcw*4);
+    emit_mem_ldir_helper(w, &pcw);
   }
 
   if (prof) {

@@ -3,6 +3,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdint.h>
+#include <sys/types.h>
 #include <mach/mach_time.h>
 #include "codegen.h"
 #include "ir.h"
@@ -24,8 +25,8 @@ static void usage(const char *prog) {
   fprintf(stderr,
     "lower — JSON IR (zasm-v1.0/v1.1) → macOS arm64 Mach-O\n\n"
     "Usage:\n"
-    "  %s --input <input.jsonl> [--o <out.o>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n"
-    "  %s --tool -o <out.o> <input.jsonl>... [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n\n"
+    "  %s --input <input.jsonl> [--o <out.o>] [--pgo-len-profile <jsonl>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n"
+    "  %s --tool -o <out.o> <input.jsonl>... [--pgo-len-profile <jsonl>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n\n"
     "Options:\n"
     "  --help        Show this help message\n"
     "  --version     Show version information (from ./VERSION)\n"
@@ -47,6 +48,7 @@ static void usage(const char *prog) {
     "  --entry-label Override implicit entry label (disables first-label heuristic)\n"
     "  --trace-syms  Comma list of symbols to dump at trace breakpoints\n"
     "  --trace-regs  Comma list of registers (e.g. w0,x0) to dump\n"
+    "  --pgo-len-profile Read zem --pgo-len-out JSONL to guide bulk-mem lowering\n"
     "  --profile     Print per-phase timings to stderr\n"
     "  --strict      Promote warnings (unknown refs, auto-alloc mem bases) to errors\n\n"
     "Exit codes: 0=ok, 2=parse error, 3=codegen error, 4=emit error, 1=usage/IO\n\n"
@@ -79,6 +81,132 @@ static const char *read_version(void) {
     if (buf[i] == '\n' || buf[i] == '\r') { buf[i] = 0; break; }
   }
   return buf;
+}
+
+static void cg_pgo_len_profile_free(cg_pgo_len_profile_t *p) {
+  if (!p) return;
+  free(p->module_hash);
+  free(p->sites);
+  p->module_hash = NULL;
+  p->sites = NULL;
+  p->site_count = 0;
+}
+
+static const char *jsonl_find_key(const char *line, const char *key) {
+  if (!line || !key) return NULL;
+  static char pat[96];
+  size_t n = strlen(key);
+  if (n + 4 >= sizeof(pat)) return NULL;
+  pat[0] = '"';
+  memcpy(&pat[1], key, n);
+  pat[1+n] = '"';
+  pat[2+n] = ':';
+  pat[3+n] = 0;
+  return strstr(line, pat);
+}
+
+static int jsonl_get_u64(const char *line, const char *key, uint64_t *out) {
+  const char *p = jsonl_find_key(line, key);
+  if (!p) return 0;
+  p = strchr(p, ':');
+  if (!p) return 0;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p == 'n') return 0; /* null */
+  char *end = NULL;
+  unsigned long long v = strtoull(p, &end, 10);
+  if (end == p) return 0;
+  *out = (uint64_t)v;
+  return 1;
+}
+
+static char *jsonl_get_string_dup(const char *line, const char *key) {
+  const char *p = jsonl_find_key(line, key);
+  if (!p) return NULL;
+  p = strchr(p, ':');
+  if (!p) return NULL;
+  p++;
+  while (*p == ' ' || *p == '\t') p++;
+  if (*p != '"') return NULL;
+  p++;
+  const char *q = strchr(p, '"');
+  if (!q) return NULL;
+  size_t len = (size_t)(q - p);
+  char *s = (char *)calloc(1, len + 1);
+  if (!s) return NULL;
+  memcpy(s, p, len);
+  s[len] = 0;
+  return s;
+}
+
+static int load_pgo_len_profile(const char *path, cg_pgo_len_profile_t *out) {
+  if (!out) return -1;
+  memset(out, 0, sizeof(*out));
+
+  FILE *fp = fopen(path, "r");
+  if (!fp) {
+    perror("open pgo profile");
+    return -1;
+  }
+
+  char *line = NULL;
+  size_t cap = 0;
+  ssize_t n = 0;
+  int saw_header = 0;
+
+  while ((n = getline(&line, &cap, fp)) != -1) {
+    (void)n;
+    if (strstr(line, "\"k\":\"zem_pgo_len\"") != NULL) {
+      saw_header = 1;
+      if (!out->module_hash) out->module_hash = jsonl_get_string_dup(line, "module_hash");
+      continue;
+    }
+    if (strstr(line, "\"k\":\"zem_pgo_len_rec\"") == NULL) continue;
+
+    char *m = jsonl_get_string_dup(line, "m");
+    if (!m) continue;
+    cg_pgo_len_kind_t kind = CG_PGO_LEN_KIND_UNKNOWN;
+    if (strcmp(m, "FILL") == 0) kind = CG_PGO_LEN_KIND_FILL;
+    else if (strcmp(m, "LDIR") == 0) kind = CG_PGO_LEN_KIND_LDIR;
+    free(m);
+    if (kind == CG_PGO_LEN_KIND_UNKNOWN) continue;
+
+    uint64_t pc = 0, hot_len = 0, hot_hits = 0, total_hits = 0, other_hits = 0;
+    if (!jsonl_get_u64(line, "pc", &pc)) continue;
+    (void)jsonl_get_u64(line, "hot_len", &hot_len);
+    (void)jsonl_get_u64(line, "hot_hits", &hot_hits);
+    (void)jsonl_get_u64(line, "total_hits", &total_hits);
+    (void)jsonl_get_u64(line, "other_hits", &other_hits);
+
+    cg_pgo_len_site_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.kind = kind;
+    rec.pc = (uint32_t)pc;
+    rec.hot_len = (uint32_t)hot_len;
+    rec.hot_hits = hot_hits;
+    rec.total_hits = total_hits;
+    rec.other_hits = other_hits;
+
+    cg_pgo_len_site_t *ns = (cg_pgo_len_site_t *)realloc(out->sites, (out->site_count + 1) * sizeof(cg_pgo_len_site_t));
+    if (!ns) {
+      free(line);
+      fclose(fp);
+      cg_pgo_len_profile_free(out);
+      return -1;
+    }
+    out->sites = ns;
+    out->sites[out->site_count++] = rec;
+  }
+
+  free(line);
+  fclose(fp);
+
+  if (!saw_header) {
+    fprintf(stderr, "[lower] invalid --pgo-len-profile (missing zem_pgo_len header): %s\n", path);
+    cg_pgo_len_profile_free(out);
+    return -1;
+  }
+  return 0;
 }
 
 static int is_reg(const char *s) {
@@ -484,6 +612,7 @@ int main(int argc, char **argv) {
   const char *entry_label = NULL;
   const char *trace_syms = NULL;
   const char *trace_regs = NULL;
+  const char *pgo_len_profile_path = NULL;
   int profile = 0;
   int argi = 1;
 
@@ -515,6 +644,7 @@ int main(int argc, char **argv) {
     if (strcmp(a, "--entry-label") == 0 && argi < argc) { entry_label = argv[argi++]; continue; }
     if (strcmp(a, "--trace-syms") == 0 && argi < argc) { trace_syms = argv[argi++]; continue; }
     if (strcmp(a, "--trace-regs") == 0 && argi < argc) { trace_regs = argv[argi++]; continue; }
+    if (strcmp(a, "--pgo-len-profile") == 0 && argi < argc) { pgo_len_profile_path = argv[argi++]; continue; }
     if (strcmp(a, "--input") == 0 && argi < argc) { inputs[nin++] = argv[argi++]; continue; }
     if (strcmp(a, "--o") == 0 && argi < argc) { out_path = argv[argi++]; continue; }
     /* Unknown flag */
@@ -619,11 +749,28 @@ int main(int argc, char **argv) {
       if (profile) audit_ns = now_ns() - t_audit0;
     }
 
+    cg_pgo_len_profile_t pgo_prof = (cg_pgo_len_profile_t){0};
+    if (pgo_len_profile_path) {
+      if (load_pgo_len_profile(pgo_len_profile_path, &pgo_prof) != 0) {
+        ir_free(&prog);
+        symset_free(&decls);
+        symset_free(&externs);
+        symset_free(&refs);
+        rc = 1;
+        continue;
+      }
+      cg_set_pgo_len_profile(&pgo_prof);
+    } else {
+      cg_set_pgo_len_profile(NULL);
+    }
+
     cg_blob_t blob = (cg_blob_t){0};
     blob.profile_enabled = profile;
     const uint64_t t_codegen0 = profile ? now_ns() : 0;
     if (cg_emit_arm64(&prog, &blob) != 0) {
       fprintf(stderr, "[lower] codegen failed: %s\n", in_path);
+      cg_set_pgo_len_profile(NULL);
+      cg_pgo_len_profile_free(&pgo_prof);
       ir_free(&prog);
       symset_free(&decls);
       symset_free(&externs);
@@ -632,6 +779,9 @@ int main(int argc, char **argv) {
       continue;
     }
     if (profile) codegen_ns = now_ns() - t_codegen0;
+
+    cg_set_pgo_len_profile(NULL);
+    cg_pgo_len_profile_free(&pgo_prof);
 
     /* Optional dumps */
     if (dump_syms) {

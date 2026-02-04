@@ -64,6 +64,11 @@ typedef struct {
   const char *coverage_out;   // output path (JSONL); NULL => no file output
   const char *coverage_merge; // input path (JSONL) to merge into this run
   uint32_t coverage_blackholes_n; // if >0, print top-N uncovered labels to stderr
+
+  // PGO length profile (opt-in): record observed BC lengths for certain
+  // memory ops (currently: FILL/LDIR). Used for experimental profile-guided
+  // lowering.
+  const char *pgo_len_out; // output path (JSONL); NULL => disabled
   // Internal-only: suppress coverage JSONL output/summary work.
   int coverage_no_emit;
   // Internal-only: if set, zem_exec_program will transfer ownership of its

@@ -252,6 +252,8 @@ test-validation: test-diagnostics-jsonl
 test-validation: test-zem-stdin-program
 test-validation: test-zem-emit-cert-smoke
 test-validation: test-zem-min-ret
+test-validation: test-lower-fill-ldir-counter
+test-validation: test-lower-pgo-len-profile-helpers
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
@@ -284,11 +286,23 @@ test-validation: test-zem-break-src-file-line
 test-validation: test-zem-ir-id-debug-events
 test-validation: test-zem-ir-id-coverage
 test-validation: test-zem-coverage-merge-ir-id
+test-validation: test-zem-pgo-len-out
 
 # Experimental / local-only debloat playground (large fixture).
 # Not included in test-all/test-validation.
 test-zem-debloat-hello-big: zem
 	sh test/zem_debloat_hello_big.sh
+
+# Convenience wrapper for the "zem-first" pre-pass prototype.
+# Usage:
+#   make chew-lower INPUT=path/to/prog.ir.jsonl CHEW='--stdin path --mode uncovered-ret -- --arg1'
+.PHONY: chew-lower
+chew-lower: zem lower zingcore25
+	@if [ -z "$(INPUT)" ]; then \
+		echo "usage: make chew-lower INPUT=path/to/prog.ir.jsonl [CHEW='...']" >&2; \
+		exit 2; \
+	fi
+	bash ./scripts/chew_lower.sh --input "$(INPUT)" $(CHEW)
 
 test-fuzz: test-fuzz-zas test-fuzz-zld
 
@@ -319,6 +333,12 @@ test-zem-stdin-program: zas zem
 
 test-zem-min-ret: zem
 	sh test/zem_min_ret_smoke.sh
+
+test-lower-fill-ldir-counter: lower zingcore25
+	sh test/lower_fill_ldir_counter.sh
+
+test-lower-pgo-len-profile-helpers: zem lower zingcore25
+	sh test/lower_pgo_len_profile_helpers.sh
 
 test-zem-emit-cert-smoke: zas zem
 	sh test/zem_emit_cert_smoke.sh
@@ -418,6 +438,9 @@ test-zem-ir-id-coverage: zem
 
 test-zem-coverage-merge-ir-id: zem
 	sh test/zem_coverage_merge_ir_id.sh
+
+test-zem-pgo-len-out: zas zem
+	sh test/zem_pgo_len_out.sh
 
 test-zem-caps: zem
 	sh test/zem_caps.sh
@@ -840,6 +863,7 @@ ZEM_OBJ := \
 	$(ZEM_BUILD)/exec/zem_exec_call_label.o \
 	$(ZEM_BUILD)/zem_rep.o \
 	$(ZEM_BUILD)/zem_strip.o \
+	$(ZEM_BUILD)/zem_pgo_len.o \
 	$(ZEM_BUILD)/zem_hash.o \
 	$(ZEM_BUILD)/zem_mem.o \
 	$(ZEM_BUILD)/zem_heap.o \

@@ -224,6 +224,10 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint32_t dst = (uint32_t)regs->HL;
     uint32_t len = (uint32_t)regs->BC;
     uint8_t val = (uint8_t)(regs->A & 0xffu);
+
+    if (ctx->pgo_len) {
+      zem_pgo_len_note(ctx->pgo_len, (uint32_t)pc, r, ZEM_PGO_LEN_OP_FILL, len);
+    }
     if (!mem_check_span(mem, dst, len)) {
       *ctx->rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, regs, mem,
                                  "FILL out of bounds");
@@ -248,6 +252,10 @@ int zem_exec_ops_mem(zem_exec_ctx_t *ctx, const record_t *r, zem_op_t op) {
     uint32_t src = (uint32_t)regs->HL;
     uint32_t dst = (uint32_t)regs->DE;
     uint32_t len = (uint32_t)regs->BC;
+
+    if (ctx->pgo_len) {
+      zem_pgo_len_note(ctx->pgo_len, (uint32_t)pc, r, ZEM_PGO_LEN_OP_LDIR, len);
+    }
     if (!mem_check_span(mem, src, len) || !mem_check_span(mem, dst, len)) {
       *ctx->rc = zem_exec_fail_at(pc, r, pc_labels, stack, sp, regs, mem,
                                  "LDIR out of bounds");

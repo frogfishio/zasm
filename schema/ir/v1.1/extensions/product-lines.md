@@ -176,7 +176,13 @@ Profiles don’t mean “optional runtime magic.” They mean:
 - `+stacker.i32ops:v1` → typed i32 ops / narrow loads/stores present
 - `+stacker.cpu:v1` → ZX64S only (stack CPU control flow)
 
-(Other profiles like FP/SIMD/tensor follow the same policy.)
+### Additional coprocessor profiles (deterministic)
+These are **optional** extensions that may be enabled at lowering time.
+
+- `+fp.strict:v1` → deterministic floating-point coprocessor
+- `+simd.v128:v1` → deterministic SIMD coprocessor (v128)
+- `+tensor.det:v1` → deterministic tensor ops (software-defined semantics)
+- `+fibers.det:v1` → deterministic fibers/async (cooperative scheduling)
 
 ---
 
@@ -210,13 +216,77 @@ Profiles don’t mean “optional runtime magic.” They mean:
 
 ---
 
+## 9.1 Determinism is sacred (normative)
+All optional coprocessors defined by this ecosystem MUST preserve **bit-for-bit determinism** across runs for the same program + inputs + host capability surface.
+
+- If a target runtime/backend cannot guarantee the required semantics, lowering MUST fail with a static error (no silent fallback).
+- There is no “fast-math”, “best effort”, or “implementation-defined” behavior in deterministic profiles.
+- Optional “slow but correct” software lowering is permitted **only if** it is explicitly selected as a profile variant (e.g. a `:soft` variant). Otherwise: error.
+
+This is an intentional design choice: anything that does not fit determinism is out.
+
+## 9.2 Optional coprocessors (rules + standards)
+
+### 9.2.1 FP.Strict (`+fp.strict:v1`)
+This profile provides floating-point operations with **pinned, deterministic semantics**.
+
+Normative rules:
+- Rounding mode is fixed to **RN (ties-to-even)**.
+- No reassociation and no contraction: `FMUL` + `FADD` MUST NOT fuse unless an explicit `FFMA` op is used.
+- NaNs MUST be **canonicalized** (a single canonical quiet-NaN bit-pattern per type for results).
+- Denormals/subnormals policy MUST be fixed by the profile and implemented exactly (either “preserve gradual underflow” or “flush-to-zero everywhere” — pick one and make it normative for the profile version).
+- FP exception flags MUST NOT be observable; FP ops MUST NOT trap.
+
+Portability policy:
+- If the selected backend cannot guarantee these semantics (including JVM/CLR), lowering MUST fail.
+
+### 9.2.2 SIMD v128 (`+simd.v128:v1`)
+This profile provides deterministic lane-SIMD.
+
+Normative rules:
+- Vector widths and lane types are fixed by the ISA/profile (start with `v128` and lanes `i8/i16/i32/i64`).
+- Integer arithmetic is two’s-complement modulo 2^N (wraparound) unless an explicit saturating op is used.
+- Shift semantics MUST be specified (masking vs trap) and are not backend-defined.
+- If float lanes are provided, they inherit **FP.Strict** semantics.
+
+Portability policy:
+- Backends MAY lower SIMD to native vector instructions **only if** semantics match.
+- A software scalarization fallback is permitted only under an explicit `+simd.v128:soft:v1`-style variant. Otherwise, unsupported backends MUST error.
+
+### 9.2.3 Tensor deterministic (`+tensor.det:v1`)
+This profile exists to express tensor-shaped ops without surrendering determinism.
+
+Normative rules:
+- Tensor ops MUST have software-defined, deterministic semantics (defined dtypes, defined rounding, defined accumulation order).
+- Vendor/GPU “accelerator” kernels are not part of the deterministic contract unless they can be proven bit-identical across supported hosts/versions.
+
+Portability policy:
+- The reference lowering is deterministic software (CPU/WASM) kernels.
+- If an implementation cannot meet bit-identical results, it MUST not claim support for `+tensor.det:v1`.
+
+### 9.2.4 Fibers deterministic (`+fibers.det:v1`)
+This profile provides concurrency without nondeterminism by constraining execution.
+
+Normative rules:
+- Execution is **cooperative** (fibers), not parallel threads.
+- Yield points are explicit and part of program semantics.
+- The scheduler order MUST be specified (e.g., deterministic FIFO/round-robin by fiber id).
+- Shared-memory data races are avoided by construction (single OS thread; no parallel execution).
+
+Atomics policy:
+- True shared-memory atomics are **out** for deterministic profiles.
+- Any “atomic” ops, if present, must be purely semantic aliases that do not introduce parallelism.
+
+Portability policy:
+- If a backend cannot preserve the deterministic scheduler semantics, lowering MUST fail.
+
 ## 10. Summary table
 
-| Product line | Classic regs/ops | Classic control flow | Stacker DS/RS | Stacker CPU control flow | Primary targets |
-|---|---:|---:|---:|---:|---|
-| **ZX64** | ✅ | ✅ | ❌ | ❌ | native AOT/JIT |
-| **Z64+S** | ✅ | ✅ | ✅ | ❌ | mixed workloads, WASM-ish + classic |
-| **ZX64S** | (optional) ❌ | ❌ | ✅ | ✅ | WASM/JVM/CLR |
+| Product line | Classic regs/ops | Classic control flow | Stacker DS/RS | Stacker CPU control flow | Optional coprocessors (FP/SIMD/Tensor/Fibers) | Primary targets |
+|---|---:|---:|---:|---:|---:|---|
+| **ZX64** | ✅ | ✅ | ❌ | ❌ | ✅ (if supported by runtime) | native AOT/JIT |
+| **Z64+S** | ✅ | ✅ | ✅ | ❌ | ✅ (if supported by runtime) | mixed workloads, WASM-ish + classic |
+| **ZX64S** | (optional) ❌ | ❌ | ✅ | ✅ | ✅ (if supported by runtime) | WASM/JVM/CLR |
 
 ---
 
@@ -225,4 +295,4 @@ Profiles don’t mean “optional runtime magic.” They mean:
 - Stacker coprocessor ISA: `stacker.md` (main body)
 - ZX64S stack CPU addendum: `stacker.md` Appendix A (`+stacker.cpu:v1`)
 - (Future) ZX64 base ISA: `zx64.md` (separate doc)
-- (Future) Profiles (fp/simd/etc.): separate extension docs following the same gating rules
+- Coprocessor profiles (fp/simd/tensor/fibers): extension docs following the same gating rules and determinism contract

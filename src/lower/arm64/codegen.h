@@ -61,6 +61,27 @@ typedef struct {
   cg_profile_t prof;
 } cg_blob_t;
 
+typedef enum {
+  CG_PGO_LEN_KIND_UNKNOWN = 0,
+  CG_PGO_LEN_KIND_FILL = 1,
+  CG_PGO_LEN_KIND_LDIR = 2,
+} cg_pgo_len_kind_t;
+
+typedef struct {
+  cg_pgo_len_kind_t kind;
+  uint32_t pc;            /* IR record index (includes labels/dirs), as reported by zem */
+  uint32_t hot_len;
+  uint64_t hot_hits;
+  uint64_t total_hits;
+  uint64_t other_hits;
+} cg_pgo_len_site_t;
+
+typedef struct {
+  char *module_hash;      /* optional; owned by the profile */
+  cg_pgo_len_site_t *sites;
+  size_t site_count;
+} cg_pgo_len_profile_t;
+
 int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out);
 void cg_free(cg_blob_t *out);
 
@@ -69,5 +90,11 @@ void cg_free(cg_blob_t *out);
  * Pass NULL to clear.
  */
 void cg_set_entry_label_override(const char *label);
+
+/* Optional: provide a zem --pgo-len-out JSONL profile to guide codegen.
+ * If set, codegen may choose size-optimized implementations for bulk mem ops.
+ * Pass NULL to clear.
+ */
+void cg_set_pgo_len_profile(const cg_pgo_len_profile_t *prof);
 
 #endif /* ZINGCC_CODEGEN_H */

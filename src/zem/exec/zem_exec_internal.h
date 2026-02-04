@@ -19,6 +19,7 @@
 #include "zem_debug.h"
 #include "zem_hash.h"
 #include "zem_heap.h"
+#include "zem_pgo_len.h"
 
 // ---- Shared small runtime state (used by CALL handlers) ----
 
@@ -106,6 +107,9 @@ typedef struct {
 
   // Error propagation: handlers set *rc and return handled.
   int *rc;
+
+  // Optional: PGO length profile collector.
+  zem_pgo_len_map_t *pgo_len;
 } zem_exec_ctx_t;
 
 static inline int zem_exec_regid_from_sym(const char *s, zem_regid_t *out) {

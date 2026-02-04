@@ -196,6 +196,16 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   const int cov_enabled = (dbg_cfg && dbg_cfg->coverage);
   const char *cov_out = dbg_cfg ? dbg_cfg->coverage_out : NULL;
   const char *cov_merge = dbg_cfg ? dbg_cfg->coverage_merge : NULL;
+  const char *pgo_len_out = dbg_cfg ? dbg_cfg->pgo_len_out : NULL;
+
+  zem_pgo_len_map_t *pgo_len = NULL;
+  if (pgo_len_out && *pgo_len_out) {
+    pgo_len = zem_pgo_len_map_new();
+    if (!pgo_len) {
+      rc = zem_exec_fail_simple("OOM allocating pgo length profile");
+      goto done;
+    }
+  }
 
   FILE *repl_in = NULL;
   int repl_no_prompt = 0;
@@ -468,6 +478,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
   ctx.trace_rec = &trace_rec;
   ctx.trace_before = &trace_before;
   ctx.rc = &rc;
+  ctx.pgo_len = pgo_len;
 
   while (pc < recs->n) {
     const record_t *r = &recs->v[pc];
@@ -736,6 +747,14 @@ done:
     }
   }
   if (cov_hits) free(cov_hits);
+
+  if (pgo_len && pgo_len_out && *pgo_len_out) {
+    if (!zem_pgo_len_write_jsonl(recs, pgo_len, pgo_len_out) && rc == 0) {
+      rc = 2;
+    }
+  }
+  if (pgo_len) zem_pgo_len_map_free(pgo_len);
+
   g_fail_regprov = NULL;
   zem_bpcondset_clear(&bpconds);
   if (ops) free(ops);

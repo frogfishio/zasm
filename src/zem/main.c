@@ -126,6 +126,7 @@ static void print_help(FILE *out) {
       "      [--trace-jsonl-out PATH]\n",
       "      [--trace-mnemonic M] [--trace-pc N[..M]] [--trace-call-target T] [--trace-sample N]\n",
       "      [--coverage] [--coverage-out PATH] [--coverage-merge PATH] [--coverage-blackholes N]\n",
+        "      [--pgo-len-out PATH]\n",
   "      [--fuzz --fuzz-iters N [--fuzz-len N] [--fuzz-mutations N] [--fuzz-seed S]\n",
   "            [--fuzz-out PATH] [--fuzz-crash-out PATH] [--fuzz-print-every N] [--fuzz-continue]]\n",
       "      [--strip MODE --strip-profile PATH [--strip-out PATH]]\n",
@@ -203,6 +204,7 @@ static void print_help(FILE *out) {
       "  - Legacy underscore primitives are not supported.\n",
       "\n",
       "  --coverage-out PATH Write coverage JSONL to PATH\n",
+      "  --pgo-len-out PATH Write PGO JSONL: observed BC lengths for FILL/LDIR\n",
       "  --coverage-merge PATH Merge existing coverage JSONL from PATH into this run\n",
       "  --coverage-blackholes N Print top-N labels with uncovered instructions\n",
       "  --trace-mnemonic M  Only emit step events whose mnemonic == M (repeatable)\n",
@@ -618,6 +620,16 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[i], "--coverage") == 0) {
       dbg.coverage = 1;
+      continue;
+    }
+    if (strcmp(argv[i], "--pgo-len-out") == 0) {
+      if (i + 1 >= argc) {
+        return zem_failf("--pgo-len-out requires a path");
+      }
+      dbg.pgo_len_out = argv[++i];
+      if (!dbg.pgo_len_out || !*dbg.pgo_len_out) {
+        return zem_failf("bad --pgo-len-out value");
+      }
       continue;
     }
     if (strcmp(argv[i], "--coverage-out") == 0) {

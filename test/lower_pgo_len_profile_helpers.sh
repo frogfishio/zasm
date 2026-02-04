@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+zem_bin="$root_dir/bin/zem"
+lower_bin="$root_dir/bin/lower"
+runner_c="$root_dir/test/repro/zabi25_native_runner.c"
+fixture="$root_dir/test/repro/lower_fill_ldir_counter.jsonl"
+
+zingcore25_a="$root_dir/build/zingcore25/libzingcore25.a"
+zingcore25_inc="$root_dir/src/zingcore/2.5/zingcore/include"
+
+if [[ ! -x "$zem_bin" ]]; then
+  echo "missing executable: $zem_bin" >&2
+  exit 2
+fi
+if [[ ! -x "$lower_bin" ]]; then
+  echo "missing executable: $lower_bin" >&2
+  exit 2
+fi
+if [[ ! -f "$runner_c" ]]; then
+  echo "missing runner: $runner_c" >&2
+  exit 2
+fi
+if [[ ! -f "$fixture" ]]; then
+  echo "missing fixture: $fixture" >&2
+  exit 2
+fi
+if [[ ! -f "$zingcore25_a" ]]; then
+  echo "missing hostlib archive: $zingcore25_a" >&2
+  echo "hint: build with: make zingcore25" >&2
+  exit 2
+fi
+
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/zasm-lower-pgo-len-XXXXXX")"
+trap 'rm -rf "$tmp_dir"' EXIT
+
+prof="$tmp_dir/pgo_len.jsonl"
+obj="$tmp_dir/prog.o"
+exe="$tmp_dir/prog.exe"
+
+"$zem_bin" --pgo-len-out "$prof" "$fixture" >/dev/null
+
+test -s "$prof"
+
+dump="$tmp_dir/syms.txt"
+"$lower_bin" --pgo-len-profile "$prof" --input "$fixture" --o "$obj" --dump-syms >/dev/null 2>"$dump"
+
+# Ensure the helper symbols were emitted (PGO mode).
+grep -q '__zasm_mem_fill' "$dump"
+grep -q '__zasm_mem_ldir' "$dump"
+
+cc -I"$zingcore25_inc" \
+  "$runner_c" \
+  "$obj" \
+  "$zingcore25_a" \
+  -o "$exe" >/dev/null
+
+set +e
+out="$tmp_dir/stdout"
+err="$tmp_dir/stderr"
+"$exe" >"$out" 2>"$err"
+rc=$?
+set -e
+
+# Expect: prints one byte '*' (42) and returns 42.
+if [[ "$rc" -ne 42 ]]; then
+  echo "unexpected exit code: $rc (want 42)" >&2
+  echo "stderr:" >&2
+  sed -n '1,200p' "$err" >&2 || true
+  exit 1
+fi
+
+bytes=$(wc -c <"$out" | tr -d ' ')
+if [[ "$bytes" -ne 1 ]]; then
+  echo "unexpected stdout size: ${bytes}B (want 1B)" >&2
+  od -An -tx1 "$out" >&2
+  exit 1
+fi
+
+if ! printf '\x2a' | cmp -s - "$out"; then
+  echo "unexpected stdout byte" >&2
+  od -An -tx1 "$out" >&2
+  exit 1
+fi
+
+echo "ok"
