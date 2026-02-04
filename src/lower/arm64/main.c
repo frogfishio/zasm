@@ -7,6 +7,7 @@
 #include <mach/mach_time.h>
 #include "codegen.h"
 #include "ir.h"
+#include "ir_hash.h"
 #include "json_ir.h"
 #include "mach_o.h"
 
@@ -25,8 +26,8 @@ static void usage(const char *prog) {
   fprintf(stderr,
     "lower — JSON IR (zasm-v1.0/v1.1) → macOS arm64 Mach-O\n\n"
     "Usage:\n"
-    "  %s --input <input.jsonl> [--o <out.o>] [--pgo-len-profile <jsonl>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n"
-    "  %s --tool -o <out.o> <input.jsonl>... [--pgo-len-profile <jsonl>] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n\n"
+    "  %s --input <input.jsonl> [--o <out.o>] [--pgo-len-profile <jsonl>] [--pgo-len-profile-allow-mismatch] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n"
+    "  %s --tool -o <out.o> <input.jsonl>... [--pgo-len-profile <jsonl>] [--pgo-len-profile-allow-mismatch] [--debug] [--dump-syms] [--dump-relocs] [--dump-layout] [--dump-asm] [--dump-ir] [--emit-map <json>] [--strict]\n\n"
     "Options:\n"
     "  --help        Show this help message\n"
     "  --version     Show version information (from ./VERSION)\n"
@@ -49,6 +50,7 @@ static void usage(const char *prog) {
     "  --trace-syms  Comma list of symbols to dump at trace breakpoints\n"
     "  --trace-regs  Comma list of registers (e.g. w0,x0) to dump\n"
     "  --pgo-len-profile Read zem --pgo-len-out JSONL to guide bulk-mem lowering\n"
+    "  --pgo-len-profile-allow-mismatch  Allow profile module_hash mismatch (unsafe)\n"
     "  --profile     Print per-phase timings to stderr\n"
     "  --strict      Promote warnings (unknown refs, auto-alloc mem bases) to errors\n\n"
     "Exit codes: 0=ok, 2=parse error, 3=codegen error, 4=emit error, 1=usage/IO\n\n"
@@ -613,6 +615,7 @@ int main(int argc, char **argv) {
   const char *trace_syms = NULL;
   const char *trace_regs = NULL;
   const char *pgo_len_profile_path = NULL;
+  int pgo_len_allow_mismatch = 0;
   int profile = 0;
   int argi = 1;
 
@@ -645,6 +648,7 @@ int main(int argc, char **argv) {
     if (strcmp(a, "--trace-syms") == 0 && argi < argc) { trace_syms = argv[argi++]; continue; }
     if (strcmp(a, "--trace-regs") == 0 && argi < argc) { trace_regs = argv[argi++]; continue; }
     if (strcmp(a, "--pgo-len-profile") == 0 && argi < argc) { pgo_len_profile_path = argv[argi++]; continue; }
+    if (strcmp(a, "--pgo-len-profile-allow-mismatch") == 0) { pgo_len_allow_mismatch = 1; continue; }
     if (strcmp(a, "--input") == 0 && argi < argc) { inputs[nin++] = argv[argi++]; continue; }
     if (strcmp(a, "--o") == 0 && argi < argc) { out_path = argv[argi++]; continue; }
     /* Unknown flag */
@@ -689,6 +693,17 @@ int main(int argc, char **argv) {
     }
     if (profile) parse_ns = now_ns() - t_parse0;
     fclose(fp);
+
+    char *input_module_hash = NULL;
+    if (pgo_len_profile_path) {
+      input_module_hash = lower_ir_module_hash_str_from_jsonl_path(in_path);
+      if (!input_module_hash) {
+        fprintf(stderr, "[lower] failed to compute module_hash for input: %s\n", in_path);
+        ir_free(&prog);
+        rc = 1;
+        continue;
+      }
+    }
 
     if (dump_ir) {
       fprintf(stderr, "[lower][ir]\n");
@@ -752,6 +767,7 @@ int main(int argc, char **argv) {
     cg_pgo_len_profile_t pgo_prof = (cg_pgo_len_profile_t){0};
     if (pgo_len_profile_path) {
       if (load_pgo_len_profile(pgo_len_profile_path, &pgo_prof) != 0) {
+        free(input_module_hash);
         ir_free(&prog);
         symset_free(&decls);
         symset_free(&externs);
@@ -759,10 +775,39 @@ int main(int argc, char **argv) {
         rc = 1;
         continue;
       }
+
+      if (pgo_prof.module_hash && input_module_hash && strcmp(pgo_prof.module_hash, input_module_hash) != 0) {
+        if (!pgo_len_allow_mismatch) {
+          fprintf(stderr,
+                  "[lower] --pgo-len-profile module_hash mismatch (refusing to apply profile)\n"
+                  "  profile: %s\n"
+                  "  input:   %s\n"
+                  "hint: pass --pgo-len-profile-allow-mismatch to override (unsafe)\n",
+                  pgo_prof.module_hash, input_module_hash);
+          cg_pgo_len_profile_free(&pgo_prof);
+          free(input_module_hash);
+          ir_free(&prog);
+          symset_free(&decls);
+          symset_free(&externs);
+          symset_free(&refs);
+          rc = 1;
+          continue;
+        }
+        fprintf(stderr,
+                "[lower] warning: --pgo-len-profile module_hash mismatch (override enabled)\n"
+                "  profile: %s\n"
+                "  input:   %s\n",
+                pgo_prof.module_hash, input_module_hash);
+      } else if (!pgo_prof.module_hash) {
+        fprintf(stderr, "[lower] warning: --pgo-len-profile missing module_hash; skipping validation\n");
+      }
+
       cg_set_pgo_len_profile(&pgo_prof);
     } else {
       cg_set_pgo_len_profile(NULL);
     }
+
+    free(input_module_hash);
 
     cg_blob_t blob = (cg_blob_t){0};
     blob.profile_enabled = profile;

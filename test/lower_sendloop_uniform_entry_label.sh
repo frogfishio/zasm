@@ -3,18 +3,13 @@ set -euo pipefail
 
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-zem_bin="$root_dir/bin/zem"
 lower_bin="$root_dir/bin/lower"
 runner_c="$root_dir/test/repro/zabi25_native_runner.c"
-fixture="$root_dir/test/repro/lower_fill_ldir_counter.jsonl"
+fixture="$root_dir/test/repro/sendloop_uniform.jsonl"
 
 zingcore25_a="$root_dir/build/zingcore25/libzingcore25.a"
 zingcore25_inc="$root_dir/src/zingcore/2.5/zingcore/include"
 
-if [[ ! -x "$zem_bin" ]]; then
-  echo "missing executable: $zem_bin" >&2
-  exit 2
-fi
 if [[ ! -x "$lower_bin" ]]; then
   echo "missing executable: $lower_bin" >&2
   exit 2
@@ -33,27 +28,13 @@ if [[ ! -f "$zingcore25_a" ]]; then
   exit 2
 fi
 
-tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/zasm-lower-pgo-len-XXXXXX")"
+tmp_dir="$(mktemp -d "${TMPDIR:-/tmp}/zasm-lower-sendloop-uniform-entry-XXXXXX")"
 trap 'rm -rf "$tmp_dir"' EXIT
 
-prof="$tmp_dir/pgo_len.jsonl"
 obj="$tmp_dir/prog.o"
 exe="$tmp_dir/prog.exe"
 
-"$zem_bin" --pgo-len-out "$prof" "$fixture" >/dev/null
-
-test -s "$prof"
-
-dump="$tmp_dir/syms.txt"
-"$lower_bin" --pgo-len-profile "$prof" --input "$fixture" --o "$obj" --dump-syms >/dev/null 2>"$dump"
-
-# Ensure the const-length helper symbols were emitted (size-first PGO mode).
-grep -q '__zasm_mem_fill_len1' "$dump"
-grep -q '__zasm_mem_ldir_len1' "$dump"
-
-# And ensure the generic helpers were not emitted for this fixture.
-! grep -q '^  __zasm_mem_fill,' "$dump"
-! grep -q '^  __zasm_mem_ldir,' "$dump"
+"$lower_bin" --input "$fixture" --o "$obj" >/dev/null
 
 cc -I"$zingcore25_inc" \
   "$runner_c" \
@@ -68,9 +49,8 @@ err="$tmp_dir/stderr"
 rc=$?
 set -e
 
-# Expect: prints one byte '*' (42) and returns 42.
-if [[ "$rc" -ne 42 ]]; then
-  echo "unexpected exit code: $rc (want 42)" >&2
+if [[ "$rc" -ne 0 ]]; then
+  echo "unexpected exit code: $rc (want 0)" >&2
   echo "stderr:" >&2
   sed -n '1,200p' "$err" >&2 || true
   exit 1
@@ -83,7 +63,7 @@ if [[ "$bytes" -ne 1 ]]; then
   exit 1
 fi
 
-if ! printf '\x2a' | cmp -s - "$out"; then
+if ! printf 'D' | cmp -s - "$out"; then
   echo "unexpected stdout byte" >&2
   od -An -tx1 "$out" >&2
   exit 1

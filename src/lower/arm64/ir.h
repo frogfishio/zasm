@@ -53,6 +53,7 @@ typedef enum {
 typedef struct ir_entry {
   ir_entry_kind_t kind;
   ir_loc_t loc;
+  size_t pc; /* JSONL record index (0-based, includes ignored v1.1 meta/src/diag). */
   size_t id; /* optional record id for tooling; 0 if unspecified */
   union {
     struct {

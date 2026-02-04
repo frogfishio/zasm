@@ -496,6 +496,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
   size_t cap = 0;
   ssize_t n;
   size_t line_no = 0;
+  size_t rec_idx = 0;
   int rc = 0;
 
   /* Reuse token buffer across lines to avoid malloc/free churn. */
@@ -510,6 +511,9 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       if (!isspace((unsigned char)line[i])) { only_ws = 0; break; }
     }
     if (only_ws) continue;
+
+    /* JSONL record index (0-based) used by zem for PC/profiling. */
+    const size_t jsonl_pc = rec_idx++;
     /* Tokenize */
     if (tok_cap == 0) tok_cap = 256;
     int tok_count = 0;
@@ -652,6 +656,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_LABEL);
       if (!entry) { rc = -1; goto fail_line; }
+      entry->pc = jsonl_pc;
       entry->id = rec_id;
       entry->u.label.name = tok_strdup(line, &toks[name_idx]);
       if (!entry->u.label.name) { ir_entry_free(entry); rc = -1; goto fail_line; }
@@ -675,6 +680,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_INSTR);
       if (!entry) { rc = -1; goto fail_line; }
+      entry->pc = jsonl_pc;
       entry->id = rec_id;
       entry->u.instr.src_ref = src_ref;
       entry->u.instr.mnem = tok_strdup(line, &toks[m_idx]);
@@ -703,6 +709,7 @@ int json_ir_read(FILE* fp, ir_prog_t* prog) {
       }
       entry = ir_entry_new(IR_ENTRY_DIR);
       if (!entry) { rc = -1; goto fail_line; }
+      entry->pc = jsonl_pc;
       entry->id = rec_id;
       entry->u.dir.src_ref = src_ref;
       if      (tok_streq(line, &toks[d_idx], "PUBLIC")) entry->u.dir.dir_kind = IR_DIR_PUBLIC;

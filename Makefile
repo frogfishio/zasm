@@ -253,7 +253,11 @@ test-validation: test-zem-stdin-program
 test-validation: test-zem-emit-cert-smoke
 test-validation: test-zem-min-ret
 test-validation: test-lower-fill-ldir-counter
+test-validation: test-lower-sendloop-entry-label
+test-validation: test-lower-sendloop-uniform-entry-label
 test-validation: test-lower-pgo-len-profile-helpers
+test-validation: test-lower-pgo-len-profile-ingest-robust
+test-validation: test-lower-pgo-len-profile-hash-mismatch
 test-validation: test-zem-zi-write
 test-validation: test-zem-zi-read
 test-validation: test-zem-zi-abi-version
@@ -337,8 +341,20 @@ test-zem-min-ret: zem
 test-lower-fill-ldir-counter: lower zingcore25
 	sh test/lower_fill_ldir_counter.sh
 
+test-lower-sendloop-entry-label: lower zingcore25
+	sh test/lower_sendloop_entry_label.sh
+
+test-lower-sendloop-uniform-entry-label: lower zingcore25
+	sh test/lower_sendloop_uniform_entry_label.sh
+
 test-lower-pgo-len-profile-helpers: zem lower zingcore25
 	sh test/lower_pgo_len_profile_helpers.sh
+
+test-lower-pgo-len-profile-ingest-robust: zem lower zingcore25
+	sh test/lower_pgo_len_profile_ingest_robust.sh
+
+test-lower-pgo-len-profile-hash-mismatch: zem lower
+	sh test/lower_pgo_len_profile_hash_mismatch.sh
 
 test-zem-emit-cert-smoke: zas zem
 	sh test/zem_emit_cert_smoke.sh
@@ -813,20 +829,32 @@ ircheck: $(IRCHECK_OBJ) | dirs
 
 LOWER_SRC := \
   src/lower/arm64/ir.c \
+	src/lower/arm64/ir_hash.c \
   src/lower/arm64/json_ir.c \
   src/lower/arm64/codegen.c \
   src/lower/arm64/mach_o.c \
-  src/lower/arm64/main.c
+	src/lower/arm64/main.c \
+	src/zld/jsonl.c
 
 LOWER_OBJ := \
   $(LOWER_BUILD)/ir.o \
+	$(LOWER_BUILD)/ir_hash.o \
   $(LOWER_BUILD)/json_ir.o \
   $(LOWER_BUILD)/codegen.o \
   $(LOWER_BUILD)/mach_o.o \
+	$(LOWER_BUILD)/jsonl.o \
   $(LOWER_BUILD)/main.o
 
-$(LOWER_BUILD)/%.o: src/lower/arm64/%.c $(VERSION_HEADER) | dirs
-	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/lower/arm64 -c $< -o $@
+
+# Note: we intentionally depend on all arm64 lower headers to avoid stale builds
+# (the Makefile does not currently auto-generate header dependency .d files).
+LOWER_HEADERS := $(wildcard src/lower/arm64/*.h)
+
+$(LOWER_BUILD)/%.o: src/lower/arm64/%.c $(LOWER_HEADERS) $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/lower/arm64 -Isrc/zld -c $< -o $@
+
+$(LOWER_BUILD)/jsonl.o: src/zld/jsonl.c src/zld/jsonl.h $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -Isrc/zld -c $< -o $@
 
 lower: $(LOWER_OBJ) | dirs
 	$(CC) $(CFLAGS) $(LOWER_OBJ) -o $(BIN)/lower $(LDFLAGS)

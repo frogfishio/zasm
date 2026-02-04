@@ -1,5 +1,43 @@
 # TO DO
 
+- [ ] Zem vs Lower: define ownership + contracts
+  - [ ] Write a short “ownership” doc: target-independent transforms live in `zem`; target-specific codegen + regalloc/peepholes live in each `lower`
+  - [ ] Define the interchange contract(s): optimized IR JSONL, optional hint JSONL(s), versioning rules, and backward compatibility expectations
+  - [ ] Decide stable profile/hint keys (prefer `ir_id` or explicit site ids over record-index `pc` when IR can be rewritten)
+  - [ ] Decide what must be verified by hash (module identity) vs what can be best-effort
+
+- [ ] Zem: target-independent optimization pipeline (for zasm JSONL)
+  - [ ] Add `zem --opt-out <path>` to emit optimized JSONL (semantic-preserving)
+  - [ ] Build basic blocks + CFG from labels/terminators
+  - [ ] Reachability + CFG simplification (unreachable removal, jump threading, block merge)
+  - [ ] Block-local redundant load elimination
+  - [ ] Block-local redundant store elimination
+  - [ ] Copy propagation / temp forwarding (within block first)
+  - [ ] Constant folding + simple instcombine on common zasm idioms
+  - [ ] Dead code elimination for pure computations (requires def/use; start block-local)
+  - [ ] Dead store elimination for slots proven never read (conservative alias rules)
+  - [ ] Add “do-no-harm” validation mode: run original vs optimized in `zem` and compare stdout/stderr/rc
+
+- [ ] Zem: reusable profiling + facts emission
+  - [ ] Extend beyond `--pgo-len-out`: add optional hotness (block/edge counts) output
+  - [ ] Emit conservative “facts” usable by all backends (e.g. slot not address-taken, constant-at-site)
+  - [ ] Define and document hint schemas (JSONL `k:` records) and version them
+  - [ ] Add fuzz/robust-ingest tests for new hint JSONL shapes
+
+- [ ] Lower (arm64): consume hints + improve backend quality
+  - [ ] Add `--debug-pgo-len` (or similar) to report: sites loaded, bulk ops seen, rewired count, specialized count + rejection reasons
+  - [ ] Make `--pgo-len-profile` loader robust to whitespace/ordering (stop relying on exact substrings like `"k":"zem_pgo_len_rec"`)
+  - [ ] Use hotness hints for layout (hot/cold ordering) and conservative “keep in regs” decisions
+  - [ ] Add more AArch64 addressing-mode folding peepholes (addr calc + load/store)
+  - [ ] Add block-local register allocation for temps (small pool), spill around calls, shrink reload/store churn
+  - [ ] Add backend peepholes for compare/branch canonicalization (`cbz/cbnz` where legal)
+  - [ ] Decide bulk-mem policy knobs: inline vs helper thresholds per target, guided by hints
+
+- [ ] Tests + size tracking (close the LLVM gap with guardrails)
+  - [ ] Add a small loop-heavy corpus and record baseline code sizes for `lower` and LLVM (so improvements are measurable)
+  - [ ] Add differential tests: `zem`-optimized JSONL must match `zem` original output
+  - [ ] Add “no regression” size checks for key fixtures (tolerant thresholds, per-target)
+
 - New spec impact (legacy cloak integrator guide):
   - Rename/adjust linker WAT emission to use `_alloc/_free/_ctl` names and update allowlist/manifest.
   - Update `docs/tools/zrun.md` to document `_ctl`, handle semantics, and determinism guarantees.

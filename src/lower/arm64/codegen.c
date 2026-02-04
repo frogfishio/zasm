@@ -26,6 +26,52 @@ static int cg_pgo_enabled(void) {
   return g_pgo_len_profile != NULL;
 }
 
+static const cg_pgo_len_site_t *cg_pgo_len_find_site(cg_pgo_len_kind_t kind, uint32_t pc) {
+  if (!g_pgo_len_profile || !g_pgo_len_profile->sites) return NULL;
+  for (size_t i = 0; i < g_pgo_len_profile->site_count; i++) {
+    const cg_pgo_len_site_t *s = &g_pgo_len_profile->sites[i];
+    if (s->kind == kind && s->pc == pc) return s;
+  }
+  return NULL;
+}
+
+static uint32_t popcount_u32(uint32_t x) {
+  uint32_t c = 0;
+  while (x) {
+    x &= (x - 1);
+    c++;
+  }
+  return c;
+}
+
+static uint32_t cg_prev_ld_bc_imm(const ir_entry_t *prev_entry) {
+  if (!prev_entry || prev_entry->kind != IR_ENTRY_INSTR) return 0;
+  const char *m = prev_entry->u.instr.mnem ? prev_entry->u.instr.mnem : "";
+  if (!(strcmp(m, "LD") == 0 || strcmp(m, "LD64") == 0)) return 0;
+  if (prev_entry->u.instr.op_count < 2) return 0;
+  const ir_op_t *dst = &prev_entry->u.instr.ops[0];
+  const ir_op_t *src = &prev_entry->u.instr.ops[1];
+  if (dst->kind != IR_OP_SYM || !dst->sym || strcmp(dst->sym, "BC") != 0) return 0;
+  if (src->kind != IR_OP_NUM) return 0;
+  if (src->unum > 0xffffffffu) return 0;
+  return (uint32_t)src->unum;
+}
+
+static uint32_t cg_pgo_const_bc_len_candidate(const ir_entry_t *prev_entry,
+                                              cg_pgo_len_kind_t kind,
+                                              uint32_t pc,
+                                              uint32_t supported_lens_mask) {
+  if (!cg_pgo_enabled()) return 0;
+  const uint32_t len = cg_prev_ld_bc_imm(prev_entry);
+  if (len == 0 || len >= 32) return 0;
+  if ((supported_lens_mask & (1u << len)) == 0) return 0;
+  const cg_pgo_len_site_t *s = cg_pgo_len_find_site(kind, pc);
+  if (!s) return 0;
+  if (s->hot_len != len) return 0;
+  if (s->other_hits != 0) return 0;
+  return len;
+}
+
 typedef struct {
   const char *key;
   symtab_entry *val;
@@ -362,6 +408,20 @@ static void emit_mem_fill_helper(uint32_t *w, size_t *pcw) {
   w[(*pcw)++] = enc_ret();
 }
 
+static void emit_mem_fill_const_helper(uint32_t *w, size_t *pcw, uint32_t len) {
+  /* HL=dst(x0), A=byte(x3), BC=len(x2). Precondition: len is a small constant. */
+  if (len == 0) {
+    w[(*pcw)++] = enc_ret();
+    return;
+  }
+  for (uint32_t i = 0; i < len; i++) {
+    w[(*pcw)++] = enc_str_b(3, 0, (uint16_t)i);
+  }
+  w[(*pcw)++] = enc_add_imm(1, 0, 0, (uint16_t)len);
+  w[(*pcw)++] = enc_movz(2, 0, 0);
+  w[(*pcw)++] = enc_ret();
+}
+
 static void emit_mem_ldir_helper(uint32_t *w, size_t *pcw) {
   /* DE=dst(x1), HL=src(x0), BC=len(x2) */
   size_t loop = *pcw;
@@ -373,6 +433,34 @@ static void emit_mem_ldir_helper(uint32_t *w, size_t *pcw) {
   w[(*pcw)++] = enc_sub_imm(1, 2, 2, 1);
   int32_t back = (int32_t)((int64_t)(loop+1) - (int64_t)(*pcw));
   w[(*pcw)++] = enc_cbnz(1, 2, back);
+  w[(*pcw)++] = enc_ret();
+}
+
+static void emit_mem_ldir_const_helper(uint32_t *w, size_t *pcw, uint32_t len) {
+  /* DE=dst(x1), HL=src(x0), BC=len(x2). Precondition: len is a small constant. */
+  if (len == 0) {
+    w[(*pcw)++] = enc_ret();
+    return;
+  }
+  if (len == 1) {
+    w[(*pcw)++] = enc_ldr_b(5, 0, 0);
+    w[(*pcw)++] = enc_str_b(5, 1, 0);
+  } else if (len == 2) {
+    w[(*pcw)++] = enc_ldr_h(5, 0, 0);
+    w[(*pcw)++] = enc_str_h(5, 1, 0);
+  } else if (len == 4) {
+    w[(*pcw)++] = enc_ldr_w(5, 0, 0);
+    w[(*pcw)++] = enc_str_w(5, 1, 0);
+  } else if (len == 8) {
+    w[(*pcw)++] = enc_ldr_x_imm(5, 0, 0);
+    w[(*pcw)++] = enc_str_x_imm(5, 1, 0);
+  } else {
+    emit_mem_ldir_helper(w, pcw);
+    return;
+  }
+  w[(*pcw)++] = enc_add_imm(1, 0, 0, (uint16_t)len);
+  w[(*pcw)++] = enc_add_imm(1, 1, 1, (uint16_t)len);
+  w[(*pcw)++] = enc_movz(2, 0, 0);
   w[(*pcw)++] = enc_ret();
 }
 
@@ -486,14 +574,20 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   symtab_map_ensure(&symmap);
   const uint64_t t_total0 = prof ? cg_now_ns() : 0;
   symtab_add(&ctx, &out->syms, "main", 0);
-#define CG_FAIL(ctx_entry, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
-#define CG_FAILF(ctx_entry, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); return -1; } while (0)
 
-  /* Collect labels and call targets for function boundary detection. */
+  /* Collect labels, PUBLIC exports, and call targets for function boundary detection. */
   seen_sym_t *call_targets = NULL;
   size_t n_calls = 0, c_calls = 0;
   seen_sym_t *label_list = NULL;
   size_t n_labels = 0, c_labels = 0;
+  seen_sym_t *public_syms = NULL;
+  size_t n_public = 0, c_public = 0;
+  const char *file_first_label = NULL;
+  const char *fallback_entry_label = NULL;
+  const char *first_func_label = NULL;
+
+#define CG_FAIL(ctx_entry, msg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: %s (line %zu)\n", msg, _ln); else fprintf(stderr,"[lower] codegen: %s\n", msg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); seen_free(public_syms,n_public); return -1; } while (0)
+#define CG_FAILF(ctx_entry, fmt, arg) do { ir_entry_t *_ctx = (ir_entry_t *)(ctx_entry); size_t _ln = _ctx ? _ctx->loc.line : 0; if (_ln) fprintf(stderr,"[lower] codegen: " fmt " (line %zu)\n", arg, _ln); else fprintf(stderr,"[lower] codegen: " fmt "\n", arg); symtab_map_free(&symmap); cg_free(out); seen_free(call_targets,n_calls); seen_free(label_list,n_labels); seen_free(public_syms,n_public); return -1; } while (0)
 
   const uint64_t t_collect0 = prof ? cg_now_ns() : 0;
 
@@ -501,13 +595,13 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   size_t code_words = 0;
   size_t data_len = 0;
   size_t func_count = 0;
-  int first_label_seen = 0;
   int any_instr = 0;
 
   for (ir_entry_t *e = ir->head; e; e = e->next) {
     if (e->kind == IR_ENTRY_LABEL) {
       symtab_add(&ctx, &out->syms, e->u.label.name ? e->u.label.name : "", (size_t)-1);
       seen_add(&label_list, &n_labels, &c_labels, e->u.label.name ? e->u.label.name : "", e->loc.line);
+      if (!file_first_label && e->u.label.name) file_first_label = e->u.label.name;
       continue;
     }
     if (e->kind == IR_ENTRY_DIR) {
@@ -526,6 +620,9 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           if (e->u.dir.name) symtab_add(&ctx, &out->syms, e->u.dir.name, (size_t)e->u.dir.equ_value);
           break;
         case IR_DIR_PUBLIC:
+          if (e->u.dir.arg_count >= 1 && e->u.dir.args && e->u.dir.args[0].kind == IR_OP_SYM && e->u.dir.args[0].sym) {
+            seen_add(&public_syms, &n_public, &c_public, e->u.dir.args[0].sym, e->loc.line);
+          }
           break;
         case IR_DIR_EXTERN:
           break;
@@ -552,23 +649,38 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   }
   if (prof) prof->collect_syms_ns = cg_now_ns() - t_collect0;
 
-  /* Determine function entry labels: first label, labels named "main", labels prefixed with "fn_", and labels that are CALL targets. */
+  /* Determine function entry labels: exported PUBLIC labels, labels named "main"/"zir_main",
+   * labels prefixed with "fn_", and labels that are CALL targets.
+   *
+   * Fallback: if none are found, treat the file's first label (if any) as the function entry.
+   */
   const uint64_t t_func0 = prof ? cg_now_ns() : 0;
   int override_found = 0;
   for (size_t i = 0; i < n_labels; i++) {
     int is_func = 0;
     if (entry_override && label_list[i].name && strcmp(label_list[i].name, entry_override) == 0) { is_func = 1; override_found = 1; }
-    if (!entry_override && !first_label_seen) { is_func = 1; first_label_seen = 1; }
     if (label_list[i].name && strcmp(label_list[i].name, "main") == 0) is_func = 1;
+    if (label_list[i].name && strcmp(label_list[i].name, "zir_main") == 0) is_func = 1;
     if (label_list[i].name && strncmp(label_list[i].name, "fn_", 3) == 0) is_func = 1;
     if (label_list[i].name && seen_has(call_targets, n_calls, label_list[i].name)) is_func = 1;
-    if (is_func) func_count++;
+    if (label_list[i].name && seen_has(public_syms, n_public, label_list[i].name)) is_func = 1;
+    if (is_func) {
+      func_count++;
+      if (!first_func_label && label_list[i].name) first_func_label = label_list[i].name;
+    }
   }
   if (entry_override && !override_found) {
     if (prof) prof->func_detect_ns = cg_now_ns() - t_func0;
     CG_FAIL(NULL, "--entry-label symbol not found in input labels");
   }
-  if (func_count == 0 && any_instr) func_count = 1;
+  if (func_count == 0 && any_instr) {
+    /* No explicit function entry labels. Prefer anchoring the prologue at the first label if possible,
+     * so external callers landing on that label don't skip the prologue.
+     */
+    if (file_first_label) fallback_entry_label = file_first_label;
+    func_count = 1;
+  }
+  if (!first_func_label && fallback_entry_label) first_func_label = fallback_entry_label;
   if (prof) prof->func_detect_ns = cg_now_ns() - t_func0;
 
   /* Prologues add 2 words each; RET is budgeted at 2 words already. */
@@ -576,24 +688,58 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   /* Second sizing loop for instructions. */
   const uint64_t t_size0 = prof ? cg_now_ns() : 0;
+  const uint32_t fill_supported = (1u << 1) | (1u << 2);
+  const uint32_t ldir_supported = (1u << 1) | (1u << 2) | (1u << 4) | (1u << 8);
   int saw_fill = 0;
   int saw_ldir = 0;
+  int fill_all_candidate = 1;
+  int ldir_all_candidate = 1;
+  uint32_t fill_lens_mask = 0;
+  uint32_t ldir_lens_mask = 0;
+  const ir_entry_t *prev_entry_s = NULL;
   for (ir_entry_t *e = ir->head; e; e = e->next) {
-    if (e->kind == IR_ENTRY_INSTR) {
-      code_words += estimate_instr_words(e);
-      if (cg_pgo_enabled()) {
-        const char *m = e->u.instr.mnem ? e->u.instr.mnem : "";
-        if (strcmp(m, "FILL") == 0) saw_fill = 1;
-        if (strcmp(m, "LDIR") == 0) saw_ldir = 1;
-      }
+    if (e->kind != IR_ENTRY_INSTR) { prev_entry_s = e; continue; }
+    const char *m = e->u.instr.mnem ? e->u.instr.mnem : "";
+    size_t est = estimate_instr_words(e);
+    if (cg_pgo_enabled() && (strcmp(m, "FILL") == 0 || strcmp(m, "LDIR") == 0)) {
+      est = 1; /* BL to out-of-line helper */
     }
+    code_words += est;
+
+    if (cg_pgo_enabled() && strcmp(m, "FILL") == 0) {
+      saw_fill = 1;
+      const uint32_t len = cg_pgo_const_bc_len_candidate(prev_entry_s, CG_PGO_LEN_KIND_FILL, (uint32_t)e->pc, fill_supported);
+      if (len) fill_lens_mask |= (1u << len);
+      else fill_all_candidate = 0;
+    }
+    if (cg_pgo_enabled() && strcmp(m, "LDIR") == 0) {
+      saw_ldir = 1;
+      const uint32_t len = cg_pgo_const_bc_len_candidate(prev_entry_s, CG_PGO_LEN_KIND_LDIR, (uint32_t)e->pc, ldir_supported);
+      if (len) ldir_lens_mask |= (1u << len);
+      else ldir_all_candidate = 0;
+    }
+
+    prev_entry_s = e;
   }
-  /* If PGO is enabled, reserve space for out-of-line mem helpers when used.
-   * Note: we keep the original per-instr size estimates (conservative), and add helpers.
-   */
+
+  int use_fill_special = 0;
+  int use_ldir_special = 0;
+  size_t fill_helper_words = 0;
+  size_t ldir_helper_words = 0;
+  if (cg_pgo_enabled() && saw_fill && fill_all_candidate) {
+    if (fill_lens_mask & (1u << 1)) fill_helper_words += 4;
+    if (fill_lens_mask & (1u << 2)) fill_helper_words += 5;
+    if (fill_helper_words && fill_helper_words < 6) use_fill_special = 1;
+  }
+  if (cg_pgo_enabled() && saw_ldir && ldir_all_candidate) {
+    const uint32_t uniq = popcount_u32(ldir_lens_mask);
+    ldir_helper_words = (size_t)uniq * 6;
+    if (uniq && ldir_helper_words < 8) use_ldir_special = 1;
+  }
+
   if (cg_pgo_enabled()) {
-    if (saw_fill) code_words += 6; /* fill helper */
-    if (saw_ldir) code_words += 8; /* ldir helper */
+    if (saw_fill) code_words += use_fill_special ? fill_helper_words : 6;
+    if (saw_ldir) code_words += use_ldir_special ? ldir_helper_words : 8;
   }
   if (prof) prof->instr_size_ns = cg_now_ns() - t_size0;
 
@@ -613,25 +759,49 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
   int in_func = 0;
   int func_has_prologue = 0;
   int func_seen = 0;
+  int pre_entry_func_open = 0;
+  int first_func_seen = 0;
+  int func_will_have_frame = 0;
   int need_fill_helper = 0;
   int need_ldir_helper = 0;
+  uint32_t need_fill_lens_mask = 0;
+  uint32_t need_ldir_lens_mask = 0;
 
   const uint64_t t_pass20 = prof ? cg_now_ns() : 0;
   size_t rec_pc = 0;
+  const ir_entry_t *prev_entry = NULL;
   for (ir_entry_t *e = ir->head; e; e = e->next, rec_pc++) {
+    const ir_entry_t *prev_entry_for_this = prev_entry;
+    prev_entry = e;
     const uint64_t t_e0 = prof ? cg_now_ns() : 0;
     if (e->kind == IR_ENTRY_LABEL) {
       if (e->u.label.name) {
         int is_func = 0;
         if (entry_override && strcmp(e->u.label.name, entry_override) == 0) is_func = 1;
-        if (!entry_override && !func_seen) is_func = 1;
         if (strcmp(e->u.label.name, "main") == 0) is_func = 1;
+        if (strcmp(e->u.label.name, "zir_main") == 0) is_func = 1;
         if (strncmp(e->u.label.name, "fn_", 3) == 0) is_func = 1;
         if (seen_has(call_targets, n_calls, e->u.label.name)) is_func = 1;
+        if (seen_has(public_syms, n_public, e->u.label.name)) is_func = 1;
+        if (!entry_override && !is_func && !func_seen && fallback_entry_label && strcmp(e->u.label.name, fallback_entry_label) == 0) is_func = 1;
         if (is_func) {
+          const int is_first_func_label = (!first_func_seen && first_func_label && strcmp(e->u.label.name, first_func_label) == 0);
+
           func_seen = 1;
-          in_func = 1;
-          func_has_prologue = 0;
+
+          /* If we already started emitting code for a function before reaching its entry
+           * label (body appears earlier in the file), do not start a new function here.
+           * Just mark the entry label as seen and emit the prologue at this label.
+           */
+          if (pre_entry_func_open && is_first_func_label) {
+            first_func_seen = 1;
+            /* keep in_func/func_has_prologue as-is */
+          } else {
+            in_func = 1;
+            func_has_prologue = 0;
+            func_will_have_frame = 1;
+            if (is_first_func_label) first_func_seen = 1;
+          }
         }
         symtab_update(&ctx, out->syms, e->u.label.name, pcw*4);
 
@@ -645,6 +815,8 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
           w[pcw++] = enc_stp_fp_lr();
           w[pcw++] = enc_mov_fp_sp();
           func_has_prologue = 1;
+          func_will_have_frame = 1;
+          if (first_func_seen) pre_entry_func_open = 0;
         }
       }
       if (prof) prof->pass2_labels_ns += cg_now_ns() - t_e0;
@@ -683,21 +855,74 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     ir_op_t *ops = e->u.instr.ops;
     size_t nops = e->u.instr.op_count;
 
-    if (!in_func) { in_func = 1; func_has_prologue = 0; func_seen = 1; }
-    if (!func_has_prologue) {
+    if (!in_func) {
+      /* If we haven't reached a function-entry label yet but the module has a
+       * detected entry label, treat early code as part of that first function.
+       * This avoids inserting an implicit prologue at offset 0, which can be
+       * reached by loop back-edges and would re-save a volatile LR (e.g. after BL
+       * helper calls in PGO mode), causing incorrect returns.
+       */
+      in_func = 1;
+      func_seen = 1;
+      if (first_func_label) {
+        pre_entry_func_open = 1;
+        func_will_have_frame = 1;
+      } else {
+        /* No function labels detected; fall back to a single implicit function
+         * and emit its prologue at the first instruction.
+         */
+        pre_entry_func_open = 0;
+      }
+    }
+    if (!func_has_prologue && !pre_entry_func_open) {
       w[pcw++] = enc_stp_fp_lr();
       w[pcw++] = enc_mov_fp_sp();
       func_has_prologue = 1;
+      func_will_have_frame = 1;
     }
 
     /* Record map entry for this IR instruction. */
     add_pc_map(out, prof, (uint32_t)(pcw*4), e->id, (uint32_t)e->loc.line);
 
     if (strcmp(m,"RET")==0) {
-      if (func_has_prologue) {
+      if (func_has_prologue || func_will_have_frame || pre_entry_func_open) {
         w[pcw++] = enc_ldp_fp_lr();
       }
       w[pcw++] = enc_ret();
+      continue;
+    }
+
+    if (strcmp(m,"FILL")==0 && cg_pgo_enabled()) {
+      const char *sym = "__zasm_mem_fill";
+      if (use_fill_special) {
+        const uint32_t len = cg_pgo_const_bc_len_candidate(prev_entry_for_this, CG_PGO_LEN_KIND_FILL, (uint32_t)e->pc, fill_supported);
+        if (len == 1) { sym = "__zasm_mem_fill_len1"; need_fill_lens_mask |= (1u << 1); }
+        else if (len == 2) { sym = "__zasm_mem_fill_len2"; need_fill_lens_mask |= (1u << 2); }
+        else { need_fill_helper = 1; }
+      } else {
+        need_fill_helper = 1;
+      }
+      (void)symtab_add(&ctx, &out->syms, sym, (size_t)-1);
+      w[pcw++] = enc_bl_placeholder();
+      add_reloc(out, prof, (uint32_t)(pcw*4 - 4), 2, sym, (uint32_t)e->loc.line, e->id);
+      continue;
+    }
+
+    if (strcmp(m,"LDIR")==0 && cg_pgo_enabled()) {
+      const char *sym = "__zasm_mem_ldir";
+      if (use_ldir_special) {
+        const uint32_t len = cg_pgo_const_bc_len_candidate(prev_entry_for_this, CG_PGO_LEN_KIND_LDIR, (uint32_t)e->pc, ldir_supported);
+        if (len == 1) { sym = "__zasm_mem_ldir_len1"; need_ldir_lens_mask |= (1u << 1); }
+        else if (len == 2) { sym = "__zasm_mem_ldir_len2"; need_ldir_lens_mask |= (1u << 2); }
+        else if (len == 4) { sym = "__zasm_mem_ldir_len4"; need_ldir_lens_mask |= (1u << 4); }
+        else if (len == 8) { sym = "__zasm_mem_ldir_len8"; need_ldir_lens_mask |= (1u << 8); }
+        else { need_ldir_helper = 1; }
+      } else {
+        need_ldir_helper = 1;
+      }
+      (void)symtab_add(&ctx, &out->syms, sym, (size_t)-1);
+      w[pcw++] = enc_bl_placeholder();
+      add_reloc(out, prof, (uint32_t)(pcw*4 - 4), 2, sym, (uint32_t)e->loc.line, e->id);
       continue;
     }
 
@@ -1198,9 +1423,33 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
     symtab_update(&ctx, out->syms, "__zasm_mem_fill", pcw*4);
     emit_mem_fill_helper(w, &pcw);
   }
+  if (need_fill_lens_mask & (1u << 1)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_fill_len1", pcw*4);
+    emit_mem_fill_const_helper(w, &pcw, 1);
+  }
+  if (need_fill_lens_mask & (1u << 2)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_fill_len2", pcw*4);
+    emit_mem_fill_const_helper(w, &pcw, 2);
+  }
   if (need_ldir_helper) {
     symtab_update(&ctx, out->syms, "__zasm_mem_ldir", pcw*4);
     emit_mem_ldir_helper(w, &pcw);
+  }
+  if (need_ldir_lens_mask & (1u << 1)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_ldir_len1", pcw*4);
+    emit_mem_ldir_const_helper(w, &pcw, 1);
+  }
+  if (need_ldir_lens_mask & (1u << 2)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_ldir_len2", pcw*4);
+    emit_mem_ldir_const_helper(w, &pcw, 2);
+  }
+  if (need_ldir_lens_mask & (1u << 4)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_ldir_len4", pcw*4);
+    emit_mem_ldir_const_helper(w, &pcw, 4);
+  }
+  if (need_ldir_lens_mask & (1u << 8)) {
+    symtab_update(&ctx, out->syms, "__zasm_mem_ldir_len8", pcw*4);
+    emit_mem_ldir_const_helper(w, &pcw, 8);
   }
 
   if (prof) {
@@ -1224,6 +1473,7 @@ int cg_emit_arm64(const ir_prog_t *ir, cg_blob_t *out) {
 
   seen_free(call_targets, n_calls);
   seen_free(label_list, n_labels);
+  seen_free(public_syms, n_public);
 
   if (prof) prof->total_ns = cg_now_ns() - t_total0;
   symtab_map_free(&symmap);
