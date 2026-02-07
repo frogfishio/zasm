@@ -26,6 +26,8 @@ typedef struct {
   uint64_t removed_unreachable_instr;
   uint64_t removed_jr_fallthrough;
   uint64_t folded_jr_to_ret;
+  uint64_t removed_redundant_load;
+  uint64_t removed_dead_store;
   uint64_t threaded_jumps;
   uint64_t removed_labels;
   uint64_t cfg_blocks;
@@ -118,6 +120,8 @@ static int zem_opt_write_stats_jsonl(FILE *out, const char *mode,
   fprintf(out, ",\"removed_unreachable_instr\":%" PRIu64, st->removed_unreachable_instr);
   fprintf(out, ",\"removed_jr_fallthrough\":%" PRIu64, st->removed_jr_fallthrough);
   fprintf(out, ",\"folded_jr_to_ret\":%" PRIu64, st->folded_jr_to_ret);
+  fprintf(out, ",\"removed_redundant_load\":%" PRIu64, st->removed_redundant_load);
+  fprintf(out, ",\"removed_dead_store\":%" PRIu64, st->removed_dead_store);
   fprintf(out, ",\"threaded_jumps\":%" PRIu64, st->threaded_jumps);
   fprintf(out, ",\"removed_labels\":%" PRIu64, st->removed_labels);
   fprintf(out, ",\"cfg_blocks\":%" PRIu64, st->cfg_blocks);
@@ -307,6 +311,273 @@ static int zem_opt_is_call(const record_t *r, const char **out_sym) {
   if (r->nops < 1) return 0;
   if (r->ops[0].t != JOP_SYM || !r->ops[0].s || !*r->ops[0].s) return 0;
   if (out_sym) *out_sym = r->ops[0].s;
+  return 1;
+}
+
+static int zem_opt_is_any_jr(const record_t *r) {
+  if (!r || r->k != JREC_INSTR || !r->m) return 0;
+  return strcmp(r->m, "JR") == 0;
+}
+
+static int zem_opt_is_terminator(const record_t *r) {
+  return zem_opt_is_ret(r) || zem_opt_is_any_jr(r);
+}
+
+static int zem_opt_is_regish(const operand_t *o) {
+  if (!o) return 0;
+  if (o->t != JOP_REG && o->t != JOP_SYM) return 0;
+  return o->s && *o->s;
+}
+
+static int zem_opt_mem_key_sym(const operand_t *o, char *buf, size_t cap) {
+  if (!o || o->t != JOP_MEM) return 0;
+  if (!o->s || !*o->s) return 0;
+  if (o->base_is_reg) return 0;
+  if (!buf || cap == 0) return 0;
+  int n = snprintf(buf, cap, "%s|%ld|%d", o->s, o->disp, o->size);
+  return (n > 0 && (size_t)n < cap) ? 1 : 0;
+}
+
+static int zem_opt_instr_has_mem_base_reg(const record_t *r) {
+  if (!r || r->k != JREC_INSTR) return 0;
+  for (size_t i = 0; i < r->nops; i++) {
+    const operand_t *o = &r->ops[i];
+    if (o->t == JOP_MEM && o->base_is_reg) return 1;
+  }
+  return 0;
+}
+
+typedef struct {
+  char *line;
+  record_t r;
+  int drop;
+} zem_opt_blk_entry_t;
+
+typedef struct {
+  zem_opt_blk_entry_t *v;
+  size_t n;
+  size_t cap;
+} zem_opt_blk_t;
+
+static void zem_opt_blk_free(zem_opt_blk_t *b) {
+  if (!b) return;
+  for (size_t i = 0; i < b->n; i++) {
+    free(b->v[i].line);
+    record_free(&b->v[i].r);
+  }
+  free(b->v);
+  memset(b, 0, sizeof(*b));
+}
+
+static int zem_opt_blk_push(zem_opt_blk_t *b, const char *line, const record_t *r) {
+  if (!b || !line || !r) return 0;
+  if (b->n == b->cap) {
+    size_t ncap = b->cap ? (b->cap * 2) : 64;
+    if (ncap < b->cap) return 0;
+    zem_opt_blk_entry_t *nv = (zem_opt_blk_entry_t *)realloc(b->v, ncap * sizeof(*nv));
+    if (!nv) return 0;
+    b->v = nv;
+    b->cap = ncap;
+  }
+
+  size_t len = strlen(line);
+  char *copy = (char *)malloc(len + 1);
+  if (!copy) return 0;
+  memcpy(copy, line, len + 1);
+
+  b->v[b->n].line = copy;
+  b->v[b->n].r = *r;  // take ownership of record heap fields
+  b->v[b->n].drop = 0;
+  b->n++;
+  return 1;
+}
+
+static ssize_t zem_opt_blk_prev_instr_idx(const zem_opt_blk_t *b, size_t i) {
+  if (!b || i == 0) return -1;
+  for (size_t j = i; j-- > 0;) {
+    if (b->v[j].drop) continue;
+    if (b->v[j].r.k == JREC_INSTR) return (ssize_t)j;
+  }
+  return -1;
+}
+
+static void zem_opt_local_ldst_optimize_block(zem_opt_blk_t *b, zem_opt_stats_t *st) {
+  if (!b || b->n == 0) return;
+
+  zem_symtab_t last_store;
+  zem_symtab_init(&last_store);
+
+  for (size_t i = 0; i < b->n; i++) {
+    record_t *r = &b->v[i].r;
+    if (r->k != JREC_INSTR || !r->m) continue;
+
+    // A call or any reg-based memory access is treated as an alias barrier.
+    if (strcmp(r->m, "CALL") == 0 || zem_opt_instr_has_mem_base_reg(r)) {
+      zem_symtab_free(&last_store);
+      zem_symtab_init(&last_store);
+    }
+
+    // Only handle simple 2-operand load/store involving MEM + reg/num.
+    if (r->nops != 2) continue;
+
+    operand_t *o0 = &r->ops[0];
+    operand_t *o1 = &r->ops[1];
+
+    char key[512];
+    int is_store = 0;
+    int is_load = 0;
+    const char *dst_reg = NULL;
+
+    if (o0->t == JOP_MEM && (zem_opt_is_regish(o1) || o1->t == JOP_NUM) &&
+        zem_opt_mem_key_sym(o0, key, sizeof(key))) {
+      is_store = 1;
+    } else if (zem_opt_is_regish(o0) && o1->t == JOP_MEM &&
+               zem_opt_mem_key_sym(o1, key, sizeof(key))) {
+      is_load = 1;
+      dst_reg = o0->s;
+    }
+
+    if (is_load) {
+      // Any load from this slot blocks dead-store elimination on it.
+      (void)zem_symtab_put(&last_store, key, 0, UINT32_MAX);
+
+      // Very conservative redundant-load elimination: if the previous
+      // instruction is the same load, drop this one.
+      ssize_t pj = zem_opt_blk_prev_instr_idx(b, i);
+      if (pj >= 0) {
+        record_t *pr = &b->v[(size_t)pj].r;
+        if (pr->k == JREC_INSTR && pr->m && pr->nops == 2) {
+          operand_t *p0 = &pr->ops[0];
+          operand_t *p1 = &pr->ops[1];
+          char pkey[512];
+          if (zem_opt_is_regish(p0) && p1->t == JOP_MEM &&
+              zem_opt_mem_key_sym(p1, pkey, sizeof(pkey)) &&
+              dst_reg && p0->s && strcmp(dst_reg, p0->s) == 0 &&
+              strcmp(key, pkey) == 0) {
+            b->v[i].drop = 1;
+            if (st) st->removed_redundant_load++;
+          }
+        }
+      }
+    } else if (is_store) {
+      int is_ptr = 0;
+      uint32_t prev = UINT32_MAX;
+      if (zem_symtab_get(&last_store, key, &is_ptr, &prev) && prev != UINT32_MAX &&
+          prev < b->n) {
+        if (!b->v[prev].drop) {
+          b->v[prev].drop = 1;
+          if (st) st->removed_dead_store++;
+        }
+      }
+      (void)zem_symtab_put(&last_store, key, 0, (uint32_t)i);
+    }
+  }
+
+  zem_symtab_free(&last_store);
+}
+
+static int zem_opt_local_ldst_flush_block(zem_opt_blk_t *b, FILE *out, zem_opt_stats_t *st) {
+  if (!b || !out) return 0;
+  zem_opt_local_ldst_optimize_block(b, st);
+
+  for (size_t i = 0; i < b->n; i++) {
+    zem_opt_blk_entry_t *e = &b->v[i];
+    record_t *r = &e->r;
+
+    if (st) {
+      st->in_nrecs++;
+      if (r->k == JREC_INSTR) st->in_ninstr++;
+      st->in_hash = zem_ir_module_hash_update(st->in_hash, r);
+
+      size_t in_len = strlen(e->line);
+      st->bytes_in += (uint64_t)in_len;
+      if (in_len == 0 || e->line[in_len - 1] != '\n') st->bytes_in += 1;
+    }
+
+    if (e->drop) continue;
+
+    fputs(e->line, out);
+    size_t out_len = strlen(e->line);
+    if (out_len == 0 || e->line[out_len - 1] != '\n') fputc('\n', out);
+
+    if (st) {
+      st->out_nrecs++;
+      if (r->k == JREC_INSTR) st->out_ninstr++;
+      st->out_hash = zem_ir_module_hash_update(st->out_hash, r);
+
+      st->bytes_out += (uint64_t)out_len;
+      if (out_len == 0 || e->line[out_len - 1] != '\n') st->bytes_out += 1;
+    }
+  }
+
+  zem_opt_blk_free(b);
+  return 1;
+}
+
+static int zem_opt_process_local_ldst(FILE *in, const char *in_path, FILE *out,
+                                      zem_opt_stats_t *st) {
+  if (!in || !out || !st) return 0;
+
+  char *line_buf = NULL;
+  size_t line_cap = 0;
+  zem_opt_blk_t blk;
+  memset(&blk, 0, sizeof(blk));
+
+  for (;;) {
+    ssize_t nread = getline(&line_buf, &line_cap, in);
+    if (nread < 0) break;
+
+    const char *p = line_buf;
+    while (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n') p++;
+    if (*p == 0) continue;
+
+    record_t r;
+    int rc = parse_jsonl_record(line_buf, &r);
+    if (rc != 0) {
+      free(line_buf);
+      zem_opt_blk_free(&blk);
+      return zem_failf("parse error (%s): code=%d", in_path ? in_path : "?", rc);
+    }
+
+    // Block boundary: labels start a new block.
+    if (r.k == JREC_LABEL && blk.n) {
+      if (!zem_opt_local_ldst_flush_block(&blk, out, st)) {
+        record_free(&r);
+        free(line_buf);
+        return 0;
+      }
+      memset(&blk, 0, sizeof(blk));
+    }
+
+    if (!zem_opt_blk_push(&blk, line_buf, &r)) {
+      record_free(&r);
+      free(line_buf);
+      zem_opt_blk_free(&blk);
+      return zem_failf("OOM buffering block");
+    }
+
+    // r ownership transferred to block.
+    memset(&r, 0, sizeof(r));
+
+    // Block boundary: terminators end a block.
+    if (blk.n && blk.v[blk.n - 1].r.k == JREC_INSTR &&
+        zem_opt_is_terminator(&blk.v[blk.n - 1].r)) {
+      if (!zem_opt_local_ldst_flush_block(&blk, out, st)) {
+        free(line_buf);
+        return 0;
+      }
+      memset(&blk, 0, sizeof(blk));
+    }
+  }
+
+  if (blk.n) {
+    if (!zem_opt_local_ldst_flush_block(&blk, out, st)) {
+      free(line_buf);
+      return 0;
+    }
+  }
+
+  free(line_buf);
   return 1;
 }
 
@@ -1256,7 +1527,8 @@ static int zem_opt_process_stream(FILE *in, const char *in_path, FILE *out,
 int zem_opt_program(const char *mode, const char **inputs, int ninputs,
                     const char *out_path, const char *stats_out_path) {
   if (!mode || !*mode) mode = "dead-cf";
-  if (strcmp(mode, "dead-cf") != 0 && strcmp(mode, "cfg-simplify") != 0) {
+  if (strcmp(mode, "dead-cf") != 0 && strcmp(mode, "cfg-simplify") != 0 &&
+      strcmp(mode, "local-ldst") != 0) {
     return zem_failf("unknown --opt mode: %s", mode);
   }
   if (!inputs || ninputs <= 0) {
@@ -1295,7 +1567,12 @@ int zem_opt_program(const char *mode, const char **inputs, int ninputs,
       return zem_failf("cannot open %s: %s", path, strerror(errno));
     }
 
-    int ok = zem_opt_process_stream(in, path, out, mode, &st);
+    int ok = 0;
+    if (strcmp(mode, "dead-cf") == 0) {
+      ok = zem_opt_process_stream(in, path, out, mode, &st);
+    } else if (strcmp(mode, "local-ldst") == 0) {
+      ok = zem_opt_process_local_ldst(in, path, out, &st);
+    }
 
     if (in != stdin) fclose(in);
 
@@ -1338,9 +1615,12 @@ int zem_opt_program(const char *mode, const char **inputs, int ninputs,
       " removed_unreachable_instr=%" PRIu64
       " removed_jr_fallthrough=%" PRIu64
       " folded_jr_to_ret=%" PRIu64
+      " removed_redundant_load=%" PRIu64
+      " removed_dead_store=%" PRIu64
       " cfg_blocks=%" PRIu64 " cfg_edges=%" PRIu64 "\n",
       mode, st.removed_dead_instr, st.removed_unreachable_instr,
-      st.removed_jr_fallthrough, st.folded_jr_to_ret, st.cfg_blocks, st.cfg_edges);
+      st.removed_jr_fallthrough, st.folded_jr_to_ret, st.removed_redundant_load,
+      st.removed_dead_store, st.cfg_blocks, st.cfg_edges);
 
   return 0;
 }

@@ -154,7 +154,7 @@ static void print_help(FILE *out) {
       "  --strip-out PATH   Write stripped IR JSONL to PATH (default: stdout)\n",
       "  --strip-stats-out PATH Write strip stats JSONL to PATH (or '-' for stderr)\n",
       "  --opt MODE         Rewrite IR JSONL with a small semantics-preserving optimizer (no execution)\n",
-      "                    MODE: dead-cf | cfg-simplify\n",
+      "                    MODE: dead-cf | cfg-simplify | local-ldst\n",
       "  --opt-out PATH     Write optimized IR JSONL to PATH (default: stdout)\n",
       "  --opt-stats-out PATH Write opt stats JSONL to PATH (or '-' for stderr)\n",
       "  --opt-validate     Execute original vs optimized and require matching rc/stdout/stderr\n",

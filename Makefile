@@ -286,6 +286,7 @@ test-validation: test-zem-strip-uncovered-delete
 test-validation: test-zem-opt-dead-cf
 test-validation: test-zem-opt-cfg-simplify
 test-validation: test-zem-opt-validate
+test-validation: test-zem-opt-local-ldst
 test-validation: test-zem-shake-smoke
 test-validation: test-zem-shake-redzone test-zem-shake-quarantine test-zem-shake-io-chunking
 test-validation: test-zem-ir-v11-parser-robust
@@ -302,6 +303,9 @@ test-zem-debloat-hello-big: zem
 
 test-zem-opt-validate: zas zem
 	sh test/zem_opt_validate.sh
+
+test-zem-opt-local-ldst: zem
+	sh test/zem_opt_local_ldst.sh
 
 # Convenience wrapper for the "zem-first" pre-pass prototype.
 # Usage:

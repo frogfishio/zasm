@@ -16,7 +16,11 @@
     - [x] Fold unconditional `JR <lbl>` to `RET` when target is a `RET`
     - [ ] Block merge (true empty-block / fallthrough merge beyond label cleanup)
   - [ ] Block-local redundant load elimination
+    - [x] Remove consecutive identical loads from sym-based mem slots (`--opt local-ldst`)
+    - [ ] Extend beyond adjacent loads (requires reg clobber + alias barriers)
   - [ ] Block-local redundant store elimination
+    - [x] Dead-store elimination for sym-based mem slots overwritten within a block (`--opt local-ldst`)
+    - [ ] Extend to broader alias rules / non-adjacent cases
   - [ ] Copy propagation / temp forwarding (within block first)
   - [ ] Constant folding + simple instcombine on common zasm idioms
   - [ ] Dead code elimination for pure computations (requires def/use; start block-local)
