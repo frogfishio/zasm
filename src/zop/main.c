@@ -147,6 +147,13 @@ static void write_u32_le(FILE* out, uint32_t v) {
   fwrite(b, 1, 4, out);
 }
 
+static void write_u16_le(FILE* out, uint16_t v) {
+  unsigned char b[2];
+  b[0] = (unsigned char)(v & 0xFF);
+  b[1] = (unsigned char)((v >> 8) & 0xFF);
+  fwrite(b, 1, 2, out);
+}
+
 typedef struct {
   FILE* f;
   uint8_t* buf;
@@ -236,17 +243,47 @@ static void handle_bytes_line(const char* line, int line_no, outbuf_t* out) {
 }
 
 static void write_container(FILE* out, const uint8_t* buf, size_t len) {
-  unsigned char hdr[16];
-  memcpy(hdr, "ZASB", 4);
-  hdr[4] = 1; hdr[5] = 0; /* version */
-  hdr[6] = 0; hdr[7] = 0; /* flags */
-  hdr[8] = 0; hdr[9] = 0; hdr[10] = 0; hdr[11] = 0; /* entry_off */
-  hdr[12] = (unsigned char)(len & 0xFF);
-  hdr[13] = (unsigned char)((len >> 8) & 0xFF);
-  hdr[14] = (unsigned char)((len >> 16) & 0xFF);
-  hdr[15] = (unsigned char)((len >> 24) & 0xFF);
-  fwrite(hdr, 1, sizeof(hdr), out);
-  if (len) fwrite(buf, 1, len, out);
+  /* v2 container: header + directory + CODE section.
+   * Spec: docs/spec/zasm_bin.md
+   */
+  const uint32_t hdr_len = 40u;
+  const uint32_t dir_ent_len = 20u;
+  const uint32_t dir_off = hdr_len;
+  const uint32_t dir_count = 1u;
+  const uint32_t code_off = hdr_len + dir_ent_len;
+  const uint32_t code_len = (uint32_t)len;
+
+  uint64_t file_len64 = (uint64_t)code_off + (uint64_t)code_len;
+  if (len == 0) {
+    die_line(0, "cannot emit empty container (no opcodes)");
+  }
+  if (file_len64 > 0xFFFFFFFFull) {
+    die_line(0, "container too large");
+  }
+  uint32_t file_len = (uint32_t)file_len64;
+
+  /* Header */
+  fwrite("ZASB", 1, 4, out);
+  write_u16_le(out, 2);      /* version */
+  write_u16_le(out, 0);      /* flags */
+  write_u32_le(out, file_len);
+  write_u32_le(out, dir_off);
+  write_u32_le(out, dir_count);
+  write_u32_le(out, 0);      /* entry_pc_words (unknown here) */
+  write_u32_le(out, 0);      /* abi_id */
+  write_u32_le(out, 0);      /* abi_version */
+  write_u32_le(out, 0);      /* reserved0 */
+  write_u32_le(out, 0);      /* reserved1 */
+
+  /* Directory: one CODE entry */
+  fwrite("CODE", 1, 4, out);
+  write_u32_le(out, code_off);
+  write_u32_le(out, code_len);
+  write_u32_le(out, 0);      /* section flags */
+  write_u32_le(out, 0);      /* reserved */
+
+  /* Payload: raw opcode stream */
+  fwrite(buf, 1, len, out);
 }
 
 int main(int argc, char** argv) {

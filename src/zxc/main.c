@@ -202,6 +202,107 @@ static int parse_u32_le(const uint8_t* p, uint32_t* out) {
   return 0;
 }
 
+static int parse_u16_le(const uint8_t* p, uint16_t* out) {
+  *out = (uint16_t)p[0] | ((uint16_t)p[1] << 8);
+  return 0;
+}
+
+static int tag_eq4(const uint8_t* p, const char tag[4]) {
+  return p[0] == (uint8_t)tag[0] && p[1] == (uint8_t)tag[1] &&
+         p[2] == (uint8_t)tag[2] && p[3] == (uint8_t)tag[3];
+}
+
+static int parse_container_v2(const uint8_t* in, size_t in_len,
+                              const uint8_t** out_code, size_t* out_code_len,
+                              const char* in_path) {
+  if (in_len < 40u) {
+    diag_emit("error", in_path, 0, "invalid v2 container (too small)");
+    return 1;
+  }
+  uint16_t version = 0;
+  uint16_t flags = 0;
+  parse_u16_le(in + 4, &version);
+  parse_u16_le(in + 6, &flags);
+  if (version != 2 || flags != 0) {
+    diag_emit("error", in_path, 0, "unsupported container version/flags");
+    return 1;
+  }
+
+  uint32_t file_len = 0;
+  uint32_t dir_off = 0;
+  uint32_t dir_count = 0;
+  parse_u32_le(in + 8, &file_len);
+  parse_u32_le(in + 12, &dir_off);
+  parse_u32_le(in + 16, &dir_count);
+
+  if (file_len < 40u) {
+    diag_emit("error", in_path, 0, "invalid v2 container file_len");
+    return 1;
+  }
+  if (in_len < (size_t)file_len) {
+    diag_emit("error", in_path, 0, "container length mismatch (too small)");
+    return 1;
+  }
+  if (in_len > (size_t)file_len && g_verbose) {
+    size_t trailing = in_len - (size_t)file_len;
+    diag_emit("info", in_path, 0, "ignoring %zu trailing data byte(s) after container", trailing);
+  }
+
+  uint64_t dir_bytes64 = (uint64_t)dir_count * 20ull;
+  if (dir_count == 0 || dir_bytes64 > 0xFFFFFFFFull) {
+    diag_emit("error", in_path, 0, "invalid v2 container directory");
+    return 1;
+  }
+  uint64_t dir_end64 = (uint64_t)dir_off + dir_bytes64;
+  if (dir_off < 40u || dir_end64 > (uint64_t)file_len) {
+    diag_emit("error", in_path, 0, "invalid v2 container directory range");
+    return 1;
+  }
+
+  const uint8_t* code = NULL;
+  uint32_t code_len = 0;
+  for (uint32_t i = 0; i < dir_count; i++) {
+    const uint8_t* ent = in + dir_off + (size_t)i * 20u;
+    uint32_t off = 0;
+    uint32_t len = 0;
+    uint32_t sflags = 0;
+    uint32_t reserved = 0;
+    parse_u32_le(ent + 4, &off);
+    parse_u32_le(ent + 8, &len);
+    parse_u32_le(ent + 12, &sflags);
+    parse_u32_le(ent + 16, &reserved);
+    if (sflags != 0 || reserved != 0) {
+      diag_emit("error", in_path, 0, "invalid v2 container section flags/reserved");
+      return 1;
+    }
+    uint64_t end = (uint64_t)off + (uint64_t)len;
+    if (end > (uint64_t)file_len) {
+      diag_emit("error", in_path, 0, "invalid v2 container section range");
+      return 1;
+    }
+    if (tag_eq4(ent, "CODE")) {
+      if (code) {
+        diag_emit("error", in_path, 0, "duplicate CODE section");
+        return 1;
+      }
+      if (len == 0 || (len % 4u) != 0) {
+        diag_emit("error", in_path, 0, "invalid CODE length (must be non-zero and multiple of 4)");
+        return 1;
+      }
+      code = in + off;
+      code_len = len;
+    }
+  }
+
+  if (!code) {
+    diag_emit("error", in_path, 0, "missing CODE section");
+    return 1;
+  }
+  *out_code = code;
+  *out_code_len = (size_t)code_len;
+  return 0;
+}
+
 static int parse_mem_base(const char* s, uint64_t* out) {
   if (!s || !*s) return 1;
   errno = 0;
@@ -337,43 +438,65 @@ int main(int argc, char** argv) {
   size_t code_in_len = in_len;
   int has_magic = in_len >= 4 && memcmp(in, "ZASB", 4) == 0;
   if (force_container || has_magic) {
-    if (in_len < 16) {
+    if (in_len < 6) {
       diag_emit("error", in_path, 0, "invalid container (too small)");
       free(in);
       return 1;
     }
-    uint16_t version = (uint16_t)in[4] | ((uint16_t)in[5] << 8);
-    uint16_t flags = (uint16_t)in[6] | ((uint16_t)in[7] << 8);
-    uint32_t entry_off = 0;
-    uint32_t code_len = 0;
-    parse_u32_le(in + 8, &entry_off);
-    parse_u32_le(in + 12, &code_len);
-    if (version != 1 || flags != 0) {
+    uint16_t version = 0;
+    parse_u16_le(in + 4, &version);
+    if (version == 1) {
+      if (in_len < 16) {
+        diag_emit("error", in_path, 0, "invalid container (too small)");
+        free(in);
+        return 1;
+      }
+      uint16_t flags = 0;
+      uint32_t entry_off = 0;
+      uint32_t code_len = 0;
+      parse_u16_le(in + 6, &flags);
+      parse_u32_le(in + 8, &entry_off);
+      parse_u32_le(in + 12, &code_len);
+      if (flags != 0) {
+        diag_emit("error", in_path, 0, "unsupported container version/flags");
+        free(in);
+        return 1;
+      }
+      if (entry_off != 0) {
+        diag_emit("error", in_path, 0, "unsupported entry offset (must be 0)");
+        free(in);
+        return 1;
+      }
+      if (code_len == 0) {
+        diag_emit("error", in_path, 0, "invalid opcode length (must be non-zero)");
+        free(in);
+        return 1;
+      }
+      if (in_len < 16u + (size_t)code_len) {
+        diag_emit("error", in_path, 0, "container length mismatch (too small)");
+        free(in);
+        return 1;
+      }
+      if (in_len > 16u + (size_t)code_len && g_verbose) {
+        size_t trailing = in_len - (16u + (size_t)code_len);
+        diag_emit("info", in_path, 0, "ignoring %zu trailing data byte(s) after opcode region", trailing);
+      }
+      code_in = in + 16;
+      code_in_len = (size_t)code_len;
+    } else if (version == 2) {
+      const uint8_t* code = NULL;
+      size_t code_len = 0;
+      if (parse_container_v2(in, in_len, &code, &code_len, in_path) != 0) {
+        free(in);
+        return 1;
+      }
+      code_in = code;
+      code_in_len = code_len;
+    } else {
       diag_emit("error", in_path, 0, "unsupported container version/flags");
       free(in);
       return 1;
     }
-    if (entry_off != 0) {
-      diag_emit("error", in_path, 0, "unsupported entry offset (must be 0)");
-      free(in);
-      return 1;
-    }
-    if (code_len == 0) {
-      diag_emit("error", in_path, 0, "invalid opcode length (must be non-zero)");
-      free(in);
-      return 1;
-    }
-    if (in_len < 16u + (size_t)code_len) {
-      diag_emit("error", in_path, 0, "container length mismatch (too small)");
-      free(in);
-      return 1;
-    }
-    if (in_len > 16u + (size_t)code_len && g_verbose) {
-      size_t trailing = in_len - (16u + (size_t)code_len);
-      diag_emit("info", in_path, 0, "ignoring %zu trailing data byte(s) after opcode region", trailing);
-    }
-    code_in = in + 16;
-    code_in_len = (size_t)code_len;
   }
 
   size_t aligned_len = code_in_len & ~(size_t)3;
