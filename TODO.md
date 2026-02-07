@@ -1,5 +1,67 @@
 # TO DO
 
+## JIT ROADMAP
+
+- [ ] Track 0 — Artifact + spec baseline (.zasm.bin v2)
+  - [x] Define `.zasm.bin` v2 (sectioned container) as the ship-able module format (see `docs/spec/zasm_bin.md`)
+  - [x] Archive/retire `.zasm.bin` v1 spec (`docs/spec/zasm_bin_v1.md`)
+  - [x] Update `zop --container` to emit `.zasm.bin` v2 (at minimum: header+dir+`CODE`)
+  - [x] Update `zxc` to parse `.zasm.bin` v2 by extracting `CODE`
+  - [x] Align tool docs to v2 (`docs/tools/zop.md`, `docs/tools/zir.md`, `docs/spec/zxc.md`, `docs/tools/zxc_lib.md`)
+  - [ ] Decide v1 support policy (dev-only vs hard reject) and enforce consistently across tools
+  - [ ] Decide if we need `zas --emit-bin` (raw opcode bytes) in addition to `.zasm.bin` containers
+
+- [ ] Track 1 — Loader + verifier library (zero-trust core)
+  - [ ] Create a small C library target for parsing `.zasm.bin` v2 (no global state)
+  - [ ] Implement bounded parsing (header + directory + required `CODE`) with explicit size caps
+  - [ ] Implement verifier MVP:
+    - [ ] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
+    - [ ] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
+    - [ ] Module preflight checks (`IMPT` primitive mask agreement, if present)
+  - [ ] Add structured error codes (no printf-only failures) for embedder integration
+  - [ ] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
+
+- [ ] Track 2 — Embeddable runtime API (what integrators call)
+  - [ ] Define a stable C header for the “engine/module/instance” API (create/destroy; load; instantiate; run)
+  - [ ] Define the policy object (mem limits, step/fuel limit, strictness knobs) and default behavior
+  - [ ] Define the host interface binding to zingcore/zABI (imports + policing + fail-closed behavior)
+  - [ ] Determinism: ensure identical module+policy yields deterministic results (no timestamps/env by default)
+
+- [ ] Track 3 — Arm64 JIT backend MVP (fast path)
+  - [ ] Integrate current translation backend (`libzxc` arm64) behind the runtime API
+  - [x] Ensure `zxc` ingests raw opcode bytes as an input format (non-container)
+  - [ ] Enforce W^X code memory discipline in the runtime (no executable+writable at once)
+  - [ ] Define a target selection API for translation (arm64 first; x86_64 next)
+  - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
+  - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)
+  - [ ] Add differential test harness: run the same module under `zem` and under the JIT; compare rc/stdout/stderr
+
+- [ ] Track 4 — Nanoservice hardening (multi-tenant runner ready)
+  - [ ] Resource controls: instruction budget/fuel (deterministic accounting) + memory cap enforcement
+  - [ ] DoS defenses: max module size, max code size, max sections/exports/imports; fail fast
+  - [ ] Observability: stable lifecycle events + counters (start/stop/trap) routed via telemetry
+  - [ ] Abuse cases: hostile pointer/len inputs to zABI calls never crash host; add regression tests
+
+- [ ] Track 5 — Multi-arch expansion
+  - [ ] Add x86_64 JIT backend path (reuse existing `libzxc` x86_64)
+  - [ ] Reach opcode parity guided by the conformance suite (Track 6)
+
+- [ ] Track 6 — Tooling + release surface
+  - [ ] Provide a one-liner build pipeline for shippable modules:
+    - [ ] `zas | zem --opt ... | zir | zop --container > out.zasm.bin`
+  - [ ] Publish a compatibility/conformance suite for `.zasm.bin` v2 (verifier + runtime)
+    - [ ] Validation + parity suite (x86_64 coverage, cross-backend equivalence, negative-encoding + trap tests) for `--target wasm`, `--target zasm`, and `--target rv64i`:
+      - [ ] Encode/decode golden tests for every opcode in `docs/spec/opcode_encoding.md`
+      - [ ] Small arithmetic/logic corpus (32/64), loads/stores (sign/zero), div/rem traps
+      - [ ] Compare/set + branch behavior tests (EQ/NE/LT/GT + JR)
+      - [ ] Pseudo-op expansion determinism tests (LDIR/FILL/DROP)
+  - [ ] Define versioning/back-compat story for `.zasm.bin` v2 extensions (new sections/tags)
+  - [ ] Package embeddable artifacts (headers + static lib) with a minimal integration guide
+
+
+
+## OPTIMIZATION
+
 - [ ] Zem vs Lower: define ownership + contracts
   - [x] Write a short “ownership” doc: target-independent transforms live in `zem`; target-specific codegen + regalloc/peepholes live in each `lower` (see `docs/ownership.md`)
   - [ ] Define the interchange contract(s): optimized IR JSONL, optional hint JSONL(s), versioning rules, and backward compatibility expectations
@@ -104,26 +166,7 @@
 
 # FUTURE TASKS
 - Build `zxc` (ZASM Cross Compiler) + embeddable library:
-  - Implement `zxc` ingestion of raw opcode bytes (core reader/decoder).
-  - Add a `zas --target` mode to emit JSONL in the opcode stream format (e.g., `--target opcodes`).
-  - Add a `zas --emit-bin` mode to emit raw opcode bytes for `zxc`.
-  - Implement opcode groups iteratively (to full conformance) for x86_64 beyond Group A:
-    - mul/div/rem, shifts/rotates, immediate loads, loads/stores, compare/branch, control flow, macro-ops.
-  - Add full Group J parity tests for x86_64 once memory ops exist (OOB, div0, invalid encodings).
-  - Define output targets (macOS arm64, Linux x86_64) and a target selection API.
-  - Implement opcode-to-native translation pipeline (opcode-by-opcode, ahead-of-time on load).
-  - Add an embeddable C API (`libzxc`) for translation + execution within a custom cloak.
-  - Create a CLI `zxc` wrapper that uses `libzxc` for standalone translation.
-  - Define how translated code binds to cloak ABI (req_read/res_write/etc) without WASM.
-  - Add verification tests comparing behavior with the interpreter/VM (or reference runner).
-  - Add test fixtures for platform parity and deterministic outputs.
-  - Document binary format, API usage, and supported targets; add a roadmap for new targets.
-  - Add backend validation suites for `--target wasm`, `--target zasm`, and `--target rv64i`:
-    - Encode/decode golden tests for every opcode in `docs/spec/opcode_encoding.md`.
-    - Small backend corpus for arithmetic/logic (32/64), loads/stores (sign/zero), div/rem traps.
-    - Compare/set + branch behavior tests (EQ/NE/LT/GT + JR).
-    - Cross-backend equivalence tests (same program, same output).
-    - Pseudo-op expansion determinism tests (LDIR/FILL/DROP).
+  - Moved to `## JIT ROADMAP` above (single source of truth).
 - Cortex-M (nice-to-have):
   - Implement `--target cortex-m` per `docs/spec/cortex_m.md`.
   - Define the minimal runtime ABI and linker script for bare-metal output.
