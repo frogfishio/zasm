@@ -22,7 +22,9 @@ This separation keeps the system composable:
 - other languages (Forth, DSLs, etc.) can target **the IR** without reusing the lexer/parser
 - the backend can evolve independently (e.g., better control-flow lowering) without changing the IR contract
 
-> Note: This document explains *how the toolchain is built*. A separate stability/compatibility contract belongs in `STABILITY.md`.
+> Note: This document explains *how the toolchain is built*.
+> - Stage ownership (`zem` vs `lower`): see `docs/ownership.md`.
+> - Stability/compatibility contract: belongs in `STABILITY.md`.
 
 ---
 

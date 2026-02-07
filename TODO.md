@@ -1,7 +1,7 @@
 # TO DO
 
 - [ ] Zem vs Lower: define ownership + contracts
-  - [ ] Write a short “ownership” doc: target-independent transforms live in `zem`; target-specific codegen + regalloc/peepholes live in each `lower`
+  - [x] Write a short “ownership” doc: target-independent transforms live in `zem`; target-specific codegen + regalloc/peepholes live in each `lower` (see `docs/ownership.md`)
   - [ ] Define the interchange contract(s): optimized IR JSONL, optional hint JSONL(s), versioning rules, and backward compatibility expectations
   - [ ] Decide stable profile/hint keys (prefer `ir_id` or explicit site ids over record-index `pc` when IR can be rewritten)
   - [ ] Decide what must be verified by hash (module identity) vs what can be best-effort
