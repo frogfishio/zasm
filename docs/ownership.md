@@ -87,6 +87,26 @@ If `zem` emits extra information for backends, treat it as:
 - `zem` should preserve the IR version and remain within the published schema.
 - When `zem` must re-emit a modified record, it should keep schema-faithful operand shapes (even if internal parsers normalize forms).
 
+## Pipeline boundaries (IR → opcodes)
+
+The typical “optimized IR to bytes” path through the repo is:
+
+- `zas`: source zASM → JSONL IR
+- `zem`: JSONL IR → optimized JSONL IR
+- `zir`: JSONL IR → opcode JSONL (schema: `zasm-opcodes-v1`)
+- `zop`: opcode JSONL → raw bytes or `.zasm.bin` container
+
+This is the key staging point for a future “next abstraction level”:
+
+- `zem`’s responsibility ends at producing schema-valid, semantics-preserving JSONL IR.
+- `zir` is the lowering boundary from IR semantics into opcode-level records.
+- `zop` is a mechanical packer; it should not change semantics.
+
+References:
+
+- Tool docs: `docs/tools/zir.md`, `docs/tools/zop.md`
+- Schemas: `schema/ir/` and `schema/opcode/`
+
 ## Determinism
 
 Both `zem` and `lower` should aim for deterministic behavior:
