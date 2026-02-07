@@ -40,7 +40,7 @@ if (res.err != ZXC_OK) {
 
 ## Input format
 
-Input is raw opcode bytes or a `.zasm.bin` container produced by `zop`.
+Input is raw opcode bytes or a `.zasm.bin` v2 container produced by `zop`.
 
 ## Exit codes
 

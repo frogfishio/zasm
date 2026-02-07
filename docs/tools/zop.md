@@ -4,7 +4,7 @@
 # zop
 
 Opcode JSONL packer. Reads the **zasm-opcodes-v1** JSONL stream and emits
-raw opcode bytes (or a `.zasm.bin` container header + bytes).
+raw opcode bytes (or a `.zasm.bin` v2 container).
 
 ## Usage
 
@@ -15,7 +15,7 @@ cat build/app.opcodes.jsonl | bin/zop > build/app.zasm.bin
 ## Flags
 
 - `--version` show version information.
-- `--container` emit a `.zasm.bin` container header before opcode bytes.
+- `--container` emit a `.zasm.bin` v2 container (see `docs/spec/zasm_bin.md`).
 - `-o <path>` write output bytes to a file (default: stdout).
 
 ## Input format

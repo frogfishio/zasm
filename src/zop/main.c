@@ -257,6 +257,9 @@ static void write_container(FILE* out, const uint8_t* buf, size_t len) {
   if (len == 0) {
     die_line(0, "cannot emit empty container (no opcodes)");
   }
+  if ((len % 4u) != 0) {
+    die_line(0, "cannot emit container: opcode stream length must be a multiple of 4");
+  }
   if (file_len64 > 0xFFFFFFFFull) {
     die_line(0, "container too large");
   }
