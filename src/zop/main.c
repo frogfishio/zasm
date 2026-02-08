@@ -46,13 +46,22 @@ static const char* skip_ws(const char* p) {
 static const char* find_key_value(const char* line, const char* key) {
   char pat[64];
   snprintf(pat, sizeof(pat), "\"%s\"", key);
-  const char* p = strstr(line, pat);
-  if (!p) return NULL;
-  p += strlen(pat);
-  p = skip_ws(p);
-  if (*p != ':') return NULL;
-  p++;
-  return skip_ws(p);
+
+  const char* p = line;
+  while ((p = strstr(p, pat)) != NULL) {
+    const char* q = p + strlen(pat);
+    q = skip_ws(q);
+    if (*q != ':') {
+      /* This can match string values (e.g. the value "op" in "k":"op").
+       * Keep searching for an actual key occurrence.
+       */
+      p = p + 1;
+      continue;
+    }
+    q++;
+    return skip_ws(q);
+  }
+  return NULL;
 }
 
 static char* parse_json_string(const char** p) {

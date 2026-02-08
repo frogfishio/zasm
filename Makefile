@@ -45,6 +45,7 @@ IRCHECK_BUILD := $(BUILD)/ircheck
 ZASM_BIN_BUILD := $(BUILD)/zasm_bin
 ZASM_VERIFY_BUILD := $(BUILD)/zasm_verify
 ZASM_RT_BUILD := $(BUILD)/zasm_rt
+ZRT_BUILD := $(BUILD)/zrt
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -129,17 +130,18 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 
 all: zas zld
 
-build: zas zld ircheck zrun zlnt zop zxc zir zem lower
+build: zas zld ircheck zrun zrt zlnt zop zxc zir zem lower
 
 pipeline: build
 	./scripts/pipeline.sh --skip-build
 
-install: zas zld ircheck zrun zlnt zop zxc zir zem lower
+install: zas zld ircheck zrun zrt zlnt zop zxc zir zem lower
 	@mkdir -p $(DESTDIR)$(BINDIR)
 	@install -m 0755 $(BIN)/zas $(DESTDIR)$(BINDIR)/zas
 	@install -m 0755 $(BIN)/zld $(DESTDIR)$(BINDIR)/zld
 	@install -m 0755 $(BIN)/ircheck $(DESTDIR)$(BINDIR)/ircheck
 	@install -m 0755 $(BIN)/zrun $(DESTDIR)$(BINDIR)/zrun
+	@install -m 0755 $(BIN)/zrt $(DESTDIR)$(BINDIR)/zrt
 	@install -m 0755 $(BIN)/zlnt $(DESTDIR)$(BINDIR)/zlnt
 	@install -m 0755 $(BIN)/zop $(DESTDIR)$(BINDIR)/zop
 	@install -m 0755 $(BIN)/zxc $(DESTDIR)$(BINDIR)/zxc
@@ -153,7 +155,7 @@ install-devtools: zasm-bin-wrap
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD) $(ZASM_RT_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZRT_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD) $(ZASM_RT_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -1024,6 +1026,28 @@ test-zasm-verify-decode: zasm-verify-lib
 test-zasm-rt-smoke: zingcore25 zxc-lib zasm-bin-lib zasm-verify-lib zasm-rt-lib
 	$(CC) $(CFLAGS) -Iinclude -I$(ZEM_ZINGCORE25_DIR)/zingcore/include test/zasm_rt_smoke.c $(BIN)/libzasm_rt.a $(BIN)/libzxc.a $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a $(ZEM_ZINGCORE25_LIB) -o $(BUILD)/zasm_rt_smoke; \
 	$(BUILD)/zasm_rt_smoke
+
+# ---- zrt (zasm_rt runner) ----
+
+ZRT_SRC := \
+	src/zrt/main.c
+
+ZRT_OBJ := \
+	$(ZRT_BUILD)/main.o
+
+$(ZRT_BUILD)/%.o: src/zrt/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(ZEM_ZINGCORE25_DIR)/zingcore/include -Isrc/zrt -c $< -o $@
+
+zrt: zingcore25 zxc-lib zasm-bin-lib zasm-verify-lib zasm-rt-lib $(ZRT_OBJ) | dirs
+	$(CC) $(CFLAGS) $(ZRT_OBJ) $(BIN)/libzasm_rt.a $(BIN)/libzxc.a $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a $(ZEM_ZINGCORE25_LIB) -o $(BIN)/zrt $(LDFLAGS)
+	ln -sf $(PLATFORM)/zrt $(BIN_ROOT)/zrt
+
+.PHONY: zrt
+
+test-zrt-duel: build
+	bash test/jit_duel_smoke.sh
+
+.PHONY: test-zrt-duel
 
 # ---- zcc (IR -> C) ----
 
