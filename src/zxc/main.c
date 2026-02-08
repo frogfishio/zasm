@@ -11,6 +11,7 @@
 #include "version.h"
 #include "zxc.h"
 #include "lembeh_cloak.h"
+#include "zasm_bin.h"
 
 static int g_verbose = 0;
 
@@ -207,99 +208,22 @@ static int parse_u16_le(const uint8_t* p, uint16_t* out) {
   return 0;
 }
 
-static int tag_eq4(const uint8_t* p, const char tag[4]) {
-  return p[0] == (uint8_t)tag[0] && p[1] == (uint8_t)tag[1] &&
-         p[2] == (uint8_t)tag[2] && p[3] == (uint8_t)tag[3];
-}
-
-static int parse_container_v2(const uint8_t* in, size_t in_len,
-                              const uint8_t** out_code, size_t* out_code_len,
-                              const char* in_path) {
-  if (in_len < 40u) {
-    diag_emit("error", in_path, 0, "invalid v2 container (too small)");
+static int zxc_parse_container_v2(const uint8_t* in, size_t in_len,
+                                  const uint8_t** out_code, size_t* out_code_len,
+                                  const char* in_path) {
+  zasm_bin_v2_t mod;
+  zasm_bin_err_t err = zasm_bin_parse_v2(in, in_len, NULL, &mod);
+  if (err != ZASM_BIN_OK) {
+    /* Keep messages roughly consistent with the previous inline parser. */
+    diag_emit("error", in_path, 0, "%s", zasm_bin_err_str(err));
     return 1;
   }
-  uint16_t version = 0;
-  uint16_t flags = 0;
-  parse_u16_le(in + 4, &version);
-  parse_u16_le(in + 6, &flags);
-  if (version != 2 || flags != 0) {
-    diag_emit("error", in_path, 0, "unsupported container version/flags");
-    return 1;
-  }
-
-  uint32_t file_len = 0;
-  uint32_t dir_off = 0;
-  uint32_t dir_count = 0;
-  parse_u32_le(in + 8, &file_len);
-  parse_u32_le(in + 12, &dir_off);
-  parse_u32_le(in + 16, &dir_count);
-
-  if (file_len < 40u) {
-    diag_emit("error", in_path, 0, "invalid v2 container file_len");
-    return 1;
-  }
-  if (in_len < (size_t)file_len) {
-    diag_emit("error", in_path, 0, "container length mismatch (too small)");
-    return 1;
-  }
-  if (in_len > (size_t)file_len && g_verbose) {
-    size_t trailing = in_len - (size_t)file_len;
+  if (in_len > (size_t)mod.file_len && g_verbose) {
+    size_t trailing = in_len - (size_t)mod.file_len;
     diag_emit("info", in_path, 0, "ignoring %zu trailing data byte(s) after container", trailing);
   }
-
-  uint64_t dir_bytes64 = (uint64_t)dir_count * 20ull;
-  if (dir_count == 0 || dir_bytes64 > 0xFFFFFFFFull) {
-    diag_emit("error", in_path, 0, "invalid v2 container directory");
-    return 1;
-  }
-  uint64_t dir_end64 = (uint64_t)dir_off + dir_bytes64;
-  if (dir_off < 40u || dir_end64 > (uint64_t)file_len) {
-    diag_emit("error", in_path, 0, "invalid v2 container directory range");
-    return 1;
-  }
-
-  const uint8_t* code = NULL;
-  uint32_t code_len = 0;
-  for (uint32_t i = 0; i < dir_count; i++) {
-    const uint8_t* ent = in + dir_off + (size_t)i * 20u;
-    uint32_t off = 0;
-    uint32_t len = 0;
-    uint32_t sflags = 0;
-    uint32_t reserved = 0;
-    parse_u32_le(ent + 4, &off);
-    parse_u32_le(ent + 8, &len);
-    parse_u32_le(ent + 12, &sflags);
-    parse_u32_le(ent + 16, &reserved);
-    if (sflags != 0 || reserved != 0) {
-      diag_emit("error", in_path, 0, "invalid v2 container section flags/reserved");
-      return 1;
-    }
-    uint64_t end = (uint64_t)off + (uint64_t)len;
-    if (end > (uint64_t)file_len) {
-      diag_emit("error", in_path, 0, "invalid v2 container section range");
-      return 1;
-    }
-    if (tag_eq4(ent, "CODE")) {
-      if (code) {
-        diag_emit("error", in_path, 0, "duplicate CODE section");
-        return 1;
-      }
-      if (len == 0 || (len % 4u) != 0) {
-        diag_emit("error", in_path, 0, "invalid CODE length (must be non-zero and multiple of 4)");
-        return 1;
-      }
-      code = in + off;
-      code_len = len;
-    }
-  }
-
-  if (!code) {
-    diag_emit("error", in_path, 0, "missing CODE section");
-    return 1;
-  }
-  *out_code = code;
-  *out_code_len = (size_t)code_len;
+  *out_code = mod.code;
+  *out_code_len = mod.code_len;
   return 0;
 }
 
@@ -486,7 +410,7 @@ int main(int argc, char** argv) {
     } else if (version == 2) {
       const uint8_t* code = NULL;
       size_t code_len = 0;
-      if (parse_container_v2(in, in_len, &code, &code_len, in_path) != 0) {
+      if (zxc_parse_container_v2(in, in_len, &code, &code_len, in_path) != 0) {
         free(in);
         return 1;
       }

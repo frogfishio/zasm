@@ -12,10 +12,10 @@
   - [ ] Decide if we need `zas --emit-bin` (raw opcode bytes) in addition to `.zasm.bin` containers
 
 - [ ] Track 1 — Loader + verifier library (zero-trust core)
-  - [ ] Create a small C library target for parsing `.zasm.bin` v2 (no global state)
-  - [ ] Implement bounded parsing (header + directory + required `CODE`) with explicit size caps
+  - [x] Create a small C library target for parsing `.zasm.bin` v2 (no global state)
+  - [x] Implement bounded parsing (header + directory + required `CODE`) with explicit size caps
   - [ ] Implement verifier MVP:
-    - [ ] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
+    - [x] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
     - [ ] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
     - [ ] Module preflight checks (`IMPT` primitive mask agreement, if present)
   - [ ] Add structured error codes (no printf-only failures) for embedder integration
