@@ -5,7 +5,6 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
-#include "lembeh_cloak.h"
 
 enum {
   ZOP_CALL = 0x00,
@@ -67,17 +66,9 @@ enum {
   PRIM_BIT_CTL = 1u << 5
 };
 
-#define HOST_SLOT_REQ_READ  (uint16_t)(offsetof(lembeh_host_vtable_t, req_read) / 8)
-#define HOST_SLOT_RES_WRITE (uint16_t)(offsetof(lembeh_host_vtable_t, res_write) / 8)
-#define HOST_SLOT_RES_END   (uint16_t)(offsetof(lembeh_host_vtable_t, res_end) / 8)
-#define HOST_SLOT_LOG       (uint16_t)(offsetof(lembeh_host_vtable_t, log) / 8)
-#define HOST_SLOT_ALLOC     (uint16_t)(offsetof(lembeh_host_vtable_t, alloc) / 8)
-#define HOST_SLOT_FREE      (uint16_t)(offsetof(lembeh_host_vtable_t, free) / 8)
-#define HOST_SLOT_CTL       (uint16_t)(offsetof(lembeh_host_vtable_t, ctl) / 8)
-
 enum { ZXC_SCRATCH = 9, ZXC_SCRATCH2 = 10, ZXC_SCRATCH3 = 12, ZXC_SCRATCH4 = 13 };
 enum { ZXC_CMP = 11 };
-enum { ZXC_HOST_PTR = 15, ZXC_REQ_HANDLE = 5, ZXC_RES_HANDLE = 6 };
+enum { ZXC_SYS_PTR = 20, ZXC_REQ_HANDLE = 5, ZXC_RES_HANDLE = 6 };
 enum { ZXC_ENTRY_LR = 19 }; /* callee-saved to hold caller LR */
 enum { ZXC_LR_SAVE = 8 };   /* caller-saved scratch for host-call LR save */
 
@@ -399,9 +390,10 @@ static int detect_primitive_mask(const uint8_t* in, size_t in_len,
 }
 
 static int emit_primitive_prologue(uint8_t* out, size_t out_cap, size_t* out_len,
-                                   uint64_t host_ptr, unsigned prim_mask) {
+                                   unsigned prim_mask) {
   if (!prim_mask) return 1;
-  if (!emit_mov_imm64(out, out_cap, out_len, ZXC_HOST_PTR, (int64_t)host_ptr)) return 0;
+  /* x2 carries the syscalls table pointer when primitives are enabled. */
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SYS_PTR, 2))) return 0;
   if (prim_mask & PRIM_BIT_IN) {
     if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_REQ_HANDLE, 0))) return 0;
   }
@@ -411,23 +403,11 @@ static int emit_primitive_prologue(uint8_t* out, size_t out_cap, size_t* out_len
   return 1;
 }
 
-static int validate_primitive_host(unsigned mask, const lembeh_host_vtable_t* host) {
-  if (!mask) return 1;
-  if (!host) return 0;
-  if ((mask & PRIM_BIT_IN) && !host->req_read) return 0;
-  if ((mask & PRIM_BIT_OUT) && !host->res_write) return 0;
-  if ((mask & PRIM_BIT_LOG) && !host->log) return 0;
-  if ((mask & PRIM_BIT_ALLOC) && !host->alloc) return 0;
-  if ((mask & PRIM_BIT_FREE) && !host->free) return 0;
-  if ((mask & PRIM_BIT_CTL) && !host->ctl) return 0;
-  return 1;
-}
-
-static int emit_host_call(uint8_t* out, size_t out_cap, size_t* out_len, uint16_t slot) {
-  /* save return address for this host call on stack to survive host clobbers */
+static int emit_syscall_call(uint8_t* out, size_t out_cap, size_t* out_len, uint16_t slot) {
+  /* save return address for this call on stack to survive clobbers */
   if (!emit_u32(out, out_cap, out_len, enc_sub_imm(1, 31, 31, 16))) return 0; /* sub sp,sp,#16 */
   if (!emit_u32(out, out_cap, out_len, enc_str_x_unsigned(30, 31, 0))) return 0; /* str x30,[sp] */
-  if (!emit_u32(out, out_cap, out_len, enc_ldr_x_off(ZXC_CMP, ZXC_HOST_PTR, slot))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_ldr_x_off(ZXC_CMP, ZXC_SYS_PTR, slot))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_blr(ZXC_CMP))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_ldr_x(30, 31))) return 0; /* ldr x30,[sp] */
   if (!emit_u32(out, out_cap, out_len, enc_add_imm(1, 31, 31, 16))) return 0; /* add sp,sp,#16 */
@@ -437,10 +417,11 @@ static int emit_host_call(uint8_t* out, size_t out_cap, size_t* out_len, uint16_
 static int emit_prim_in(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_REQ_HANDLE))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
-  if (!emit_host_call(out, out_cap, out_len, HOST_SLOT_REQ_READ)) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_REQ_HANDLE))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, read) / 8);
+  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   return 1;
 }
@@ -448,10 +429,11 @@ static int emit_prim_in(uint8_t* out, size_t out_cap, size_t* out_len) {
 static int emit_prim_out(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_RES_HANDLE))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
-    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
-  if (!emit_host_call(out, out_cap, out_len, HOST_SLOT_RES_WRITE)) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_RES_HANDLE))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, write) / 8);
+  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   return 1;
@@ -466,7 +448,8 @@ static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH4))) return 0;
-  if (!emit_host_call(out, out_cap, out_len, HOST_SLOT_LOG)) return 0;
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, telemetry) / 8);
+  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH3))) return 0;
@@ -475,12 +458,14 @@ static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len) {
 }
 
 static int emit_prim_alloc(uint8_t* out, size_t out_cap, size_t* out_len) {
-  return emit_host_call(out, out_cap, out_len, HOST_SLOT_ALLOC);
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, alloc) / 8);
+  return emit_syscall_call(out, out_cap, out_len, slot);
 }
 
 static int emit_prim_free(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
-  if (!emit_host_call(out, out_cap, out_len, HOST_SLOT_FREE)) return 0;
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, free) / 8);
+  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   return 1;
 }
@@ -494,7 +479,8 @@ static int emit_prim_ctl(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH4))) return 0;
-  if (!emit_host_call(out, out_cap, out_len, HOST_SLOT_CTL)) return 0;
+  const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, ctl) / 8);
+  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(4, ZXC_SCRATCH4))) return 0;
@@ -665,8 +651,7 @@ static int zxc_arm64_out_offset(const uint8_t* in, size_t in_len,
 
 zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                                  uint8_t* out, size_t out_cap,
-                                 uint64_t mem_base, uint64_t mem_size,
-                                 const lembeh_host_vtable_t* host) {
+                                 uint64_t mem_base, uint64_t mem_size) {
   zxc_result_t res;
   memset(&res, 0, sizeof(res));
 
@@ -681,16 +666,11 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
     res.err = prim_err;
     return res;
   }
-  if (!validate_primitive_host(prim_mask, host)) {
-    res.err = ZXC_ERR_UNIMPL;
-    return res;
-  }
 
   size_t out_len = 0;
   size_t prologue_len = 0; /* reserved for primitive prologue emission */
   if (prim_mask) {
-    uint64_t host_ptr = (uint64_t)(uintptr_t)host;
-    if (!emit_primitive_prologue(out, out_cap, &out_len, host_ptr, prim_mask)) {
+    if (!emit_primitive_prologue(out, out_cap, &out_len, prim_mask)) {
       res.err = ZXC_ERR_OUTBUF;
       return res;
     }

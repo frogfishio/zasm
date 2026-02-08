@@ -6,7 +6,7 @@
 
 #include "zasm_bin.h"
 #include "zasm_verify.h"
-#include "lembeh_cloak.h"
+#include "zi_runtime25.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,6 +25,16 @@ typedef enum zasm_rt_err {
   ZASM_RT_ERR_UNSUPPORTED,
 } zasm_rt_err_t;
 
+/* Translation/execution target selection.
+ * - HOST: choose the current host architecture.
+ * - Explicit targets are validated against the host for now (no cross-arch execution).
+ */
+typedef enum zasm_rt_target {
+  ZASM_RT_TARGET_HOST = 0,
+  ZASM_RT_TARGET_ARM64 = 1,
+  ZASM_RT_TARGET_X86_64 = 2,
+} zasm_rt_target_t;
+
 /* Policy object: safety caps + compatibility knobs.
  * (0 caps mean "unlimited"; prefer setting caps for untrusted inputs.)
  */
@@ -35,6 +45,13 @@ typedef struct zasm_rt_policy {
   /* Guest memory policy used by backends for bounds checks. */
   uint64_t mem_base;
   uint64_t mem_size;
+
+  /* Default handles passed to the guest entrypoint as (req, res). */
+  zi_handle_t req_handle;
+  zi_handle_t res_handle;
+
+  /* Target selection (arm64 first; x86_64 next). */
+  zasm_rt_target_t target;
 
   /* Optional execution fuel/step limit (0 = unlimited). */
   uint64_t fuel;
@@ -107,7 +124,7 @@ zasm_rt_err_t zasm_rt_policy_validate(const zasm_rt_policy_t* policy, zasm_rt_di
 zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
                                       const zasm_rt_module_t* module,
                                       const zasm_rt_policy_t* policy,
-                                      const lembeh_host_vtable_t* host,
+                                      const zi_host_v1* host,
                                       zasm_rt_instance_t** out_instance,
                                       zasm_rt_diag_t* diag);
 void zasm_rt_instance_destroy(zasm_rt_instance_t* instance);

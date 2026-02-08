@@ -10,50 +10,9 @@
 #include <ctype.h>
 #include "version.h"
 #include "zxc.h"
-#include "lembeh_cloak.h"
 #include "zasm_bin.h"
 
 static int g_verbose = 0;
-
-static int32_t stub_req_read(int32_t req, int32_t ptr, int32_t cap) {
-  (void)req; (void)ptr; (void)cap;
-  return 0;
-}
-
-static int32_t stub_res_write(int32_t res, int32_t ptr, int32_t len) {
-  (void)res; (void)ptr;
-  return len;
-}
-
-static void stub_res_end(int32_t res) { (void)res; }
-
-static void stub_log(int32_t topic_ptr, int32_t topic_len,
-                     int32_t msg_ptr, int32_t msg_len) {
-  (void)topic_ptr; (void)topic_len; (void)msg_ptr; (void)msg_len;
-}
-
-static int32_t stub_alloc(int32_t size) {
-  (void)size;
-  return -1;
-}
-
-static void stub_free(int32_t ptr) { (void)ptr; }
-
-static int32_t stub_ctl(int32_t req_ptr, int32_t req_len,
-                        int32_t resp_ptr, int32_t resp_cap) {
-  (void)req_ptr; (void)req_len; (void)resp_ptr; (void)resp_cap;
-  return -1;
-}
-
-static const lembeh_host_vtable_t g_stub_host = {
-  .req_read = stub_req_read,
-  .res_write = stub_res_write,
-  .res_end = stub_res_end,
-  .log = stub_log,
-  .alloc = stub_alloc,
-  .free = stub_free,
-  .ctl = stub_ctl
-};
 
 static void diag_emit(const char* level, const char* file, int line, const char* fmt, ...) {
   if (!g_verbose && strcmp(level, "error") != 0 && strcmp(level, "warn") != 0) {
@@ -455,7 +414,7 @@ int main(int argc, char** argv) {
   zxc_result_t res;
   if (arch) {
     if (strcmp(arch, "arm64") == 0) {
-      res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, &g_stub_host);
+      res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size);
     } else if (strcmp(arch, "x86_64") == 0) {
       res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size);
     } else {
@@ -466,7 +425,7 @@ int main(int argc, char** argv) {
     }
   } else {
 #if defined(__aarch64__) || defined(__arm64__)
-    res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, &g_stub_host);
+  res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size);
 #elif defined(__x86_64__) || defined(_M_X64)
     res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size);
 #else

@@ -30,7 +30,7 @@ int main(void) {
   write_u32_le(in + 8, ret);
 
   zxc_result_t r = zxc_arm64_translate(in, sizeof(in), out, sizeof(out),
-                                         0x10000000u, 0x1000u, NULL);
+                                         0x10000000u, 0x1000u);
   if (r.err != ZXC_OK) {
     fprintf(stderr, "translate failed: err=%d at %zu\n", r.err, r.in_off);
     return 1;
@@ -62,7 +62,7 @@ int main(void) {
   write_u32_le(in2 + 4, ret);
 
   zxc_result_t r2 = zxc_arm64_translate(in2, sizeof(in2), out, sizeof(out),
-                                          0x10000000u, 0x1000u, NULL);
+                                          0x10000000u, 0x1000u);
   if (r2.err != ZXC_OK) {
     fprintf(stderr, "translate failed: err=%d at %zu\n", r2.err, r2.in_off);
     return 1;

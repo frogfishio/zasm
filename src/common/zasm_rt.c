@@ -6,6 +6,9 @@
 
 #include "zxc.h"
 
+#include "zingcore25.h"
+#include "zi_sysabi25.h"
+
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,10 +27,18 @@ struct zasm_rt_module {
   size_t code_len;
 };
 
+typedef struct zasm_rt_mem_ctx {
+  uint8_t* base;
+  size_t cap;
+} zasm_rt_mem_ctx_t;
+
 struct zasm_rt_instance {
   const zasm_rt_module_t* module;
-  const lembeh_host_vtable_t* host;
+  const zi_host_v1* host;
   zasm_rt_policy_t policy;
+
+  zi_mem_v1 mem;
+  zasm_rt_mem_ctx_t mem_ctx;
 
   uint8_t* owned_mem;
   size_t owned_mem_cap;
@@ -38,55 +49,33 @@ struct zasm_rt_instance {
   int jit_is_exec;
 };
 
-static int32_t zasm_rt_null_req_read(int32_t req, int32_t ptr, int32_t cap) {
-  (void)req;
-  (void)ptr;
-  (void)cap;
-  return -1;
+static int zasm_rt_mem_map_ro(void* ctx, zi_ptr_t ptr, zi_size32_t len, const uint8_t** out) {
+  if (!out) return 0;
+  *out = NULL;
+  if (!ctx) return 0;
+  const zasm_rt_mem_ctx_t* m = (const zasm_rt_mem_ctx_t*)ctx;
+  const uint8_t* base = m->base;
+  size_t cap = m->cap;
+  if (!base) return 0;
+  if ((uint64_t)ptr > (uint64_t)cap) return 0;
+  if ((uint64_t)len > (uint64_t)(cap - (size_t)ptr)) return 0;
+  *out = base + (size_t)ptr;
+  return 1;
 }
 
-static int32_t zasm_rt_null_res_write(int32_t res, int32_t ptr, int32_t len) {
-  (void)res;
-  (void)ptr;
-  (void)len;
-  return -1;
+static int zasm_rt_mem_map_rw(void* ctx, zi_ptr_t ptr, zi_size32_t len, uint8_t** out) {
+  if (!out) return 0;
+  *out = NULL;
+  if (!ctx) return 0;
+  const zasm_rt_mem_ctx_t* m = (const zasm_rt_mem_ctx_t*)ctx;
+  uint8_t* base = m->base;
+  size_t cap = m->cap;
+  if (!base) return 0;
+  if ((uint64_t)ptr > (uint64_t)cap) return 0;
+  if ((uint64_t)len > (uint64_t)(cap - (size_t)ptr)) return 0;
+  *out = base + (size_t)ptr;
+  return 1;
 }
-
-static void zasm_rt_null_res_end(int32_t res) { (void)res; }
-
-static void zasm_rt_null_log(int32_t topic_ptr, int32_t topic_len,
-                             int32_t msg_ptr, int32_t msg_len) {
-  (void)topic_ptr;
-  (void)topic_len;
-  (void)msg_ptr;
-  (void)msg_len;
-}
-
-static int32_t zasm_rt_null_alloc(int32_t size) {
-  (void)size;
-  return -1;
-}
-
-static void zasm_rt_null_free(int32_t ptr) { (void)ptr; }
-
-static int32_t zasm_rt_null_ctl(int32_t req_ptr, int32_t req_len,
-                                int32_t resp_ptr, int32_t resp_cap) {
-  (void)req_ptr;
-  (void)req_len;
-  (void)resp_ptr;
-  (void)resp_cap;
-  return -1;
-}
-
-static const lembeh_host_vtable_t zasm_rt_null_host = {
-  .req_read = zasm_rt_null_req_read,
-  .res_write = zasm_rt_null_res_write,
-  .res_end = zasm_rt_null_res_end,
-  .log = zasm_rt_null_log,
-  .alloc = zasm_rt_null_alloc,
-  .free = zasm_rt_null_free,
-  .ctl = zasm_rt_null_ctl,
-};
 
 static size_t zasm_rt_round_up_page(size_t n) {
 #if defined(__unix__) || defined(__APPLE__)
@@ -104,6 +93,9 @@ const zasm_rt_policy_t zasm_rt_policy_default = {
   .allow_primitives = 1,
   .mem_base = 0,
   .mem_size = 2ull * 1024ull * 1024ull,
+  .req_handle = 0,
+  .res_handle = 1,
+  .target = ZASM_RT_TARGET_HOST,
   .fuel = 0,
   .allow_time = 0,
   .allow_env = 0,
@@ -113,6 +105,15 @@ const zasm_rt_policy_t zasm_rt_policy_default = {
   .max_code_len = 32u * 1024u * 1024u,
   .max_insn_words = 0,
 };
+static zasm_rt_target_t zasm_rt_host_target(void) {
+#if defined(__aarch64__) || defined(__arm64__)
+  return ZASM_RT_TARGET_ARM64;
+#elif defined(__x86_64__) || defined(_M_X64)
+  return ZASM_RT_TARGET_X86_64;
+#else
+  return ZASM_RT_TARGET_HOST;
+#endif
+}
 
 static void diag_reset(zasm_rt_diag_t* diag) {
   if (!diag) return;
@@ -140,6 +141,12 @@ zasm_rt_err_t zasm_rt_policy_validate(const zasm_rt_policy_t* policy_in, zasm_rt
   /* Basic invariants. */
   if (policy_in->mem_size == 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
 
+  if (policy_in->target != ZASM_RT_TARGET_HOST &&
+      policy_in->target != ZASM_RT_TARGET_ARM64 &&
+      policy_in->target != ZASM_RT_TARGET_X86_64) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
+
   /* Determinism default: env/time must be explicitly opted in.
    * If strict is set, treat enabling env/time as unsupported until we have
    * explicit runtime plumbing for those features.
@@ -155,6 +162,7 @@ zasm_rt_err_t zasm_rt_engine_create(zasm_rt_engine_t** out_engine) {
   if (!out_engine) return ZASM_RT_ERR_NULL;
   zasm_rt_engine_t* e = (zasm_rt_engine_t*)calloc(1, sizeof(zasm_rt_engine_t));
   if (!e) return ZASM_RT_ERR_OOM;
+  (void)zingcore25_init();
   *out_engine = e;
   return ZASM_RT_OK;
 }
@@ -251,7 +259,7 @@ const uint8_t* zasm_rt_module_code(const zasm_rt_module_t* module, size_t* out_l
 zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
                                       const zasm_rt_module_t* module,
                                       const zasm_rt_policy_t* policy,
-                                      const lembeh_host_vtable_t* host,
+                                      const zi_host_v1* host,
                                       zasm_rt_instance_t** out_instance,
                                       zasm_rt_diag_t* diag) {
   (void)engine;
@@ -265,17 +273,6 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     return pe;
   }
 
-  if (p.allow_primitives && !host) {
-    if (p.strict) {
-      *out_instance = NULL;
-      return diag_fail(diag, ZASM_RT_ERR_NULL);
-    }
-    host = &zasm_rt_null_host;
-  }
-  if (!p.allow_primitives && !host) {
-    host = &zasm_rt_null_host;
-  }
-
   zasm_rt_instance_t* inst = (zasm_rt_instance_t*)calloc(1, sizeof(zasm_rt_instance_t));
   if (!inst) {
     *out_instance = NULL;
@@ -286,6 +283,15 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   inst->policy = p;
 
   if (inst->policy.mem_base == 0) {
+
+      const zasm_rt_target_t host_target = zasm_rt_host_target();
+      zasm_rt_target_t target = inst->policy.target;
+      if (target == ZASM_RT_TARGET_HOST) target = host_target;
+      if (target != host_target) {
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_UNSUPPORTED);
+      }
     inst->owned_mem_cap = (size_t)inst->policy.mem_size;
     inst->owned_mem = (uint8_t*)calloc(1, inst->owned_mem_cap);
     if (!inst->owned_mem) {
@@ -295,6 +301,12 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     }
     inst->policy.mem_base = (uint64_t)(uintptr_t)inst->owned_mem;
   }
+
+  inst->mem_ctx.base = (uint8_t*)(uintptr_t)inst->policy.mem_base;
+  inst->mem_ctx.cap = (size_t)inst->policy.mem_size;
+  inst->mem.ctx = &inst->mem_ctx;
+  inst->mem.map_ro = zasm_rt_mem_map_ro;
+  inst->mem.map_rw = zasm_rt_mem_map_rw;
 
   size_t code_len = module->code_len;
   const uint8_t* code = module->code;
@@ -340,8 +352,7 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 #if defined(__aarch64__) || defined(__arm64__)
   tr = zxc_arm64_translate(code, code_len,
                            inst->jit_mem, inst->jit_cap,
-                           inst->policy.mem_base, inst->policy.mem_size,
-                           inst->host);
+                           inst->policy.mem_base, inst->policy.mem_size);
 #elif defined(__x86_64__) || defined(_M_X64)
   tr = zxc_x86_64_translate(code, code_len,
                             inst->jit_mem, inst->jit_cap,
@@ -384,8 +395,8 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   size_t mem_cap = (size_t)instance->policy.mem_size;
   if (!mem || mem_cap == 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
 
-  lembeh_bind_memory(mem, mem_cap);
-  lembeh_bind_host(instance->host ? instance->host : &zasm_rt_null_host);
+  zi_runtime25_set_mem(&instance->mem);
+  zi_runtime25_set_host(instance->host);
 
 #if defined(__unix__) || defined(__APPLE__)
   if (!instance->jit_is_exec) {
@@ -397,8 +408,17 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   }
 #endif
 
-  lembeh_handle_t entry = (lembeh_handle_t)instance->jit_mem;
-  entry(0, 0);
+  static const zxc_zi_syscalls_v1_t g_sys = {
+    .read = zi_read,
+    .write = zi_write,
+    .alloc = zi_alloc,
+    .free = zi_free,
+    .ctl = zi_ctl,
+    .telemetry = zi_telemetry,
+  };
+  void (*entry)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*) =
+      (void (*)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*))instance->jit_mem;
+  entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &g_sys);
   return ZASM_RT_OK;
 }
 

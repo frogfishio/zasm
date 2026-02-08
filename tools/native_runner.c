@@ -158,10 +158,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  zxc_result_t res = zxc_arm64_translate(payload, payload_len,
-                                         out, out_cap,
-                                         (uint64_t)(uintptr_t)g_mem, g_mem_cap,
-                                         &host);
+    zxc_result_t res = zxc_arm64_translate(payload, payload_len,
+                                           out, out_cap,
+                                           (uint64_t)(uintptr_t)g_mem, g_mem_cap);
   if (res.err != ZXC_OK) {
     fprintf(stderr, "zxc translate failed: err=%d at %zu\n", res.err, res.in_off);
     munmap(out, out_cap);

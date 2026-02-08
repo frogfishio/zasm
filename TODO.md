@@ -31,7 +31,7 @@
   - [x] Integrate current translation backend (`libzxc` arm64) behind the runtime API
   - [x] Ensure `zxc` ingests raw opcode bytes as an input format (non-container)
   - [x] Enforce W^X code memory discipline in the runtime (no executable+writable at once)
-  - [ ] Define a target selection API for translation (arm64 first; x86_64 next)
+  - [x] Define a target selection API for translation (arm64 first; x86_64 next)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
   - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)
   - [ ] Add differential test harness: run the same module under `zem` and under the JIT; compare rc/stdout/stderr

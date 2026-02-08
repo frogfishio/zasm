@@ -26,7 +26,7 @@ int main(void) {
   write_u32_le(in, divs);
 
     zxc_result_t r = zxc_arm64_translate(in, sizeof(in), out, sizeof(out),
-                                         0x10000000u, 0x1000u, NULL);
+                                           0x10000000u, 0x1000u);
   if (r.err != ZXC_OK) {
     fprintf(stderr, "translate failed: err=%d at %zu\n", r.err, r.in_off);
     return 1;
