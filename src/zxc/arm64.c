@@ -14,6 +14,8 @@ enum {
   ZOP_DROP = 0x04,
   ZOP_INC = 0x05,
   ZOP_DEC = 0x06,
+  ZOP_MOV = 0x07,
+  ZOP_CPI = 0x08,
   ZOP_ADD = 0x10,
   ZOP_SUB = 0x11,
   ZOP_MUL = 0x12,
@@ -1080,6 +1082,33 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
       case ZOP_CP: {
         enc = enc_sub_reg(0, ZXC_CMP, rs1_m, rs2_m);
         break;
+      }
+      case ZOP_MOV: {
+        enc = enc_mov_reg(rd_m, rs1_m);
+        break;
+      }
+      case ZOP_CPI: {
+        /* Compare rs1 against imm12: ZXC_CMP := rs1 - imm12. */
+        if (imm12 >= 0) {
+          if (!emit_u32(out, out_cap, &out_len,
+                        enc_sub_imm(0, ZXC_CMP, rs1_m, (uint16_t)imm12))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+        } else {
+          uint16_t k = (uint16_t)(-imm12);
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(0, ZXC_CMP, rs1_m, k))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+        }
+        enc = 0;
+        off += 4;
+        continue;
       }
       case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
       case 0x56: case 0x57: case 0x58: case 0x59:

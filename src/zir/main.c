@@ -269,24 +269,40 @@ static int label_from_operand(const operand_t* op, const symtab_t* syms, int64_t
   return 1;
 }
 
+static int str_eqi(const char* a, const char* b) {
+  if (!a || !b) return 0;
+  while (*a && *b) {
+    unsigned char ca = (unsigned char)*a++;
+    unsigned char cb = (unsigned char)*b++;
+    if (tolower(ca) != tolower(cb)) return 0;
+  }
+  return *a == 0 && *b == 0;
+}
+
 static int cond_code(const char* s, int* out) {
   if (!s) return 1;
-  if (strcmp(s, "EQ") == 0) { *out = 1; return 0; }
-  if (strcmp(s, "NE") == 0) { *out = 2; return 0; }
-  if (strcmp(s, "LT") == 0 || strcmp(s, "LTS") == 0) { *out = 3; return 0; }
-  if (strcmp(s, "LE") == 0 || strcmp(s, "LES") == 0) { *out = 4; return 0; }
-  if (strcmp(s, "GT") == 0 || strcmp(s, "GTS") == 0) { *out = 5; return 0; }
-  if (strcmp(s, "GE") == 0 || strcmp(s, "GES") == 0) { *out = 6; return 0; }
-  if (strcmp(s, "LTU") == 0) { *out = 7; return 0; }
-  if (strcmp(s, "LEU") == 0) { *out = 8; return 0; }
-  if (strcmp(s, "GTU") == 0) { *out = 9; return 0; }
-  if (strcmp(s, "GEU") == 0) { *out = 10; return 0; }
+
+  if (str_eqi(s, "EQ")) { *out = 1; return 0; }
+  if (str_eqi(s, "NE")) { *out = 2; return 0; }
+  if (str_eqi(s, "LT") || str_eqi(s, "LTS")) { *out = 3; return 0; }
+  if (str_eqi(s, "LE") || str_eqi(s, "LES")) { *out = 4; return 0; }
+  if (str_eqi(s, "GT") || str_eqi(s, "GTS")) { *out = 5; return 0; }
+  if (str_eqi(s, "GE") || str_eqi(s, "GES")) { *out = 6; return 0; }
+  if (str_eqi(s, "LTU")) { *out = 7; return 0; }
+  if (str_eqi(s, "LEU")) { *out = 8; return 0; }
+  if (str_eqi(s, "GTU")) { *out = 9; return 0; }
+  if (str_eqi(s, "GEU")) { *out = 10; return 0; }
   return 1;
 }
 
 static int imm12_ok(int64_t v) {
   return v >= -2048 && v <= 2047;
 }
+
+enum {
+  ZOP_MOV = 0x07,
+  ZOP_CPI = 0x08
+};
 
 static uint32_t pack_word(uint8_t op, uint8_t rd, uint8_t rs1, uint8_t rs2, int32_t imm12) {
   uint32_t uimm = (uint32_t)imm12 & 0xFFFu;
@@ -343,6 +359,23 @@ static int emit_ld_imm64(uint8_t* buf, size_t cap, size_t* len, uint8_t rd, int6
   if (emit_word(buf, cap, len, lo) != 0) return 1;
   return emit_word(buf, cap, len, hi);
 }
+
+static int emit_mov(uint8_t* buf, size_t cap, size_t* len, uint8_t rd, uint8_t rs) {
+  uint32_t w = pack_word(ZOP_MOV, rd, rs, 0, 0);
+  return emit_word(buf, cap, len, w);
+}
+
+static int emit_cpi(uint8_t* buf, size_t cap, size_t* len, uint8_t rs, int64_t imm,
+                    char* err, size_t errlen) {
+  if (imm12_ok(imm)) {
+    uint32_t w = pack_word(ZOP_CPI, rs, rs, 0, (int32_t)imm);
+    return emit_word(buf, cap, len, w);
+  }
+  /* Fallback: materialize imm into A and do reg-reg CP. */
+  if (emit_ld_imm(buf, cap, len, (uint8_t)2, imm, err, errlen) != 0) return 1;
+  uint32_t w = pack_word(0x03, rs, rs, (uint8_t)2, 0);
+  return emit_word(buf, cap, len, w);
+}
 static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off,
                         uint8_t* buf, size_t cap, size_t* out_len,
                         char* err, size_t errlen) {
@@ -361,6 +394,56 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
   }
   if (strcmp(m, "CALL") == 0) {
     if (nops != 1) { snprintf(err, errlen, "CALL expects 1 operand"); return 1; }
+    if (ops[0].t == JOP_SYM && ops[0].s) {
+      const char* callee = ops[0].s;
+
+      /* Host primitive shims: accept zi_* when extern primitives are enabled.
+         Note: the JIT primitive calling convention uses fixed req/res handles,
+         so zi_read/zi_write ignore the explicit handle argument.
+      */
+      if (!g_allow_prim_extern) {
+        /* fall through */
+      } else if (strcmp(callee, "zi_read") == 0) {
+        /* zi_read(HL=handle, DE=ptr, BC=cap) => _in(HL=ptr, DE=cap) */
+        if (emit_mov(buf, cap, out_len, 0, 1) != 0) return 1; /* HL <- DE */
+        if (emit_mov(buf, cap, out_len, 1, 3) != 0) return 1; /* DE <- BC */
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 0, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      } else if (strcmp(callee, "zi_write") == 0) {
+        /* zi_write(HL=handle, DE=ptr, BC=len) => _out(HL=ptr, DE=len) */
+        if (emit_mov(buf, cap, out_len, 0, 1) != 0) return 1; /* HL <- DE */
+        if (emit_mov(buf, cap, out_len, 1, 3) != 0) return 1; /* DE <- BC */
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 1, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      } else if (strcmp(callee, "zi_telemetry") == 0) {
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 2, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      } else if (strcmp(callee, "zi_alloc") == 0) {
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 3, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      } else if (strcmp(callee, "zi_free") == 0) {
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 4, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      } else if (strcmp(callee, "zi_ctl") == 0) {
+        uint32_t w = pack_word(PRIM_OPCODE_BASE + 5, 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      }
+
+      if (is_primitive_symbol(callee)) {
+        if (!g_allow_prim_extern) {
+          snprintf(err, errlen, "CALL %s requires --allow-extern-prim", callee);
+          return 1;
+        }
+        int idx = prim_index(callee);
+        if (idx < 0) {
+          snprintf(err, errlen, "unknown primitive: %s", callee ? callee : "<null>");
+          return 1;
+        }
+        uint32_t w = pack_word(prim_opcode(idx), 0, 0, 0, 0);
+        return emit_word(buf, cap, out_len, w);
+      }
+    }
+
     if (ops[0].t == JOP_SYM && ops[0].s && is_primitive_symbol(ops[0].s)) {
       if (!g_allow_prim_extern) {
         snprintf(err, errlen, "CALL %s requires --allow-extern-prim", ops[0].s);
@@ -417,12 +500,17 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
     if (nops != 2) { snprintf(err, errlen, "CP expects 2 operands"); return 1; }
     int rs1 = -1;
     int rs2 = -1;
-    if (!is_reg_operand(&ops[0], &rs1) || !is_reg_operand(&ops[1], &rs2)) {
-      snprintf(err, errlen, "CP expects register operands");
+    if (!is_reg_operand(&ops[0], &rs1)) {
+      snprintf(err, errlen, "CP expects register lhs");
       return 1;
     }
-    uint32_t w = pack_word(0x03, (uint8_t)rs1, (uint8_t)rs1, (uint8_t)rs2, 0);
-    return emit_word(buf, cap, out_len, w);
+    if (is_reg_operand(&ops[1], &rs2)) {
+      uint32_t w = pack_word(0x03, (uint8_t)rs1, (uint8_t)rs1, (uint8_t)rs2, 0);
+      return emit_word(buf, cap, out_len, w);
+    }
+    int64_t imm = 0;
+    if (imm_from_operand(&ops[1], syms, &imm, err, errlen) != 0) return 1;
+    return emit_cpi(buf, cap, out_len, (uint8_t)rs1, imm, err, errlen);
   }
 
   struct { const char* name; uint8_t op; } arith[] = {
@@ -559,8 +647,12 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
       return emit_word(buf, cap, out_len, w);
     }
     if (ops[1].t == JOP_SYM && reg_id(ops[1].s) >= 0) {
-      snprintf(err, errlen, "LD reg, reg is not supported in opcode output");
-      return 1;
+      int rs = reg_id(ops[1].s);
+      if (rs < 0) {
+        snprintf(err, errlen, "LD source register invalid");
+        return 1;
+      }
+      return emit_mov(buf, cap, out_len, (uint8_t)rd, (uint8_t)rs);
     }
     if (ops[1].t == JOP_SYM && ops[1].s) {
       int64_t imm = 0;
@@ -676,8 +768,58 @@ static int dir_size(const record_t* r, char* err, size_t errlen, size_t* out_siz
 }
 
 static int instr_size_hint(const record_t* r, const symtab_t* syms, char* err, size_t errlen, size_t* out_size) {
-  (void)syms;
   if (!r || !r->m) return 1;
+
+  /* CALL zi_read/zi_write expands into MOV+MOV+PRIM (3 words). */
+  if (strcmp(r->m, "CALL") == 0 && r->nops == 1 && r->ops[0].t == JOP_SYM && r->ops[0].s) {
+    const char* callee = r->ops[0].s;
+    if (g_allow_prim_extern && (strcmp(callee, "zi_read") == 0 || strcmp(callee, "zi_write") == 0)) {
+      *out_size = 12;
+      return 0;
+    }
+    if (g_allow_prim_extern && (strcmp(callee, "zi_telemetry") == 0 || strcmp(callee, "zi_alloc") == 0 ||
+                               strcmp(callee, "zi_free") == 0 || strcmp(callee, "zi_ctl") == 0)) {
+      *out_size = 4;
+      return 0;
+    }
+    if (is_primitive_symbol(callee)) {
+      *out_size = 4;
+      return 0;
+    }
+  }
+
+  /* CP reg, imm can become CPI (1 word) or LD A,imm + CP (>=2 words). */
+  if (strcmp(r->m, "CP") == 0 && r->nops == 2) {
+    int lhs = -1;
+    int rhs = -1;
+    if (is_reg_operand(&r->ops[0], &lhs) && !is_reg_operand(&r->ops[1], &rhs)) {
+      int64_t imm = 0;
+      if (r->ops[1].t == JOP_NUM) {
+        imm = r->ops[1].n;
+      } else if (r->ops[1].t == JOP_SYM && r->ops[1].s && syms) {
+        if (symtab_get(syms, r->ops[1].s, &imm) != 0) {
+          /* unknown symbol in size hint; conservatively assume imm64 */
+          *out_size = 16;
+          return 0;
+        }
+      } else {
+        /* Conservatively assume worst-case (LD imm64 + CP). */
+        *out_size = 16;
+        return 0;
+      }
+      if (imm12_ok(imm)) {
+        *out_size = 4;
+        return 0;
+      }
+      if (imm >= INT32_MIN && imm <= INT32_MAX) {
+        *out_size = 8 + 4;
+        return 0;
+      }
+      *out_size = 12 + 4;
+      return 0;
+    }
+  }
+
   if (strcmp(r->m, "LD") == 0 && r->nops == 2) {
     if (r->ops[1].t == JOP_NUM) {
       int64_t imm = r->ops[1].n;

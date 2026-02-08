@@ -5,6 +5,7 @@
 #include <string.h>
 
 enum {
+  ZOP_MOV = 0x07,
   ZOP_ADD = 0x10,
   ZOP_SUB = 0x11,
   ZOP_AND = 0x17,
@@ -92,6 +93,17 @@ zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
     int is64 = 0;
     uint8_t opcode = 0;
     switch (op) {
+      case ZOP_MOV:
+        /* rd := rs1 */
+        if (rd_m != rs1_m) {
+          if (!emit_mov_rr(out, out_cap, &out_len, 1, rd_m, rs1_m)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+        }
+        continue;
       case ZOP_ADD:   is64 = 0; opcode = 0x01u; break;
       case ZOP_SUB:   is64 = 0; opcode = 0x29u; break;
       case ZOP_AND:   is64 = 0; opcode = 0x21u; break;

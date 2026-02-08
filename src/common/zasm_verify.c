@@ -232,6 +232,18 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
         off += 4;
         break;
 
+      case 0x07: /* MOV: rd := rs1 (rs2=0, imm12=0) */
+        if (imm12 != 0) return fail(ZASM_VERIFY_ERR_BAD_IMM, off, op);
+        if (rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        off += 4;
+        break;
+
+      case 0x08: /* CPI: compare rs1 against imm12 (rd==rs1, rs2=0) */
+        if (rd != rs1) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        if (rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        off += 4;
+        break;
+
       case 0x70: /* LD immediate (may have extension word(s)) */
         if (rs1 != 0 || rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
         if (imm12 == -2048) {
