@@ -2602,7 +2602,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (op == ZEM_OP_FILL) {
-      // FILL uses Lembeh ABI registers: HL=dst, A=byte, BC=len
+      // FILL uses zABI registers: HL=dst, A=byte, BC=len
       uint32_t dst = (uint32_t)regs.HL;
       uint32_t len = (uint32_t)regs.BC;
       uint8_t val = (uint8_t)(regs.A & 0xffu);
@@ -2619,7 +2619,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
     }
 
     if (op == ZEM_OP_LDIR) {
-      // LDIR uses Lembeh ABI registers: HL=src, DE=dst, BC=len
+      // LDIR uses zABI registers: HL=src, DE=dst, BC=len
       uint32_t src = (uint32_t)regs.HL;
       uint32_t dst = (uint32_t)regs.DE;
       uint32_t len = (uint32_t)regs.BC;

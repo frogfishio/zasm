@@ -1,2 +1,2 @@
-EXTERN "lembeh","alloc",_alloc
+EXTERN "env","zi_alloc",_alloc
 RET

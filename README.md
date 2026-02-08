@@ -162,7 +162,7 @@ The **libzxc** library provides embeddable C APIs for translating opcode streams
 zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                                  uint8_t* out, size_t out_cap,
                                  uint64_t mem_base, uint64_t mem_size,
-                                 const struct lembeh_host_vtable_t* host);
+                                 const struct zi_host_v1* host);
 
 zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
                                   uint8_t* out, size_t out_cap,

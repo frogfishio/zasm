@@ -2889,15 +2889,6 @@ int emit_wat_module(const recvec_t* recs, size_t mem_max_pages) {
   // lines that are only meaningful for native link steps. For WASM emission, ignore
   // exports that don't resolve within this module.
   for (size_t i=0;i<exports.n;i++) {
-    if (strcmp(exports.v[i].name, "lembeh_handle") == 0) {
-      fprintf(stderr, "zld: lembeh_handle is not supported; use main\n");
-      funcvec_free(&funcs);
-      datavec_free(&data);
-      gsymtab_free(&g);
-      exportvec_free(&exports);
-      importvec_free(&imports);
-      return 1;
-    }
     long tmp = 0;
     if (!gsymtab_get(&g, exports.v[i].name, &tmp) && !funcvec_has(&funcs, exports.v[i].name)) {
       exports.v[i].name = NULL;

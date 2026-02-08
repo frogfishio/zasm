@@ -74,7 +74,7 @@ wat2wasm build/out.wat -o build/out.wasm
 
 ## Run examples (local harness)
 
-`zrun` exists so we can test without depending on Lembeh being finished.
+`zrun` exists so we can test without depending on external runtimes.
 
 ```sh
 # compile

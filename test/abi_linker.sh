@@ -49,16 +49,6 @@ if "$zld_bin" --tool --verbose -o "$build_dir/legacy_primitives.wat" "$legacy_js
 fi
 rg -q "legacy primitive CALL _in is not supported" "$legacy_err"
 
-public_jsonl="$build_dir/public_lembeh_handle.jsonl"
-public_err="$build_dir/public_lembeh_handle.err.txt"
-"$zas_bin" --tool -o "$public_jsonl" "$asm_dir/public_lembeh_handle.asm"
-if "$zld_bin" --tool --verbose -o "$build_dir/public_lembeh_handle.wat" "$public_jsonl" 2> "$public_err"; then
-  echo "expected failure for PUBLIC lembeh_handle" >&2
-  exit 1
-fi
-rg -q "lembeh_handle is deprecated; use main" "$public_err"
-rg -q "mode=tool" "$public_err"
-
 extern_jsonl="$build_dir/extern_primitive.jsonl"
 extern_err="$build_dir/extern_primitive.err.txt"
 "$zas_bin" --tool -o "$extern_jsonl" "$asm_dir/extern_primitive.asm"
@@ -66,6 +56,6 @@ if "$zld_bin" --tool --verbose -o "$build_dir/extern_primitive.wat" "$extern_jso
   echo "expected failure for EXTERN primitive" >&2
   exit 1
 fi
-rg -q "EXTERN cannot define primitive _alloc" "$extern_err"
+rg -q "EXTERN zABI must use local name == field" "$extern_err"
 
 

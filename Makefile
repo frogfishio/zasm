@@ -40,8 +40,6 @@ ZXC_BUILD := $(BUILD)/zxc
 ZIR_BUILD := $(BUILD)/zir
 ZRUN_BUILD := $(BUILD)/zrun
 LOWER_BUILD := $(BUILD)/lower
-CLOAK_BUILD := $(BUILD)/cloak
-CLOAK_TEST_BUILD := $(BUILD)/cloak_tests
 ZEM_BUILD := $(BUILD)/zem
 IRCHECK_BUILD := $(BUILD)/ircheck
 ZASM_BIN_BUILD := $(BUILD)/zasm_bin
@@ -59,7 +57,7 @@ ifeq ($(UNAME_S),Darwin)
 else ifeq ($(UNAME_S),Linux)
   PLATFORM_OS := linux
   SHLIB_EXT := .so
-  SHLIB_LDFLAGS := -shared -Wl,-soname,liblembeh_cloak.so
+	SHLIB_LDFLAGS := -shared
   SHLIB_RPATH := -Wl,-rpath,'$$ORIGIN'
   SHLIB_LDLIBS := -ldl
 else
@@ -111,9 +109,9 @@ ZAS_GEN_CFLAGS := $(CFLAGS) -Wno-sign-compare -Wno-unused-function -Wno-unneeded
 	all clean zas zld zrun zlnt zop zxc zxc-lib zir lower dirs install install-devtools \
 	build pipeline bump bump-version dist dist-$(PLATFORM) zem \
 	ircheck \
-  zcloak zcloak-jit cloak-lib cloak-example cloak-tests zasm-bin-wrap \
-  test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi test-cloak-smoke test-cloak-abi test-cloak \
-	integrator-pack dist-integrator-pack integration-pack dist-integration-pack \
+	zasm-bin-wrap \
+	test test-all test-smoke test-asm test-runtime test-negative test-validation test-fuzz test-abi \
+	integration-pack dist-integration-pack \
   test-asm-suite \
   test-hello test-wat test-loop-wat test-loop \
   test-ld-regreg test-add-hl-imm test-data-directives test-compare-conds \
@@ -155,7 +153,7 @@ install-devtools: zasm-bin-wrap
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD) $(ZASM_RT_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD) $(ZASM_RT_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -534,14 +532,6 @@ test-asm-suite: test-asm test-runtime test-validation test-fuzz-zld
 
 test-abi: test-abi-linker test-abi-alloc test-abi-stream test-abi-log test-abi-entry test-abi-imports test-abi-ctl
 
-lembeh-host-stub:
-	$(CC) $(CFLAGS) -Idocs/integrator_pack/jit -Isrc/cloak -Iinclude tools/lembeh_host_stub.c \
-	  src/cloak/lembeh_cloak.c -o $(BUILD)/lembeh_host_stub
-
-native-runner:
-	$(CC) $(CFLAGS) -Idocs/integrator_pack/jit -Isrc/cloak -Iinclude tools/native_runner.c \
-	  src/cloak/lembeh_cloak.c bin/macos-arm64/libzxc.a -o $(BUILD)/native_runner
-
 # --- Smoke tests ---
 
 test-hello: zas
@@ -735,27 +725,6 @@ test-conform-zld: zld
 test-conform-ircheck: ircheck
 	test/conform_ircheck.sh
 
-test-cloak-smoke: zcloak zcloak-jit cloak-example test-cloak-jit
-
-test-cloak-jit: zcloak-jit
-	sh test/cloak_jit_smoke.sh
-	sh test/cloak_jit_negative.sh
-	test/cloak_smoke.sh
-
-test-cloak-abi: zcloak cloak-tests
-	test/cloak_abi_alloc.sh
-	test/cloak_abi_stream.sh
-	test/cloak_abi_log.sh
-	test/cloak_abi_ctl.sh
-
-test-cloak: test-cloak-smoke test-cloak-abi
-
-integrator-pack:
-	./docs/integrator_pack/pack.sh $(CURDIR)/integrator_pack
-
-dist-integrator-pack:
-	./docs/integrator_pack/pack.sh $(CURDIR)/dist/integrator_pack
-
 
 integration-pack: lower zem zld ircheck
 	./docs/integration_pack/pack.sh $(CURDIR)/integration_pack $(PLATFORM)
@@ -765,45 +734,6 @@ dist-integration-pack: lower zem zld ircheck
 
 clean:
 	rm -rf $(BUILD) $(BIN_ROOT)
-
-
-# ---- cloak (native C host) ----
-
-CLOAK_CPPFLAGS := -Isrc/cloak -Iinclude
-CLOAK_CFLAGS := $(CFLAGS) -fPIC
-CLOAK_LIB := $(BIN)/liblembeh_cloak$(SHLIB_EXT)
-ZCLOAK_OBJ := $(CLOAK_BUILD)/main.o $(CLOAK_BUILD)/host.o
-ZCLOAK_JIT_OBJ := $(CLOAK_BUILD)/jit_main.o $(CLOAK_BUILD)/host.o
-CLOAK_OBJ := $(CLOAK_BUILD)/lembeh_cloak.o
-CLOAK_EXAMPLE := $(CLOAK_BUILD)/echo_guest$(SHLIB_EXT)
-CLOAK_TEST_SRCS := $(wildcard test/cloak_guests/*.c)
-CLOAK_TEST_LIBS := $(patsubst test/cloak_guests/%.c,$(CLOAK_TEST_BUILD)/%$(SHLIB_EXT),$(CLOAK_TEST_SRCS))
-
-$(CLOAK_BUILD)/%.o: src/cloak/%.c | dirs
-	$(CC) $(CLOAK_CPPFLAGS) $(CLOAK_CFLAGS) -c $< -o $@
-
-cloak-lib: $(CLOAK_LIB)
-
-$(CLOAK_LIB): $(CLOAK_OBJ) | dirs
-	$(CC) $(CLOAK_CFLAGS) $(SHLIB_LDFLAGS) $^ -o $@
-
-zcloak: cloak-lib $(ZCLOAK_OBJ) | dirs
-	$(CC) $(CFLAGS) $(ZCLOAK_OBJ) -L$(BIN) -llembeh_cloak $(SHLIB_RPATH) $(SHLIB_LDLIBS) -o $(BIN)/zcloak
-	ln -sf $(PLATFORM)/zcloak $(BIN_ROOT)/zcloak
-
-zcloak-jit: cloak-lib zxc-lib $(ZCLOAK_JIT_OBJ) | dirs
-	$(CC) $(CFLAGS) $(ZCLOAK_JIT_OBJ) -L$(BIN) -llembeh_cloak -lzxc $(SHLIB_RPATH) $(SHLIB_LDLIBS) -o $(BIN)/zcloak-jit
-	ln -sf $(PLATFORM)/zcloak-jit $(BIN_ROOT)/zcloak-jit
-
-cloak-example: $(CLOAK_EXAMPLE)
-
-$(CLOAK_EXAMPLE): examples/cloak/echo_guest.c cloak-lib | dirs
-	$(CC) $(CLOAK_CFLAGS) -Isrc/cloak $(SHLIB_LDFLAGS) $< -L$(BIN) -llembeh_cloak -o $@
-
-cloak-tests: $(CLOAK_TEST_LIBS)
-
-$(CLOAK_TEST_BUILD)/%$(SHLIB_EXT): test/cloak_guests/%.c cloak-lib | dirs
-	$(CC) $(CLOAK_CFLAGS) -Isrc/cloak $(SHLIB_LDFLAGS) $< -L$(BIN) -llembeh_cloak -o $@
 
 
 # ---- zld (IR -> WAT) ----
@@ -1133,7 +1063,7 @@ zlnt: $(ZLNT_OBJ) | dirs
 
 .PHONY: zlnt
 
-# ---- zrun (local Lembeh ABI test harness) ----
+# ---- zrun (local Zingcore/zABI test harness) ----
 
 ZRUN_SRC := \
   src/zrun/main.c \

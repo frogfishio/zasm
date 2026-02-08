@@ -5,17 +5,17 @@
 */
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 /*
- * Extracted reactor host capability logic from cloak/src/cap/reactor (host +
- * lembeh helpers) and the `_ctl` open path in cloak/host.c.
+ * Extracted reactor host capability logic from an older host implementation and
+ * the `_ctl` open path.
  *
  * This file captures:
  *   - reactor_frame_t / reactor_host_state_t definitions
  *   - frame validator/state machine (reactor_host_handle)
  *   - frame encoder (reactor_encode_frame)
- *   - lembeh-backed sender/poller helpers (reactor_lembeh_*)
+ *   - host I/O sender/poller helpers (reactor_io_*)
  *   - `_ctl` helper to open the reactor cap (kind="reactor", name="default")
  *
- * Note: This is an extract for ABI work; it is not wired into zingcore.c.
+ * Note: This is an extract for ABI work; it is not wired into the runtime.
  */
 
 #include <stddef.h>
@@ -351,17 +351,17 @@ size_t reactor_encode_frame(uint8_t* buf, size_t cap,
   return total;
 }
 
-/* ---------------- reactor_lembeh helpers (simplified extract) ---------------- */
+/* ---------------- reactor_io helpers (simplified extract) ---------------- */
 typedef struct {
   int32_t (*req_read)(int32_t, int32_t, int32_t);
   int32_t (*res_write)(int32_t, int32_t, int32_t);
   void (*res_end)(int32_t);
-} reactor_lembeh_host_vtable_t;
+} reactor_io_host_vtable_t;
 
 typedef struct {
   const uint8_t* base;
   size_t cap;
-} reactor_lembeh_memory_t;
+} reactor_io_memory_t;
 
 typedef int (*reactor_on_frame_fn)(void* user, const reactor_frame_t* f);
 typedef int (*reactor_on_log_fn)(void* user, const reactor_frame_t* f,
@@ -383,8 +383,8 @@ typedef struct {
 } reactor_poll_status_t;
 
 typedef struct {
-  const reactor_lembeh_host_vtable_t* host;
-  const reactor_lembeh_memory_t* mem;
+  const reactor_io_host_vtable_t* host;
+  const reactor_io_memory_t* mem;
   const reactor_handlers_t* handlers;
   int32_t req_handle;
   int32_t res_handle;
@@ -395,9 +395,9 @@ typedef struct {
   reactor_host_state_t rx_state; /* tracks guest->host sequencing */
   uint64_t tx_seq;               /* host->guest seq */
   int backpressure;              /* latched backpressure signal */
-} reactor_lembeh_ctx_t;
+} reactor_io_ctx_t;
 
-static int reactor_lembeh_send(reactor_lembeh_ctx_t* ctx,
+static int reactor_io_send(reactor_io_ctx_t* ctx,
                                uint32_t kind,
                                const uint8_t* id, uint32_t id_len,
                                const uint8_t* rid, uint32_t rid_len,
@@ -415,29 +415,29 @@ static int reactor_lembeh_send(reactor_lembeh_ctx_t* ctx,
   return 0;
 }
 
-int reactor_lembeh_send_ack(reactor_lembeh_ctx_t* ctx,
+int reactor_io_send_ack(reactor_io_ctx_t* ctx,
                             const reactor_frame_t* cmd,
                             const uint8_t* payload,
                             uint32_t payload_len) {
   if (!ctx || !cmd) return -1;
-  return reactor_lembeh_send(ctx, 3 /* ack */,
+  return reactor_io_send(ctx, 3 /* ack */,
                              cmd->id, cmd->id_len,
                              cmd->rid, cmd->rid_len,
                              payload, payload_len);
 }
 
-int reactor_lembeh_send_err(reactor_lembeh_ctx_t* ctx,
+int reactor_io_send_err(reactor_io_ctx_t* ctx,
                             const reactor_frame_t* cmd,
                             const uint8_t* payload,
                             uint32_t payload_len) {
   if (!ctx || !cmd) return -1;
-  return reactor_lembeh_send(ctx, 5 /* err */,
+  return reactor_io_send(ctx, 5 /* err */,
                              cmd->id, cmd->id_len,
                              cmd->rid, cmd->rid_len,
                              payload, payload_len);
 }
 
-int reactor_lembeh_poll(reactor_lembeh_ctx_t* ctx,
+int reactor_io_poll(reactor_io_ctx_t* ctx,
                         reactor_frame_t* out_frame,
                         reactor_action_t* out_action,
                         reactor_err_t* out_err,
@@ -496,7 +496,7 @@ int reactor_lembeh_poll(reactor_lembeh_ctx_t* ctx,
   return 1;
 }
 
-/* ---------------- ctl open helper (from cloak/host.c) ---------------- */
+/* ---------------- ctl open helper ---------------- */
 static int ctl_write_error(uint8_t* out, size_t cap, uint16_t op, uint32_t rid,
                            const char* trace, const char* msg) {
   uint32_t trace_len = (uint32_t)strlen(trace);

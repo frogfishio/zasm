@@ -13,7 +13,9 @@ emits machine code bytes suitable for JIT use. Library API details live in
 Accepted input formats:
 
 - Raw opcode bytes (length must be a multiple of 4).
-- `.zasm.bin` container (v1), as defined in `docs/spec/zasm_bin.md`.
+- `.zasm.bin` container (v2), as defined in `docs/spec/zasm_bin.md`.
+
+Note: `.zasm.bin` v1 is retired and preserved at `docs/spec/zasm_bin_v1.md`.
 
 If the input starts with the `ZASB` magic, it is treated as a container unless
 `--container` is omitted and the header is invalid (which yields an error).

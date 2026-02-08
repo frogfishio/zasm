@@ -38,11 +38,9 @@ zxc --container -o output.native.bin output.zasm.bin
   cloak runtimes). Without the flag, such `EXTERN` directives are rejected.
 - Only a subset of IR operand forms map cleanly to opcode encodings. Unsupported
   mnemonics or operand shapes are rejected with an error.
-- The `.zasm.bin` payload emitted by `zop` can include non-instruction bytes
-  (e.g., `.DB/.DW` data). `zxc --container` now truncates the opcode stream to
-  the nearest 4-byte boundary for translation and leaves the trailing bytes alone
-  so they remain available as data. Padding to a multiple of 4 is still
-  recommended for clean diagnostics, but it is no longer required.
+- `.zasm.bin` v2 containers (emitted by `zop --container`) contain a `CODE`
+  section whose length MUST be a multiple of 4 bytes (a whole-number of opcode
+  words). If you insert `bytes` records, keep the overall stream aligned.
 
 ## Exit codes
 

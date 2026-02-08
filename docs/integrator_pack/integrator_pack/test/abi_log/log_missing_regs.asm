@@ -1,2 +1,0 @@
-CALL _log
-RET

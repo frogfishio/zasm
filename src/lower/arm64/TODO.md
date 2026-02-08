@@ -7,7 +7,7 @@ Deliver a feature-complete JSON IR (`zasm-v1.0`) → macOS arm64 lowerer that em
 - [done] IR model: Extend `ir.h` to represent all schema constructs (labels, instr + typed ops incl. mem/base, PUBLIC, EXTERN module/field/local, DB/DW/RESB, STR/EQU expansions, optional names, loc for diagnostics).
 - [done] Parser: Replace `json_ir.c` with a schema-faithful parser that enforces `ir: "zasm-v1.0"`, validates operand/directive shapes, expands STR/EQU into bytes/len symbols, collects EXTERNs, and rejects unknown fields with line-aware errors.
 - [done] Codegen backend: Implement `codegen.h/.c` (arm64) to lower zasm mnemonics to ARM64 with correct calling convention, prologue/epilogue, symbol table for code/data, data layout for DB/DW/RESB/STR/EQU, and reloc production for all symbol references (text/data, externs).
-- Mach-O writer: Finish `main` to emit text/data sections with alignment, symbols for PUBLIC exports + locals + EXTERN imports (no lembeh-specific names), all needed ARM64 reloc types (text and data), and deterministic output.
+- Mach-O writer: Finish `main` to emit text/data sections with alignment, symbols for PUBLIC exports + locals + EXTERN imports (no legacy-specific names), all needed ARM64 reloc types (text and data), and deterministic output.
 - Tooling: Add build target(s) to produce the lowerer binary; ensure deterministic `ar` invocation; document usage in `src/lower/README.md`.
 - Tests: Add fixtures covering instrs, PUBLIC/EXTERN, data directives, relocations, and error cases; include a smoke link test that compiles the produced `.o`/`.a` into a stub (if permissible).
 
