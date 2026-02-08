@@ -1757,7 +1757,7 @@ int zem_exec_program(const recvec_t *recs, zem_buf_t *mem,
       if (should_break) {
         if (debug_events) {
           zem_dbg_emit_stop_event(stderr, stop_reason, recs, pc_labels, pc,
-                                 pc_srcs, stdin_source_name, &regs, stack, sp,
+                                 pc_srcs, NULL, stdin_source_name, &regs, stack, sp,
                                  &regprov, stop_bp_hit, stop_bp_pc,
                                  stop_bp_cond, stop_bp_cond_ok,
                                  stop_bp_cond_result, &breakpoints, &watches,

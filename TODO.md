@@ -32,15 +32,40 @@
   - [x] Ensure `zxc` ingests raw opcode bytes as an input format (non-container)
   - [x] Enforce W^X code memory discipline in the runtime (no executable+writable at once)
   - [x] Define a target selection API for translation (arm64 first; x86_64 next)
+  - [ ] Contract + measurement baseline (powerful but nimble)
+    - [ ] Publish VM/JIT contract doc as normative runtime boundary (`docs/spec/vm_jit_contract.md`)
+    - [ ] Publish VM/JIT roadmap with measurable targets (`docs/spec/vm_jit_roadmap.md`)
+    - [ ] Define a benchmark corpus + reporting format (startup, throughput, RSS)
+    - [ ] Add CI target to run benchmarks and record baselines (tolerant thresholds)
+  - [ ] Diagnostics + trap model (structured, stable)
+    - [ ] Define stable trap/error codes (decode/verify, OOB, div0, unsupported-op, ABI failure, OOM/fuel)
+    - [ ] Extend runtime diagnostics to include trap category + best-effort PC/offset
+    - [ ] Ensure all failures are fail-closed (no host crashes, no UB)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
+    - [ ] Define cache key precisely (target arch + any codegen-affecting policy bits)
+    - [ ] Implement engine-owned cache (reuse translated code across instances)
+    - [ ] Add max cache size / eviction policy (simple LRU or cap-by-bytes)
   - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)
-  - [ ] Add differential test harness: run the same module under `zem` and under the JIT; compare rc/stdout/stderr
+    - [ ] Plumb trap reporting from translated code back to runtime API (no printf-only failures)
+    - [ ] Add negative tests for each trap category (including edge-case pointer/len ABI misuse)
+  - [ ] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr
+    - [ ] Add a tiny `zrt` CLI runner (executes `.zasm.bin` via `zasm_rt`) for test harness usage
+    - [ ] Compare against a reference runner (choose one):
+      - [ ] WASM path: `zrun` (behavioral oracle for ABI-visible semantics)
+      - [ ] Interpreter path: `zem` (only where it matches runtime semantics; do not treat as VM design source)
+    - [ ] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures
+    - [ ] Add minimization hook (optional) for shrinking divergent cases
 
 - [ ] Track 4 — Nanoservice hardening (multi-tenant runner ready)
   - [ ] Resource controls: instruction budget/fuel (deterministic accounting) + memory cap enforcement
   - [ ] DoS defenses: max module size, max code size, max sections/exports/imports; fail fast
   - [ ] Observability: stable lifecycle events + counters (start/stop/trap) routed via telemetry
   - [ ] Abuse cases: hostile pointer/len inputs to zABI calls never crash host; add regression tests
+
+- [ ] VM/JIT competitive baseline (powerful but nimble)
+  - [ ] Set and track targets (startup <10ms small modules; overhead <10MB; deterministic-by-default)
+  - [ ] Ensure baseline JIT is within a practical factor of Wasmtime/V8 on a small published microbench suite
+  - [ ] Keep feature creep contained: new features require a measurable win or a safety guarantee
 
 - [ ] Track 5 — Multi-arch expansion
   - [ ] Add x86_64 JIT backend path (reuse existing `libzxc` x86_64)
