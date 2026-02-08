@@ -90,6 +90,9 @@ zasm_bin_err_t zasm_bin_parse_v2_diag(const uint8_t* in, size_t in_len,
   const uint8_t* code = NULL;
   uint32_t code_len = 0;
 
+  const uint8_t* data = NULL;
+  uint32_t data_len = 0;
+
   int has_impt = 0;
   uint32_t prim_mask = 0;
 
@@ -118,6 +121,13 @@ zasm_bin_err_t zasm_bin_parse_v2_diag(const uint8_t* in, size_t in_len,
       code_len = len;
     }
 
+    if (tag_eq4(ent, "DATA")) {
+      if (data) return diag_ret(diag, ZASM_BIN_ERR_DUP_DATA, dir_off + i * 20u, ent);
+      /* DATA payload is validated by the runtime (format + bounds + overlap). */
+      data = in + off;
+      data_len = len;
+    }
+
     if (tag_eq4(ent, "IMPT")) {
       /* Payload: u32 prim_mask, u32 reserved(0) */
       if (len != 8) return diag_ret(diag, ZASM_BIN_ERR_BAD_IMPT, dir_off + i * 20u + 8u, ent);
@@ -134,6 +144,9 @@ zasm_bin_err_t zasm_bin_parse_v2_diag(const uint8_t* in, size_t in_len,
 
   out->code = code;
   out->code_len = (size_t)code_len;
+  out->data = data;
+  out->data_len = (size_t)data_len;
+  out->has_data = (data != NULL);
   out->file_len = file_len;
   out->dir_off = dir_off;
   out->dir_count = dir_count;
@@ -159,8 +172,10 @@ const char* zasm_bin_err_str(zasm_bin_err_t err) {
     case ZASM_BIN_ERR_SECTION_RANGE: return "invalid section range";
     case ZASM_BIN_ERR_BAD_IMPT: return "invalid IMPT section";
     case ZASM_BIN_ERR_DUP_CODE: return "duplicate CODE section";
+    case ZASM_BIN_ERR_DUP_DATA: return "duplicate DATA section";
     case ZASM_BIN_ERR_MISSING_CODE: return "missing CODE section";
     case ZASM_BIN_ERR_BAD_CODE_LEN: return "invalid CODE length";
+    case ZASM_BIN_ERR_BAD_DATA: return "invalid DATA section";
     default: return "unknown error";
   }
 }

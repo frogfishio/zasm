@@ -344,7 +344,8 @@ static int emit_bounds_check(uint8_t* out, size_t out_cap, size_t* out_len,
 }
 
 static int emit_bounds_trailer(uint8_t* out, size_t out_cap, size_t* out_len) {
-  if (!emit_u32(out, out_cap, out_len, enc_b(1))) return 0;
+  /* Skip over the following BRK (one instruction). */
+  if (!emit_u32(out, out_cap, out_len, enc_b(2))) return 0;
   return emit_u32(out, out_cap, out_len, enc_brk());
 }
 
@@ -587,7 +588,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
       sz = 4;
       break;
     case ZOP_RET:
-      sz = 16; /* mov lr,saved; ldr x19; add sp; ret */
+      sz = 20; /* ldr x19; ldr x29; ldr x30; add sp; ret */
       break;
     case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
     case 0x56: case 0x57: case 0x58: case 0x59:
@@ -1081,6 +1082,14 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
       }
       case ZOP_CP: {
         enc = enc_sub_reg(0, ZXC_CMP, rs1_m, rs2_m);
+        break;
+      }
+      case ZOP_INC: {
+        enc = enc_add_imm(0, rd_m, rs1_m, 1);
+        break;
+      }
+      case ZOP_DEC: {
+        enc = enc_sub_imm(0, rd_m, rs1_m, 1);
         break;
       }
       case ZOP_MOV: {

@@ -6,6 +6,8 @@
   - [x] Define `.zasm.bin` v2 (sectioned container) as the ship-able module format (see `docs/spec/zasm_bin.md`)
   - [x] Archive/retire `.zasm.bin` v1 spec (`docs/spec/zasm_bin_v1.md`)
   - [x] Update `zop --container` to emit `.zasm.bin` v2 (at minimum: header+dir+`CODE`)
+  - [x] Teach the parser/runtime to parse + apply optional `DATA` section initializers
+  - [ ] Teach the `zir | zop --container` path to emit optional `DATA` (keep `CODE.len % 4 == 0`)
   - [x] Update `zxc` to parse `.zasm.bin` v2 by extracting `CODE`
   - [x] Align tool docs to v2 (`docs/tools/zop.md`, `docs/tools/zir.md`, `docs/spec/zxc.md`, `docs/tools/zxc_lib.md`)
   - [ ] Decide v1 support policy (dev-only vs hard reject) and enforce consistently across tools
@@ -48,13 +50,15 @@
   - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)
     - [ ] Plumb trap reporting from translated code back to runtime API (no printf-only failures)
     - [ ] Add negative tests for each trap category (including edge-case pointer/len ABI misuse)
-  - [ ] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr
-    - [ ] Add a tiny `zrt` CLI runner (executes `.zasm.bin` via `zasm_rt`) for test harness usage
+  - [x] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr
+    - [x] Add a tiny `zrt` CLI runner (executes `.zasm.bin` via `zasm_rt`) for test harness usage
     - [ ] Compare against a reference runner (choose one):
-      - [ ] WASM path: `zrun` (behavioral oracle for ABI-visible semantics)
+      - [x] WASM path: `zrun` (behavioral oracle for ABI-visible semantics)
       - [ ] Interpreter path: `zem` (only where it matches runtime semantics; do not treat as VM design source)
-    - [ ] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures
+    - [ ] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures (currently: cat + alloc; hello pending DATA emission)
     - [ ] Add minimization hook (optional) for shrinking divergent cases
+
+  - [x] Fix arm64 bounds-check trailer (was trapping unconditionally due to `b +1; brk` sequence)
 
 - [ ] Track 4 — Nanoservice hardening (multi-tenant runner ready)
   - [ ] Resource controls: instruction budget/fuel (deterministic accounting) + memory cap enforcement

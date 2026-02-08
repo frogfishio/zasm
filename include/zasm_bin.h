@@ -28,8 +28,10 @@ typedef enum zasm_bin_err {
   ZASM_BIN_ERR_SECTION_RANGE,
   ZASM_BIN_ERR_BAD_IMPT,
   ZASM_BIN_ERR_DUP_CODE,
+  ZASM_BIN_ERR_DUP_DATA,
   ZASM_BIN_ERR_MISSING_CODE,
-  ZASM_BIN_ERR_BAD_CODE_LEN
+  ZASM_BIN_ERR_BAD_CODE_LEN,
+  ZASM_BIN_ERR_BAD_DATA
 } zasm_bin_err_t;
 
 typedef struct zasm_bin_caps {
@@ -45,6 +47,12 @@ extern const zasm_bin_caps_t zasm_bin_default_caps;
 typedef struct zasm_bin_v2 {
   const uint8_t* code;
   size_t code_len;
+
+  /* Optional memory init data (DATA section payload). */
+  const uint8_t* data;
+  size_t data_len;
+  int has_data;
+
   uint32_t file_len;
   uint32_t dir_off;
   uint32_t dir_count;

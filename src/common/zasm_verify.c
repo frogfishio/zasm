@@ -208,6 +208,14 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
         off += 4;
         break;
 
+      case 0x05: /* INC: rd := rd + 1 (rd==rs1, rs2==0, imm12==0) */
+      case 0x06: /* DEC: rd := rd - 1 (rd==rs1, rs2==0, imm12==0) */
+        if (imm12 != 0) return fail(ZASM_VERIFY_ERR_BAD_IMM, off, op);
+        if (rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        if (rd != rs1) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        off += 4;
+        break;
+
       case 0x02: /* JR (cond in rs1, pc-rel imm12 words) */
         if (rd != 0 || rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
         if (rs1 > 10) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);

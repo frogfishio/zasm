@@ -210,6 +210,15 @@ static int symtab_get(const symtab_t* t, const char* name, int64_t* out) {
   return 0;
 }
 
+static int symtab_get_any(const symtab_t* a, const symtab_t* b, const symtab_t* c,
+                          const char* name, int64_t* out) {
+  if (!name) return 1;
+  if (a && symtab_get(a, name, out) == 0) return 0;
+  if (b && symtab_get(b, name, out) == 0) return 0;
+  if (c && symtab_get(c, name, out) == 0) return 0;
+  return 1;
+}
+
 static int reg_id(const char* s) {
   if (strcmp(s, "HL") == 0) return 0;
   if (strcmp(s, "DE") == 0) return 1;
@@ -227,7 +236,11 @@ static int is_reg_operand(const operand_t* op, int* out_reg) {
   return 1;
 }
 
-static int imm_from_operand(const operand_t* op, const symtab_t* syms, int64_t* out, char* err, size_t errlen) {
+static int imm_from_operand_any(const operand_t* op,
+                                const symtab_t* const_syms,
+                                const symtab_t* data_syms,
+                                const symtab_t* code_syms,
+                                int64_t* out, char* err, size_t errlen) {
   if (!op) return 1;
   if (op->t == JOP_NUM) {
     *out = op->n;
@@ -238,7 +251,7 @@ static int imm_from_operand(const operand_t* op, const symtab_t* syms, int64_t* 
       snprintf(err, errlen, "unexpected register operand");
       return 1;
     }
-    if (symtab_get(syms, op->s, out) != 0) {
+    if (symtab_get_any(const_syms, data_syms, code_syms, op->s, out) != 0) {
       snprintf(err, errlen, "unknown symbol: %s", op->s);
       return 1;
     }
@@ -376,7 +389,11 @@ static int emit_cpi(uint8_t* buf, size_t cap, size_t* len, uint8_t rs, int64_t i
   uint32_t w = pack_word(0x03, rs, rs, (uint8_t)2, 0);
   return emit_word(buf, cap, len, w);
 }
-static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off,
+static int encode_instr(const record_t* r,
+                        const symtab_t* const_syms,
+                        const symtab_t* data_syms,
+                        const symtab_t* code_syms,
+                        size_t insn_off,
                         uint8_t* buf, size_t cap, size_t* out_len,
                         char* err, size_t errlen) {
   if (!r || !r->m) {
@@ -390,6 +407,15 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
   if (strcmp(m, "RET") == 0) {
     if (nops != 0) { snprintf(err, errlen, "RET takes no operands"); return 1; }
     uint32_t w = pack_word(0x01, 0, 0, 0, 0);
+    return emit_word(buf, cap, out_len, w);
+  }
+
+  if (strcmp(m, "INC") == 0 || strcmp(m, "DEC") == 0) {
+    if (nops != 1) { snprintf(err, errlen, "%s expects 1 operand", m); return 1; }
+    int r0 = -1;
+    if (!is_reg_operand(&ops[0], &r0)) { snprintf(err, errlen, "%s expects register operand", m); return 1; }
+    uint8_t op = (strcmp(m, "INC") == 0) ? 0x05 : 0x06;
+    uint32_t w = pack_word(op, (uint8_t)r0, (uint8_t)r0, 0, 0);
     return emit_word(buf, cap, out_len, w);
   }
   if (strcmp(m, "CALL") == 0) {
@@ -458,7 +484,7 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
       return emit_word(buf, cap, out_len, w);
     }
     int64_t target = 0;
-    if (label_from_operand(&ops[0], syms, &target, err, errlen) != 0) return 1;
+    if (label_from_operand(&ops[0], code_syms, &target, err, errlen) != 0) return 1;
     int64_t delta = target - (int64_t)insn_off;
     if ((delta % 4) != 0) { snprintf(err, errlen, "CALL target not 4-byte aligned"); return 1; }
     int64_t imm12 = delta / 4;
@@ -470,11 +496,11 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
     int cond = 0;
     int64_t target = 0;
     if (nops == 1) {
-      if (label_from_operand(&ops[0], syms, &target, err, errlen) != 0) return 1;
+      if (label_from_operand(&ops[0], code_syms, &target, err, errlen) != 0) return 1;
     } else if (nops == 2) {
       if (ops[0].t != JOP_SYM || !ops[0].s) { snprintf(err, errlen, "JR condition must be a symbol"); return 1; }
       if (cond_code(ops[0].s, &cond) != 0) { snprintf(err, errlen, "unknown JR condition: %s", ops[0].s); return 1; }
-      if (label_from_operand(&ops[1], syms, &target, err, errlen) != 0) return 1;
+      if (label_from_operand(&ops[1], code_syms, &target, err, errlen) != 0) return 1;
     } else {
       snprintf(err, errlen, "JR expects 1 or 2 operands");
       return 1;
@@ -509,7 +535,7 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
       return emit_word(buf, cap, out_len, w);
     }
     int64_t imm = 0;
-    if (imm_from_operand(&ops[1], syms, &imm, err, errlen) != 0) return 1;
+    if (imm_from_operand_any(&ops[1], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
     return emit_cpi(buf, cap, out_len, (uint8_t)rs1, imm, err, errlen);
   }
 
@@ -558,13 +584,13 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
       if (nops == 2) {
         if (!is_reg_operand(&ops[0], &rd)) { snprintf(err, errlen, "%s expects register destination", m); return 1; }
         rs1 = rd;
-        if (imm_from_operand(&ops[1], syms, &imm, err, errlen) != 0) return 1;
+        if (imm_from_operand_any(&ops[1], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
       } else {
         if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs1)) {
           snprintf(err, errlen, "%s expects register operands", m);
           return 1;
         }
-        if (imm_from_operand(&ops[2], syms, &imm, err, errlen) != 0) return 1;
+        if (imm_from_operand_any(&ops[2], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
       }
       if (!imm12_ok(imm)) { snprintf(err, errlen, "%s shift out of range", m); return 1; }
       uint32_t w = pack_word(shifts[i].op, (uint8_t)rd, (uint8_t)rs1, (uint8_t)rs1, (int32_t)imm);
@@ -637,6 +663,19 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
 
   if (strcmp(m, "LD") == 0) {
     if (nops != 2) { snprintf(err, errlen, "LD expects 2 operands"); return 1; }
+
+    /* Store form: LD (base), src */
+    if (ops[0].t == JOP_MEM) {
+      if (!ops[0].s) { snprintf(err, errlen, "LD store expects memory base"); return 1; }
+      int base = reg_id(ops[0].s);
+      if (base < 0) { snprintf(err, errlen, "LD store memory base must be a register"); return 1; }
+      int rs = -1;
+      if (!is_reg_operand(&ops[1], &rs)) { snprintf(err, errlen, "LD store expects register source"); return 1; }
+      uint8_t op = (rs == 2) ? 0x80 : 0x84; /* A -> ST8, otherwise default to ST32 */
+      uint32_t w = pack_word(op, (uint8_t)rs, (uint8_t)base, (uint8_t)rs, 0);
+      return emit_word(buf, cap, out_len, w);
+    }
+
     int rd = -1;
     if (!is_reg_operand(&ops[0], &rd)) { snprintf(err, errlen, "LD expects register destination"); return 1; }
     if (ops[1].t == JOP_MEM) {
@@ -656,11 +695,11 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
     }
     if (ops[1].t == JOP_SYM && ops[1].s) {
       int64_t imm = 0;
-      if (imm_from_operand(&ops[1], syms, &imm, err, errlen) != 0) return 1;
+      if (imm_from_operand_any(&ops[1], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
       return emit_ld_imm64(buf, cap, out_len, (uint8_t)rd, imm);
     }
     int64_t imm = 0;
-    if (imm_from_operand(&ops[1], syms, &imm, err, errlen) != 0) return 1;
+    if (imm_from_operand_any(&ops[1], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
     return emit_ld_imm(buf, cap, out_len, (uint8_t)rd, imm, err, errlen);
   }
 
@@ -668,30 +707,42 @@ static int encode_instr(const record_t* r, const symtab_t* syms, size_t insn_off
   return 1;
 }
 
-static void emit_bytes_record(FILE* out, const uint8_t* buf, size_t len, int line) {
+static void emit_bytes_record(FILE* out, const uint8_t* buf, size_t len,
+                              int line, const char* sec,
+                              size_t dst_off, int has_dst) {
   if (len == 0) return;
   fprintf(out, "{\"ir\":\"zasm-opcodes-v1\",\"k\":\"bytes\",\"hex\":\"");
   for (size_t i = 0; i < len; i++) fprintf(out, "%02x", buf[i]);
   fprintf(out, "\"");
+  if (sec && *sec) {
+    fprintf(out, ",\"sec\":");
+    json_print_str(out, sec);
+  }
+  if (has_dst) {
+    fprintf(out, ",\"dst\":%zu", dst_off);
+  }
   if (line > 0) fprintf(out, ",\"loc\":{\"line\":%d}", line);
   fprintf(out, "}\n");
 }
 
-static void emit_zero_bytes(FILE* out, size_t count, int line) {
+static void emit_zero_bytes(FILE* out, size_t dst_off, size_t count, int line) {
   if (count == 0) return;
   enum { kChunk = 1024 };
   uint8_t zeros[kChunk];
   memset(zeros, 0, sizeof(zeros));
   while (count > 0) {
     size_t chunk = count > kChunk ? kChunk : count;
-    emit_bytes_record(out, zeros, chunk, line);
+    emit_bytes_record(out, zeros, chunk, line, "DATA", dst_off, 1);
     count -= chunk;
+    dst_off += chunk;
   }
 }
 
 typedef struct {
-  size_t off;
-  size_t size;
+  size_t code_off;
+  size_t code_size;
+  size_t data_off;
+  size_t data_size;
 } recinfo_t;
 
 static int dir_size(const record_t* r, char* err, size_t errlen, size_t* out_size) {
@@ -715,7 +766,8 @@ static int dir_size(const record_t* r, char* err, size_t errlen, size_t* out_siz
   }
   if (strcmp(d, "DW") == 0) {
     if (r->nargs != 1) { snprintf(err, errlen, "DW expects 1 arg"); return 1; }
-    *out_size = 2;
+    /* Convention in examples: labeled DW defines a constant (e.g. msg_len: DW 24). */
+    *out_size = r->name ? 0 : 2;
     return 0;
   }
   if (strcmp(d, "RESB") == 0) {
@@ -767,7 +819,11 @@ static int dir_size(const record_t* r, char* err, size_t errlen, size_t* out_siz
   return 1;
 }
 
-static int instr_size_hint(const record_t* r, const symtab_t* syms, char* err, size_t errlen, size_t* out_size) {
+static int instr_size_hint(const record_t* r,
+                           const symtab_t* const_syms,
+                           const symtab_t* data_syms,
+                           const symtab_t* code_syms,
+                           char* err, size_t errlen, size_t* out_size) {
   if (!r || !r->m) return 1;
 
   /* CALL zi_read/zi_write expands into MOV+MOV+PRIM (3 words). */
@@ -796,8 +852,8 @@ static int instr_size_hint(const record_t* r, const symtab_t* syms, char* err, s
       int64_t imm = 0;
       if (r->ops[1].t == JOP_NUM) {
         imm = r->ops[1].n;
-      } else if (r->ops[1].t == JOP_SYM && r->ops[1].s && syms) {
-        if (symtab_get(syms, r->ops[1].s, &imm) != 0) {
+      } else if (r->ops[1].t == JOP_SYM && r->ops[1].s) {
+        if (symtab_get_any(const_syms, data_syms, code_syms, r->ops[1].s, &imm) != 0) {
           /* unknown symbol in size hint; conservatively assume imm64 */
           *out_size = 16;
           return 0;
@@ -983,63 +1039,103 @@ int main(int argc, char** argv) {
     return 0;
   }
 
-  symtab_t syms;
-  symtab_init(&syms);
+  symtab_t const_syms;
+  symtab_t data_syms;
+  symtab_t code_syms;
+  symtab_init(&const_syms);
+  symtab_init(&data_syms);
+  symtab_init(&code_syms);
   recinfo_t* info = (recinfo_t*)calloc(recs.n ? recs.n : 1, sizeof(*info));
   if (!info) {
     diag_emit("error", NULL, 0, "out of memory");
     recvec_free(&recs);
-    symtab_free(&syms);
+    symtab_free(&const_syms);
+    symtab_free(&data_syms);
+    symtab_free(&code_syms);
     return 2;
   }
 
-  size_t off = 0;
+  size_t code_off = 0;
+  /* Reserve low memory for a NULL/guard region (zABI-style). */
+  size_t data_off = 16u;
   for (size_t i = 0; i < recs.n; i++) {
     record_t* r = &recs.v[i];
-    info[i].off = off;
-    info[i].size = 0;
+    info[i].code_off = code_off;
+    info[i].code_size = 0;
+    info[i].data_off = data_off;
+    info[i].data_size = 0;
 
     if (r->k == JREC_LABEL && r->label) {
-      if (symtab_add(&syms, r->label, (int64_t)off) != 0) {
+      if (symtab_add(&code_syms, r->label, (int64_t)code_off) != 0) {
         diag_emit("error", NULL, r->line, "duplicate label: %s", r->label);
         free(info);
         recvec_free(&recs);
-        symtab_free(&syms);
+        symtab_free(&const_syms);
+        symtab_free(&data_syms);
+        symtab_free(&code_syms);
         return 2;
       }
       continue;
     }
 
     if (r->k == JREC_DIR && r->d) {
-      if (r->name) {
-        if (symtab_add(&syms, r->name, (int64_t)off) != 0) {
-          diag_emit("error", NULL, r->line, "duplicate symbol: %s", r->name);
-          free(info);
-          recvec_free(&recs);
-          symtab_free(&syms);
-          return 2;
-        }
-      }
       if (strcmp(r->d, "EQU") == 0) {
         if (!r->name) {
           diag_emit("error", NULL, r->line, "EQU requires a name");
           free(info);
           recvec_free(&recs);
-          symtab_free(&syms);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
           return 2;
         }
         if (r->nargs != 1 || r->args[0].t != JOP_NUM) {
           diag_emit("error", NULL, r->line, "EQU expects 1 numeric arg");
           free(info);
           recvec_free(&recs);
-          symtab_free(&syms);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
           return 2;
         }
-        for (size_t s = 0; s < syms.n; s++) {
-          if (strcmp(syms.v[s].name, r->name) == 0) {
-            syms.v[s].value = r->args[0].n;
-            break;
-          }
+        if (symtab_add(&const_syms, r->name, r->args[0].n) != 0) {
+          diag_emit("error", NULL, r->line, "duplicate symbol: %s", r->name);
+          free(info);
+          recvec_free(&recs);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
+          return 2;
+        }
+      } else if (strcmp(r->d, "DW") == 0 && r->name) {
+        /* Labeled DW is treated as a constant. */
+        if (r->nargs != 1 || r->args[0].t != JOP_NUM) {
+          diag_emit("error", NULL, r->line, "DW constant expects 1 numeric arg");
+          free(info);
+          recvec_free(&recs);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
+          return 2;
+        }
+        if (symtab_add(&const_syms, r->name, r->args[0].n) != 0) {
+          diag_emit("error", NULL, r->line, "duplicate symbol: %s", r->name);
+          free(info);
+          recvec_free(&recs);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
+          return 2;
+        }
+      } else if (r->name) {
+        if (symtab_add(&data_syms, r->name, (int64_t)data_off) != 0) {
+          diag_emit("error", NULL, r->line, "duplicate symbol: %s", r->name);
+          free(info);
+          recvec_free(&recs);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
+          return 2;
         }
       }
       char err[128];
@@ -1048,26 +1144,30 @@ int main(int argc, char** argv) {
         diag_emit("error", NULL, r->line, "%s", err);
         free(info);
         recvec_free(&recs);
-        symtab_free(&syms);
+        symtab_free(&const_syms);
+        symtab_free(&data_syms);
+        symtab_free(&code_syms);
         return 2;
       }
-      info[i].size = sz;
-      off += sz;
+      info[i].data_size = sz;
+      data_off += sz;
       continue;
     }
 
     if (r->k == JREC_INSTR) {
       char err[128];
       size_t sz = 0;
-      if (instr_size_hint(r, &syms, err, sizeof(err), &sz) != 0) {
+      if (instr_size_hint(r, &const_syms, &data_syms, &code_syms, err, sizeof(err), &sz) != 0) {
         diag_emit("error", NULL, r->line, "%s", err);
         free(info);
         recvec_free(&recs);
-        symtab_free(&syms);
+        symtab_free(&const_syms);
+        symtab_free(&data_syms);
+        symtab_free(&code_syms);
         return 2;
       }
-      info[i].size = sz;
-      off += sz;
+      info[i].code_size = sz;
+      code_off += sz;
       continue;
     }
   }
@@ -1079,7 +1179,9 @@ int main(int argc, char** argv) {
       diag_emit("error", out_path, 0, "failed to open output");
       free(info);
       recvec_free(&recs);
-      symtab_free(&syms);
+      symtab_free(&const_syms);
+      symtab_free(&data_syms);
+      symtab_free(&code_syms);
       return 2;
     }
   }
@@ -1091,15 +1193,18 @@ int main(int argc, char** argv) {
       uint8_t buf[16];
       size_t len = 0;
       char err[128];
-      if (encode_instr(r, &syms, info[i].off, buf, sizeof(buf), &len, err, sizeof(err)) != 0) {
+      if (encode_instr(r, &const_syms, &data_syms, &code_syms, info[i].code_off,
+                       buf, sizeof(buf), &len, err, sizeof(err)) != 0) {
         diag_emit("error", NULL, line_no, "%s", err);
         if (out && out != stdout) fclose(out);
         free(info);
         recvec_free(&recs);
-        symtab_free(&syms);
+        symtab_free(&const_syms);
+        symtab_free(&data_syms);
+        symtab_free(&code_syms);
         return 2;
       }
-      emit_bytes_record(out, buf, len, line_no);
+      emit_bytes_record(out, buf, len, line_no, NULL, 0, 0);
       continue;
     }
     if (r->k == JREC_DIR && r->d) {
@@ -1112,7 +1217,9 @@ int main(int argc, char** argv) {
           if (out && out != stdout) fclose(out);
           free(info);
           recvec_free(&recs);
-          symtab_free(&syms);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
           return 2;
         }
         for (size_t a = 0; a < r->nargs; a++) {
@@ -1129,7 +1236,9 @@ int main(int argc, char** argv) {
                   if (out && out != stdout) fclose(out);
                   free(info);
                   recvec_free(&recs);
-                  symtab_free(&syms);
+                  symtab_free(&const_syms);
+                  symtab_free(&data_syms);
+                  symtab_free(&code_syms);
                   return 2;
                 }
                 buf = next;
@@ -1149,7 +1258,9 @@ int main(int argc, char** argv) {
                 if (out && out != stdout) fclose(out);
                 free(info);
                 recvec_free(&recs);
-                symtab_free(&syms);
+                symtab_free(&const_syms);
+                symtab_free(&data_syms);
+                symtab_free(&code_syms);
                 return 2;
               }
               buf = next;
@@ -1161,23 +1272,31 @@ int main(int argc, char** argv) {
             if (out && out != stdout) fclose(out);
             free(info);
             recvec_free(&recs);
-            symtab_free(&syms);
+            symtab_free(&const_syms);
+            symtab_free(&data_syms);
+            symtab_free(&code_syms);
             return 2;
           }
         }
-        emit_bytes_record(out, buf, len, line_no);
+        emit_bytes_record(out, buf, len, line_no, "DATA", info[i].data_off, 1);
         free(buf);
         continue;
       }
       if (strcmp(r->d, "DW") == 0) {
+        if (r->name) {
+          /* Labeled DW is a constant; no DATA emitted. */
+          continue;
+        }
         int64_t v = 0;
         char err[128];
-        if (imm_from_operand(&r->args[0], &syms, &v, err, sizeof(err)) != 0) {
+        if (imm_from_operand_any(&r->args[0], &const_syms, &data_syms, &code_syms, &v, err, sizeof(err)) != 0) {
           diag_emit("error", NULL, line_no, "%s", err);
           if (out && out != stdout) fclose(out);
           free(info);
           recvec_free(&recs);
-          symtab_free(&syms);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
           return 2;
         }
         if (v < 0) v = 0;
@@ -1185,7 +1304,7 @@ int main(int argc, char** argv) {
         uint8_t buf[2];
         buf[0] = (uint8_t)(v & 0xff);
         buf[1] = (uint8_t)((v >> 8) & 0xff);
-        emit_bytes_record(out, buf, sizeof(buf), line_no);
+        emit_bytes_record(out, buf, sizeof(buf), line_no, "DATA", info[i].data_off, 1);
         continue;
       }
       if (strcmp(r->d, "RESB") == 0) {
@@ -1194,10 +1313,12 @@ int main(int argc, char** argv) {
           if (out && out != stdout) fclose(out);
           free(info);
           recvec_free(&recs);
-          symtab_free(&syms);
+          symtab_free(&const_syms);
+          symtab_free(&data_syms);
+          symtab_free(&code_syms);
           return 2;
         }
-        emit_zero_bytes(out, (size_t)r->args[0].n, line_no);
+        emit_zero_bytes(out, info[i].data_off, (size_t)r->args[0].n, line_no);
         continue;
       }
     }
@@ -1206,6 +1327,8 @@ int main(int argc, char** argv) {
   if (out && out != stdout) fclose(out);
   free(info);
   recvec_free(&recs);
-  symtab_free(&syms);
+  symtab_free(&const_syms);
+  symtab_free(&data_syms);
+  symtab_free(&code_syms);
   return 0;
 }

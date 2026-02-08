@@ -8,8 +8,11 @@
 
 #include "zingcore25.h"
 #include "zi_sysabi25.h"
+#include "zi_telemetry.h"
 
 #include <errno.h>
+#include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -25,6 +28,9 @@ struct zasm_rt_engine {
 struct zasm_rt_module {
   uint8_t* code;
   size_t code_len;
+
+  uint8_t* data;
+  size_t data_len;
 };
 
 typedef struct zasm_rt_mem_ctx {
@@ -43,11 +49,70 @@ struct zasm_rt_instance {
   uint8_t* owned_mem;
   size_t owned_mem_cap;
 
+  size_t heap_off;
+
   uint8_t* jit_mem;
   size_t jit_cap;
   size_t jit_len;
   int jit_is_exec;
 };
+
+static size_t g_guest_mem_cap = 0;
+static size_t g_guest_heap_off = 0;
+
+static int zasm_rt_trace_syscalls_enabled(void) {
+  static int enabled = -1;
+  if (enabled != -1) return enabled;
+  const char* v = getenv("ZASM_RT_TRACE_SYSCALLS");
+  enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
+  return enabled;
+}
+
+static int32_t zi_read_trace(int32_t h, uint64_t dst_ptr, uint32_t cap) {
+  if (zasm_rt_trace_syscalls_enabled()) {
+    fprintf(stderr, "[zrt] zi_read(h=%d, dst=%" PRIu64 ", cap=%u)\n", h, dst_ptr, cap);
+    fflush(stderr);
+  }
+  return zi_read(h, dst_ptr, cap);
+}
+
+static int32_t zi_write_trace(int32_t h, uint64_t src_ptr, uint32_t len) {
+  if (zasm_rt_trace_syscalls_enabled()) {
+    fprintf(stderr, "[zrt] zi_write(h=%d, src=%" PRIu64 ", len=%u)\n", h, src_ptr, len);
+    fflush(stderr);
+  }
+  return zi_write(h, src_ptr, len);
+}
+
+static uint64_t guest_alloc(uint32_t size) {
+  if (g_guest_mem_cap == 0) return 0;
+  if (size == 0) return 0;
+  size_t off = (g_guest_heap_off + 7u) & ~((size_t)7u);
+  if (off > g_guest_mem_cap) return 0;
+  if ((uint64_t)size > (uint64_t)(g_guest_mem_cap - off)) return 0;
+  g_guest_heap_off = off + (size_t)size;
+  return (uint64_t)off;
+}
+
+static int32_t guest_free(uint64_t ptr) {
+  (void)ptr;
+  return 0;
+}
+
+static int32_t guest_telemetry(uint64_t topic_ptr, uint32_t topic_len,
+                               uint64_t msg_ptr, uint32_t msg_len) {
+  const zi_mem_v1* mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return ZI_E_NOSYS;
+  if (topic_ptr == 0 || msg_ptr == 0) return ZI_E_BOUNDS;
+
+  const uint8_t* topic = NULL;
+  const uint8_t* msg = NULL;
+  if (!mem->map_ro(mem->ctx, (zi_ptr_t)topic_ptr, (zi_size32_t)topic_len, &topic) || !topic) return ZI_E_BOUNDS;
+  if (!mem->map_ro(mem->ctx, (zi_ptr_t)msg_ptr, (zi_size32_t)msg_len, &msg) || !msg) return ZI_E_BOUNDS;
+
+  (void)zi_telemetry_stderr_jsonl(NULL, topic, (uint32_t)topic_len, msg, (uint32_t)msg_len);
+  return 0;
+}
 
 static int zasm_rt_mem_map_ro(void* ctx, zi_ptr_t ptr, zi_size32_t len, const uint8_t** out) {
   if (!out) return 0;
@@ -237,6 +302,16 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
   memcpy(m->code, parsed.code, parsed.code_len);
   m->code_len = parsed.code_len;
 
+  if (parsed.has_data && parsed.data && parsed.data_len) {
+    m->data = (uint8_t*)malloc(parsed.data_len);
+    if (!m->data) {
+      zasm_rt_module_destroy(m);
+      return diag_fail(diag, ZASM_RT_ERR_OOM);
+    }
+    memcpy(m->data, parsed.data, parsed.data_len);
+    m->data_len = parsed.data_len;
+  }
+
   *out_module = m;
   return ZASM_RT_OK;
 }
@@ -244,6 +319,7 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
 void zasm_rt_module_destroy(zasm_rt_module_t* module) {
   if (!module) return;
   free(module->code);
+  free(module->data);
   free(module);
 }
 
@@ -307,6 +383,115 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   inst->mem.ctx = &inst->mem_ctx;
   inst->mem.map_ro = zasm_rt_mem_map_ro;
   inst->mem.map_rw = zasm_rt_mem_map_rw;
+
+  /* Apply static memory initialization from the module's DATA section, if any.
+   * Also advance the heap start past the highest initialized byte.
+   */
+  size_t max_end = 0;
+  if (module->data && module->data_len) {
+    const uint8_t* p = module->data;
+    const uint8_t* end = module->data + module->data_len;
+    if ((size_t)(end - p) < 4u) {
+      zasm_rt_instance_destroy(inst);
+      *out_instance = NULL;
+      return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+    }
+    uint32_t seg_count = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    p += 4;
+
+    /* Track segments for overlap checks (small N expected). */
+    uint32_t* seg_dst = NULL;
+    uint32_t* seg_len = NULL;
+    if (seg_count) {
+      seg_dst = (uint32_t*)calloc(seg_count, sizeof(uint32_t));
+      seg_len = (uint32_t*)calloc(seg_count, sizeof(uint32_t));
+      if (!seg_dst || !seg_len) {
+        free(seg_dst);
+        free(seg_len);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_OOM);
+      }
+    }
+
+    for (uint32_t i = 0; i < seg_count; i++) {
+      if ((size_t)(end - p) < 8u) {
+        free(seg_dst);
+        free(seg_len);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+      }
+      uint32_t dst = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+      uint32_t blen = (uint32_t)p[4] | ((uint32_t)p[5] << 8) | ((uint32_t)p[6] << 16) | ((uint32_t)p[7] << 24);
+      p += 8;
+
+      if ((uint64_t)dst + (uint64_t)blen > (uint64_t)inst->policy.mem_size) {
+        free(seg_dst);
+        free(seg_len);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+      }
+      if ((size_t)(end - p) < (size_t)blen) {
+        free(seg_dst);
+        free(seg_len);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+      }
+
+      /* Overlap check against previous segments. */
+      for (uint32_t j = 0; j < i; j++) {
+        uint64_t a0 = (uint64_t)dst;
+        uint64_t a1 = a0 + (uint64_t)blen;
+        uint64_t b0 = (uint64_t)seg_dst[j];
+        uint64_t b1 = b0 + (uint64_t)seg_len[j];
+        if (!(a1 <= b0 || b1 <= a0)) {
+          free(seg_dst);
+          free(seg_len);
+          zasm_rt_instance_destroy(inst);
+          *out_instance = NULL;
+          return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+        }
+      }
+      seg_dst[i] = dst;
+      seg_len[i] = blen;
+
+      memcpy(inst->mem_ctx.base + (size_t)dst, p, (size_t)blen);
+      size_t end_i = (size_t)dst + (size_t)blen;
+      if (end_i > max_end) max_end = end_i;
+
+      p += blen;
+      /* Skip file padding to 4-byte alignment. */
+      size_t pad = ((size_t)blen + 3u) & ~3u;
+      if (pad > (size_t)blen) {
+        size_t skip = pad - (size_t)blen;
+        if ((size_t)(end - p) < skip) {
+          free(seg_dst);
+          free(seg_len);
+          zasm_rt_instance_destroy(inst);
+          *out_instance = NULL;
+          return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+        }
+        p += skip;
+      }
+    }
+
+    free(seg_dst);
+    free(seg_len);
+
+    if (p != end) {
+      zasm_rt_instance_destroy(inst);
+      *out_instance = NULL;
+      return diag_fail(diag, ZASM_RT_ERR_BAD_CONTAINER);
+    }
+  }
+
+  /* Start heap after statics, leaving a small guard at 0. */
+  size_t heap0 = max_end;
+  if (heap0 < 16u) heap0 = 16u;
+  inst->heap_off = (heap0 + 7u) & ~((size_t)7u);
 
   size_t code_len = module->code_len;
   const uint8_t* code = module->code;
@@ -395,6 +580,10 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   size_t mem_cap = (size_t)instance->policy.mem_size;
   if (!mem || mem_cap == 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
 
+  (void)mem;
+  g_guest_mem_cap = mem_cap;
+  g_guest_heap_off = instance->heap_off;
+
   zi_runtime25_set_mem(&instance->mem);
   zi_runtime25_set_host(instance->host);
 
@@ -408,17 +597,19 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   }
 #endif
 
-  static const zxc_zi_syscalls_v1_t g_sys = {
-    .read = zi_read,
-    .write = zi_write,
-    .alloc = zi_alloc,
-    .free = zi_free,
+  static zxc_zi_syscalls_v1_t g_sys = {
+    .read = zi_read_trace,
+    .write = zi_write_trace,
+    .alloc = guest_alloc,
+    .free = guest_free,
     .ctl = zi_ctl,
-    .telemetry = zi_telemetry,
+    .telemetry = guest_telemetry,
   };
   void (*entry)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*) =
       (void (*)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*))instance->jit_mem;
   entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &g_sys);
+
+  instance->heap_off = g_guest_heap_off;
   return ZASM_RT_OK;
 }
 

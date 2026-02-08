@@ -6,6 +6,8 @@
 
 enum {
   ZOP_MOV = 0x07,
+  ZOP_INC = 0x05,
+  ZOP_DEC = 0x06,
   ZOP_ADD = 0x10,
   ZOP_SUB = 0x11,
   ZOP_AND = 0x17,
@@ -103,6 +105,34 @@ zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
             return res;
           }
         }
+        continue;
+      case ZOP_INC:
+        if (rd_m != rs1_m) {
+          if (!emit_mov_rr(out, out_cap, &out_len, 1, rd_m, rs1_m)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+        }
+        if (!emit_u8(out, out_cap, &out_len, 0x48u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_u8(out, out_cap, &out_len, 0x83u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_modrm(out, out_cap, &out_len, 0, rd_m)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_u8(out, out_cap, &out_len, 1u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        continue;
+      case ZOP_DEC:
+        if (rd_m != rs1_m) {
+          if (!emit_mov_rr(out, out_cap, &out_len, 1, rd_m, rs1_m)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+        }
+        if (!emit_u8(out, out_cap, &out_len, 0x48u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_u8(out, out_cap, &out_len, 0x83u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_modrm(out, out_cap, &out_len, 5, rd_m)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
+        if (!emit_u8(out, out_cap, &out_len, 1u)) return (zxc_result_t){.err=ZXC_ERR_OUTBUF,.in_off=off,.out_len=out_len};
         continue;
       case ZOP_ADD:   is64 = 0; opcode = 0x01u; break;
       case ZOP_SUB:   is64 = 0; opcode = 0x29u; break;
