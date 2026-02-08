@@ -69,6 +69,37 @@ static void test_prim_rejected_when_disabled(void) {
   assert(r.err == ZASM_VERIFY_ERR_BAD_OPCODE);
 }
 
+static void test_jr_target_oob(void) {
+  /* JR at off=0 with imm12=-1 targets -4 bytes => invalid. */
+  uint8_t buf[4];
+  write_u32_le(buf, pack(0x02, 0, 0, 0, -1));
+  zasm_verify_result_t r = zasm_verify_decode(buf, sizeof(buf), NULL);
+  assert(r.err == ZASM_VERIFY_ERR_BAD_TARGET);
+}
+
+static void test_call_target_into_ld_ext_word(void) {
+  /*
+   * word0: LD imm64 (-2047) => consumes word1+word2 as extension
+   * word3: CALL imm12=-2 => targets word1 (extension) => invalid
+   */
+  uint8_t buf[16];
+  write_u32_le(buf + 0, pack(0x70, 0, 0, 0, -2047));
+  write_u32_le(buf + 4, 0x11111111u);
+  write_u32_le(buf + 8, 0x22222222u);
+  write_u32_le(buf + 12, pack(0x00, 0, 0, 0, -2));
+  zasm_verify_result_t r = zasm_verify_decode(buf, sizeof(buf), NULL);
+  assert(r.err == ZASM_VERIFY_ERR_BAD_TARGET);
+}
+
+static void test_jr_backward_ok(void) {
+  /* word1 JR -1 => targets word0 (valid instruction boundary). */
+  uint8_t buf[8];
+  write_u32_le(buf + 0, pack(0x01, 0, 0, 0, 0));
+  write_u32_le(buf + 4, pack(0x02, 0, 0, 0, -1));
+  zasm_verify_result_t r = zasm_verify_decode(buf, sizeof(buf), NULL);
+  assert(r.err == ZASM_VERIFY_OK);
+}
+
 int main(void) {
   test_ok_ret();
   test_bad_reg();
@@ -77,6 +108,9 @@ int main(void) {
   test_reserved_opcode_reject();
   test_prim_allowed_by_default();
   test_prim_rejected_when_disabled();
+  test_jr_target_oob();
+  test_call_target_into_ld_ext_word();
+  test_jr_backward_ok();
   printf("zasm_verify decode tests passed\n");
   return 0;
 }

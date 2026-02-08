@@ -1149,7 +1149,14 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
             return res;
         }
 
-        size_t target_off = insn_off + (size_t)imm12 * 4u;
+        int64_t target64 = (int64_t)insn_off + (int64_t)imm12 * 4ll;
+        if (target64 < 0 || target64 > (int64_t)in_len || (target64 & 3) != 0) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t target_off = (size_t)target64;
         zxc_err_t err = ZXC_OK;
         size_t target_out = 0;
         if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, target_off, prologue_len, &target_out, &err)) {
@@ -1201,7 +1208,14 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_CALL: {
-        size_t target_off = insn_off + (size_t)imm12 * 4u;
+        int64_t target64 = (int64_t)insn_off + (int64_t)imm12 * 4ll;
+        if (target64 < 0 || target64 > (int64_t)in_len || (target64 & 3) != 0) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t target_off = (size_t)target64;
         zxc_err_t err = ZXC_OK;
         size_t target_out = 0;
         if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, target_off, prologue_len, &target_out, &err)) {

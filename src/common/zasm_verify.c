@@ -1,5 +1,6 @@
 #include "zasm_verify.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 const zasm_verify_opts_t zasm_verify_default_opts = {
@@ -39,6 +40,61 @@ static int is_primitive_opcode(uint8_t op) {
   return op >= 0xF0 && op <= 0xF5;
 }
 
+static zasm_verify_result_t build_insn_start_map(const uint8_t* code, size_t code_len,
+                                                 const zasm_verify_opts_t* opts,
+                                                 uint8_t** out_is_start,
+                                                 size_t* out_words) {
+  *out_is_start = NULL;
+  *out_words = 0;
+
+  size_t words = code_len / 4u;
+  if (words == 0) return fail(ZASM_VERIFY_ERR_EMPTY, 0, 0);
+  if (opts && opts->max_insn_words != 0 && words > (size_t)opts->max_insn_words) {
+    return fail(ZASM_VERIFY_ERR_TRUNC, 0, 0);
+  }
+
+  uint8_t* is_start = (uint8_t*)calloc(words, 1);
+  if (!is_start) return fail(ZASM_VERIFY_ERR_OOM, 0, 0);
+
+  size_t off = 0;
+  while (off < code_len) {
+    if (off + 4 > code_len) {
+      free(is_start);
+      return fail(ZASM_VERIFY_ERR_TRUNC, off, 0);
+    }
+    size_t wi = off / 4u;
+    is_start[wi] = 1;
+
+    uint32_t w = u32_le(code + off);
+    uint8_t op = (uint8_t)(w >> 24);
+    int32_t imm12 = imm12_sext(w);
+
+    if (op == 0x70) {
+      if (imm12 == -2048) {
+        if (off + 8 > code_len) {
+          free(is_start);
+          return fail(ZASM_VERIFY_ERR_TRUNC, off, op);
+        }
+        off += 8;
+        continue;
+      }
+      if (imm12 == -2047) {
+        if (off + 12 > code_len) {
+          free(is_start);
+          return fail(ZASM_VERIFY_ERR_TRUNC, off, op);
+        }
+        off += 12;
+        continue;
+      }
+    }
+    off += 4;
+  }
+
+  *out_is_start = is_start;
+  *out_words = words;
+  return fail(ZASM_VERIFY_OK, 0, 0);
+}
+
 zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
                                         const zasm_verify_opts_t* opts_in) {
   if (!code) return fail(ZASM_VERIFY_ERR_NULL, 0, 0);
@@ -49,6 +105,11 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
   if (opts.max_code_len != 0 && code_len > (size_t)opts.max_code_len) {
     return fail(ZASM_VERIFY_ERR_TRUNC, 0, 0);
   }
+
+  uint8_t* is_start = NULL;
+  size_t words = 0;
+  zasm_verify_result_t map_r = build_insn_start_map(code, code_len, &opts, &is_start, &words);
+  if (map_r.err != ZASM_VERIFY_OK) return map_r;
 
   size_t off = 0;
   uint32_t insn_words = 0;
@@ -69,10 +130,12 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
     /* Reserved opcode ranges are illegal unless explicitly supported. */
     if (op >= 0xE0) {
       if (!(opts.allow_primitives && is_primitive_opcode(op))) {
+        free(is_start);
         return fail(ZASM_VERIFY_ERR_BAD_OPCODE, off, op);
       }
       /* Primitives are fixed no-operand encodings in the current toolchain. */
       if (rd != 0 || rs1 != 0 || rs2 != 0 || imm12 != 0) {
+        free(is_start);
         return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
       }
       off += 4;
@@ -81,12 +144,25 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
 
     /* Register indices 5..15 are illegal. */
     if (!reg_ok(rd) || !reg_ok(rs1) || !reg_ok(rs2)) {
+      free(is_start);
       return fail(ZASM_VERIFY_ERR_BAD_REG, off, op);
     }
 
     switch (op) {
       case 0x00: /* CALL (pc-rel imm12 words) */
         if (rd != 0 || rs1 != 0 || rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        {
+          int64_t target = (int64_t)off + (int64_t)imm12 * 4ll;
+          if (target < 0 || target >= (int64_t)code_len || (target % 4) != 0) {
+            free(is_start);
+            return fail(ZASM_VERIFY_ERR_BAD_TARGET, off, op);
+          }
+          size_t tw = (size_t)target / 4u;
+          if (tw >= words || !is_start[tw]) {
+            free(is_start);
+            return fail(ZASM_VERIFY_ERR_BAD_TARGET, off, op);
+          }
+        }
         off += 4;
         break;
 
@@ -98,6 +174,18 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
       case 0x02: /* JR (cond in rs1, pc-rel imm12 words) */
         if (rd != 0 || rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
         if (rs1 > 10) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
+        {
+          int64_t target = (int64_t)off + (int64_t)imm12 * 4ll;
+          if (target < 0 || target >= (int64_t)code_len || (target % 4) != 0) {
+            free(is_start);
+            return fail(ZASM_VERIFY_ERR_BAD_TARGET, off, op);
+          }
+          size_t tw = (size_t)target / 4u;
+          if (tw >= words || !is_start[tw]) {
+            free(is_start);
+            return fail(ZASM_VERIFY_ERR_BAD_TARGET, off, op);
+          }
+        }
         off += 4;
         break;
 
@@ -166,10 +254,12 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
 
       default:
         /* Known-but-currently-unused opcodes are treated as invalid until a backend implements them. */
+        free(is_start);
         return fail(ZASM_VERIFY_ERR_BAD_OPCODE, off, op);
     }
   }
 
+  free(is_start);
   return fail(ZASM_VERIFY_OK, 0, 0);
 }
 
@@ -180,10 +270,12 @@ const char* zasm_verify_err_str(zasm_verify_err_t err) {
     case ZASM_VERIFY_ERR_EMPTY: return "empty code";
     case ZASM_VERIFY_ERR_ALIGN: return "code length not 4-byte aligned";
     case ZASM_VERIFY_ERR_TRUNC: return "truncated code";
+    case ZASM_VERIFY_ERR_OOM: return "out of memory";
     case ZASM_VERIFY_ERR_BAD_OPCODE: return "invalid or unsupported opcode";
     case ZASM_VERIFY_ERR_BAD_REG: return "invalid register index";
     case ZASM_VERIFY_ERR_BAD_FIELDS: return "invalid operand field encoding";
     case ZASM_VERIFY_ERR_BAD_IMM: return "invalid immediate encoding";
+    case ZASM_VERIFY_ERR_BAD_TARGET: return "invalid control-flow target";
     default: return "unknown error";
   }
 }

@@ -16,7 +16,7 @@
   - [x] Implement bounded parsing (header + directory + required `CODE`) with explicit size caps
   - [ ] Implement verifier MVP:
     - [x] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
-    - [ ] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
+    - [x] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
     - [ ] Module preflight checks (`IMPT` primitive mask agreement, if present)
   - [ ] Add structured error codes (no printf-only failures) for embedder integration
   - [ ] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
