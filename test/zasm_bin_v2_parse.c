@@ -8,15 +8,23 @@ static void test_bad_magic(void) {
   uint8_t buf[40] = {0};
   memcpy(buf, "NOPE", 4);
   zasm_bin_v2_t out;
-  zasm_bin_err_t e = zasm_bin_parse_v2(buf, sizeof(buf), NULL, &out);
+  zasm_bin_diag_t d;
+  zasm_bin_err_t e = zasm_bin_parse_v2_diag(buf, sizeof(buf), NULL, &out, &d);
   assert(e == ZASM_BIN_ERR_BAD_MAGIC);
+  assert(d.err == e);
+  assert(d.off == 0);
+  assert(d.tag[0] == '\0');
 }
 
 static void test_too_small(void) {
   uint8_t buf[39] = {0};
   zasm_bin_v2_t out;
-  zasm_bin_err_t e = zasm_bin_parse_v2(buf, sizeof(buf), NULL, &out);
+  zasm_bin_diag_t d;
+  zasm_bin_err_t e = zasm_bin_parse_v2_diag(buf, sizeof(buf), NULL, &out, &d);
   assert(e == ZASM_BIN_ERR_TOO_SMALL);
+  assert(d.err == e);
+  assert(d.off == 0);
+  assert(d.tag[0] == '\0');
 }
 
 static void test_missing_code(void) {

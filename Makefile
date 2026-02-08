@@ -46,6 +46,7 @@ ZEM_BUILD := $(BUILD)/zem
 IRCHECK_BUILD := $(BUILD)/ircheck
 ZASM_BIN_BUILD := $(BUILD)/zasm_bin
 ZASM_VERIFY_BUILD := $(BUILD)/zasm_verify
+ZASM_RT_BUILD := $(BUILD)/zasm_rt
 
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
@@ -154,7 +155,7 @@ install-devtools: zasm-bin-wrap
 	@install -m 0755 tools/zasm_bin_wrap.py $(DESTDIR)$(BINDIR)/zasm-bin-wrap
 
 dirs:
-	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD)
+	mkdir -p $(BIN) $(ZAS_BUILD) $(ZOP_BUILD) $(ZXC_BUILD) $(ZIR_BUILD) $(ZLD_BUILD) $(IRCHECK_BUILD) $(ZRUN_BUILD) $(ZLNT_BUILD) $(LOWER_BUILD) $(CLOAK_BUILD) $(CLOAK_TEST_BUILD) $(ZEM_BUILD) $(ZEM_BUILD)/exec $(ZASM_BIN_BUILD) $(ZASM_VERIFY_BUILD) $(ZASM_RT_BUILD)
 
 $(VERSION_HEADER): $(VERSION_FILE)
 	@ver=$$(cat $(VERSION_FILE)); \
@@ -247,6 +248,7 @@ test-validation: test-zlnt-enum-oob
 test-validation: test-zop-bytes test-zas-opcodes-directives test-zxc-x86 test-zxc-cli test-zir
 test-validation: test-zasm-bin-parse
 test-validation: test-zasm-verify-decode
+test-validation: test-zasm-rt-smoke
 test-validation: test-zir-canon-assign-ids
 test-validation: test-zirdiff-smoke
 test-validation: test-zmin-ir-smoke
@@ -1017,6 +1019,7 @@ ZXC_OBJ := \
 ZXC_LIB := $(BIN)/libzxc.a
 ZASM_BIN_LIB := $(BIN)/libzasm_bin.a
 ZASM_VERIFY_LIB := $(BIN)/libzasm_verify.a
+ZASM_RT_LIB := $(BIN)/libzasm_rt.a
 ZXC_CLI_OBJ := $(ZXC_BUILD)/main.o
 
 $(ZXC_BUILD)/%.o: src/zxc/%.c $(VERSION_HEADER) | dirs
@@ -1028,6 +1031,8 @@ zasm-bin-lib: $(ZASM_BIN_LIB)
 
 zasm-verify-lib: $(ZASM_VERIFY_LIB)
 
+zasm-rt-lib: $(ZASM_RT_LIB)
+
 ZASM_BIN_SRC := \
 	src/common/zasm_bin.c
 
@@ -1037,8 +1042,14 @@ ZASM_BIN_OBJ := \
 ZASM_VERIFY_SRC := \
 	src/common/zasm_verify.c
 
+ZASM_RT_SRC := \
+	src/common/zasm_rt.c
+
 ZASM_VERIFY_OBJ := \
 	$(ZASM_VERIFY_BUILD)/zasm_verify.o
+
+ZASM_RT_OBJ := \
+	$(ZASM_RT_BUILD)/zasm_rt.o
 
 $(ZASM_BIN_BUILD)/%.o: src/common/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -1046,11 +1057,18 @@ $(ZASM_BIN_BUILD)/%.o: src/common/%.c $(VERSION_HEADER) | dirs
 $(ZASM_VERIFY_BUILD)/%.o: src/common/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
+$(ZASM_RT_BUILD)/%.o: src/common/%.c $(VERSION_HEADER) | dirs
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
+
 $(ZASM_BIN_LIB): $(ZASM_BIN_OBJ) | dirs
 	@rm -f $@
 	@ar rcs $@ $^
 
 $(ZASM_VERIFY_LIB): $(ZASM_VERIFY_OBJ) | dirs
+	@rm -f $@
+	@ar rcs $@ $^
+
+$(ZASM_RT_LIB): $(ZASM_RT_OBJ) | dirs
 	@rm -f $@
 	@ar rcs $@ $^
 
@@ -1071,6 +1089,10 @@ test-zasm-bin-parse: zasm-bin-lib
 test-zasm-verify-decode: zasm-verify-lib
 	$(CC) $(CFLAGS) -Iinclude test/zasm_verify_decode.c $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_verify_decode; \
 	$(BUILD)/zasm_verify_decode
+
+test-zasm-rt-smoke: zasm-bin-lib zasm-verify-lib zasm-rt-lib
+	$(CC) $(CFLAGS) -Iinclude test/zasm_rt_smoke.c $(BIN)/libzasm_rt.a $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_rt_smoke; \
+	$(BUILD)/zasm_rt_smoke
 
 # ---- zcc (IR -> C) ----
 

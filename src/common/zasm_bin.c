@@ -24,35 +24,68 @@ static int tag_eq4(const uint8_t* p, const char tag[4]) {
          p[2] == (uint8_t)tag[2] && p[3] == (uint8_t)tag[3];
 }
 
+static void diag_set_tag(zasm_bin_diag_t* diag, const uint8_t* ent_tag) {
+  if (!diag) return;
+  diag->tag[0] = (char)ent_tag[0];
+  diag->tag[1] = (char)ent_tag[1];
+  diag->tag[2] = (char)ent_tag[2];
+  diag->tag[3] = (char)ent_tag[3];
+  diag->tag[4] = '\0';
+}
+
+static zasm_bin_err_t diag_ret(zasm_bin_diag_t* diag, zasm_bin_err_t err,
+                               uint32_t off, const uint8_t* ent_tag) {
+  if (diag) {
+    diag->err = err;
+    diag->off = off;
+    diag->tag[0] = '\0';
+    if (ent_tag) diag_set_tag(diag, ent_tag);
+  }
+  return err;
+}
+
 zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
                                  const zasm_bin_caps_t* caps_in,
                                  zasm_bin_v2_t* out) {
-  if (!in || !out) return ZASM_BIN_ERR_NULL;
+  return zasm_bin_parse_v2_diag(in, in_len, caps_in, out, NULL);
+}
+
+zasm_bin_err_t zasm_bin_parse_v2_diag(const uint8_t* in, size_t in_len,
+                                      const zasm_bin_caps_t* caps_in,
+                                      zasm_bin_v2_t* out,
+                                      zasm_bin_diag_t* diag) {
+  if (diag) {
+    diag->err = ZASM_BIN_OK;
+    diag->off = 0;
+    diag->tag[0] = '\0';
+  }
+
+  if (!in || !out) return diag_ret(diag, ZASM_BIN_ERR_NULL, 0, NULL);
 
   const zasm_bin_caps_t caps = caps_in ? *caps_in : zasm_bin_default_caps;
 
-  if (in_len < 40u) return ZASM_BIN_ERR_TOO_SMALL;
-  if (memcmp(in, "ZASB", 4) != 0) return ZASM_BIN_ERR_BAD_MAGIC;
+  if (in_len < 40u) return diag_ret(diag, ZASM_BIN_ERR_TOO_SMALL, 0, NULL);
+  if (memcmp(in, "ZASB", 4) != 0) return diag_ret(diag, ZASM_BIN_ERR_BAD_MAGIC, 0, NULL);
 
   uint16_t version = u16_le(in + 4);
   uint16_t flags = u16_le(in + 6);
-  if (version != 2) return ZASM_BIN_ERR_UNSUPPORTED_VERSION;
-  if (flags != 0) return ZASM_BIN_ERR_UNSUPPORTED_FLAGS;
+  if (version != 2) return diag_ret(diag, ZASM_BIN_ERR_UNSUPPORTED_VERSION, 4, NULL);
+  if (flags != 0) return diag_ret(diag, ZASM_BIN_ERR_UNSUPPORTED_FLAGS, 6, NULL);
 
   uint32_t file_len = u32_le(in + 8);
   uint32_t dir_off = u32_le(in + 12);
   uint32_t dir_count = u32_le(in + 16);
 
-  if (file_len < 40u) return ZASM_BIN_ERR_BAD_FILE_LEN;
-  if (file_len > (uint32_t)in_len) return ZASM_BIN_ERR_FILE_TOO_SMALL;
-  if (caps.max_file_len != 0 && file_len > caps.max_file_len) return ZASM_BIN_ERR_FILE_TOO_LARGE;
+  if (file_len < 40u) return diag_ret(diag, ZASM_BIN_ERR_BAD_FILE_LEN, 8, NULL);
+  if (file_len > (uint32_t)in_len) return diag_ret(diag, ZASM_BIN_ERR_FILE_TOO_SMALL, 8, NULL);
+  if (caps.max_file_len != 0 && file_len > caps.max_file_len) return diag_ret(diag, ZASM_BIN_ERR_FILE_TOO_LARGE, 8, NULL);
 
   uint64_t dir_bytes = (uint64_t)dir_count * 20ull;
-  if (dir_count == 0 || dir_bytes > 0xFFFFFFFFull) return ZASM_BIN_ERR_BAD_DIR;
-  if (caps.max_dir_count != 0 && dir_count > caps.max_dir_count) return ZASM_BIN_ERR_BAD_DIR;
+  if (dir_count == 0 || dir_bytes > 0xFFFFFFFFull) return diag_ret(diag, ZASM_BIN_ERR_BAD_DIR, 16, NULL);
+  if (caps.max_dir_count != 0 && dir_count > caps.max_dir_count) return diag_ret(diag, ZASM_BIN_ERR_BAD_DIR, 16, NULL);
 
   uint64_t dir_end = (uint64_t)dir_off + dir_bytes;
-  if (dir_off < 40u || dir_end > (uint64_t)file_len) return ZASM_BIN_ERR_DIR_RANGE;
+  if (dir_off < 40u || dir_end > (uint64_t)file_len) return diag_ret(diag, ZASM_BIN_ERR_DIR_RANGE, 12, NULL);
 
   const uint8_t* code = NULL;
   uint32_t code_len = 0;
@@ -67,32 +100,37 @@ zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
     uint32_t sflags = u32_le(ent + 12);
     uint32_t reserved = u32_le(ent + 16);
 
-    if (sflags != 0 || reserved != 0) return ZASM_BIN_ERR_SECTION_FLAGS;
+    if (sflags != 0 || reserved != 0) {
+      return diag_ret(diag, ZASM_BIN_ERR_SECTION_FLAGS,
+                      dir_off + i * 20u + (sflags != 0 ? 12u : 16u), ent);
+    }
 
     uint64_t end = (uint64_t)off + (uint64_t)len;
-    if (end > (uint64_t)file_len) return ZASM_BIN_ERR_SECTION_RANGE;
+    if (end > (uint64_t)file_len) {
+      return diag_ret(diag, ZASM_BIN_ERR_SECTION_RANGE, dir_off + i * 20u + 4u, ent);
+    }
 
     if (tag_eq4(ent, "CODE")) {
-      if (code) return ZASM_BIN_ERR_DUP_CODE;
-      if (len == 0 || (len % 4u) != 0) return ZASM_BIN_ERR_BAD_CODE_LEN;
-      if (caps.max_code_len != 0 && len > caps.max_code_len) return ZASM_BIN_ERR_BAD_CODE_LEN;
+      if (code) return diag_ret(diag, ZASM_BIN_ERR_DUP_CODE, dir_off + i * 20u, ent);
+      if (len == 0 || (len % 4u) != 0) return diag_ret(diag, ZASM_BIN_ERR_BAD_CODE_LEN, dir_off + i * 20u + 8u, ent);
+      if (caps.max_code_len != 0 && len > caps.max_code_len) return diag_ret(diag, ZASM_BIN_ERR_BAD_CODE_LEN, dir_off + i * 20u + 8u, ent);
       code = in + off;
       code_len = len;
     }
 
     if (tag_eq4(ent, "IMPT")) {
       /* Payload: u32 prim_mask, u32 reserved(0) */
-      if (len != 8) return ZASM_BIN_ERR_BAD_IMPT;
-      if (off + 8u > file_len) return ZASM_BIN_ERR_SECTION_RANGE;
+      if (len != 8) return diag_ret(diag, ZASM_BIN_ERR_BAD_IMPT, dir_off + i * 20u + 8u, ent);
+      if (off + 8u > file_len) return diag_ret(diag, ZASM_BIN_ERR_SECTION_RANGE, dir_off + i * 20u + 4u, ent);
       uint32_t pm = u32_le(in + off);
       uint32_t reserved2 = u32_le(in + off + 4);
-      if (reserved2 != 0) return ZASM_BIN_ERR_BAD_IMPT;
+      if (reserved2 != 0) return diag_ret(diag, ZASM_BIN_ERR_BAD_IMPT, off + 4u, ent);
       has_impt = 1;
       prim_mask = pm;
     }
   }
 
-  if (!code) return ZASM_BIN_ERR_MISSING_CODE;
+  if (!code) return diag_ret(diag, ZASM_BIN_ERR_MISSING_CODE, dir_off, NULL);
 
   out->code = code;
   out->code_len = (size_t)code_len;
@@ -101,7 +139,7 @@ zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
   out->dir_count = dir_count;
   out->has_impt = has_impt;
   out->prim_mask = prim_mask;
-  return ZASM_BIN_OK;
+  return diag_ret(diag, ZASM_BIN_OK, 0, NULL);
 }
 
 const char* zasm_bin_err_str(zasm_bin_err_t err) {

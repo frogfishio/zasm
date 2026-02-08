@@ -54,6 +54,18 @@ typedef struct zasm_bin_v2 {
   uint32_t prim_mask;
 } zasm_bin_v2_t;
 
+typedef struct zasm_bin_diag {
+  zasm_bin_err_t err;
+
+  /* Best-effort file offset describing where parsing failed.
+   * This is for diagnostics only and is not guaranteed to be precise. */
+  uint32_t off;
+
+  /* Optional 4-byte section tag involved in the failure (NUL-terminated).
+   * Empty string if not applicable. */
+  char tag[5];
+} zasm_bin_diag_t;
+
 /* Parse a .zasm.bin v2 container and locate the CODE section.
  * - `in` must remain alive as long as `out->code` is used.
  * - Trailing bytes after `file_len` are permitted; callers may choose to reject.
@@ -61,6 +73,14 @@ typedef struct zasm_bin_v2 {
 zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
                                  const zasm_bin_caps_t* caps,
                                  zasm_bin_v2_t* out);
+
+/* As above, but optionally returns structured diagnostics.
+ * - If `diag` is non-NULL, it will always be filled on return.
+ */
+zasm_bin_err_t zasm_bin_parse_v2_diag(const uint8_t* in, size_t in_len,
+                                      const zasm_bin_caps_t* caps,
+                                      zasm_bin_v2_t* out,
+                                      zasm_bin_diag_t* diag);
 
 const char* zasm_bin_err_str(zasm_bin_err_t err);
 

@@ -212,10 +212,16 @@ static int zxc_parse_container_v2(const uint8_t* in, size_t in_len,
                                   const uint8_t** out_code, size_t* out_code_len,
                                   const char* in_path) {
   zasm_bin_v2_t mod;
-  zasm_bin_err_t err = zasm_bin_parse_v2(in, in_len, NULL, &mod);
+  zasm_bin_diag_t diag;
+  zasm_bin_err_t err = zasm_bin_parse_v2_diag(in, in_len, NULL, &mod, &diag);
   if (err != ZASM_BIN_OK) {
     /* Keep messages roughly consistent with the previous inline parser. */
-    diag_emit("error", in_path, 0, "%s", zasm_bin_err_str(err));
+    if (diag.tag[0] != '\0') {
+      diag_emit("error", in_path, 0, "%s (tag=%s off=%u)", zasm_bin_err_str(err), diag.tag,
+                (unsigned)diag.off);
+    } else {
+      diag_emit("error", in_path, 0, "%s (off=%u)", zasm_bin_err_str(err), (unsigned)diag.off);
+    }
     return 1;
   }
   if (in_len > (size_t)mod.file_len && g_verbose) {

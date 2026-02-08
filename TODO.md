@@ -11,18 +11,18 @@
   - [ ] Decide v1 support policy (dev-only vs hard reject) and enforce consistently across tools
   - [ ] Decide if we need `zas --emit-bin` (raw opcode bytes) in addition to `.zasm.bin` containers
 
-- [ ] Track 1 — Loader + verifier library (zero-trust core)
+- [x] Track 1 — Loader + verifier library (zero-trust core)
   - [x] Create a small C library target for parsing `.zasm.bin` v2 (no global state)
   - [x] Implement bounded parsing (header + directory + required `CODE`) with explicit size caps
-  - [ ] Implement verifier MVP:
+  - [x] Implement verifier MVP:
     - [x] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
     - [x] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
     - [x] Module preflight checks (`IMPT` primitive mask agreement, if present)
-  - [ ] Add structured error codes (no printf-only failures) for embedder integration
+  - [x] Add structured error codes (no printf-only failures) for embedder integration
   - [x] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
 
 - [ ] Track 2 — Embeddable runtime API (what integrators call)
-  - [ ] Define a stable C header for the “engine/module/instance” API (create/destroy; load; instantiate; run)
+  - [x] Define a stable C header for the “engine/module/instance” API (create/destroy; load; instantiate; run)
   - [ ] Define the policy object (mem limits, step/fuel limit, strictness knobs) and default behavior
   - [ ] Define the host interface binding to zingcore/zABI (imports + policing + fail-closed behavior)
   - [ ] Determinism: ensure identical module+policy yields deterministic results (no timestamps/env by default)
