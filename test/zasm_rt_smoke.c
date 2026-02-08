@@ -74,9 +74,61 @@ static void test_load_bad_magic(void) {
   zasm_rt_engine_destroy(e);
 }
 
+static void test_instance_create_run_minimal_ret(void) {
+  /* header(40) + dir(20) + CODE(4) */
+  uint8_t buf[40 + 20 + 4] = {0};
+  memcpy(buf, "ZASB", 4);
+  put_u16_le(buf + 4, 2);
+  put_u16_le(buf + 6, 0);
+  put_u32_le(buf + 8, (uint32_t)sizeof(buf));
+  put_u32_le(buf + 12, 40);
+  put_u32_le(buf + 16, 1);
+
+  memcpy(buf + 40, "CODE", 4);
+  put_u32_le(buf + 44, 60);
+  put_u32_le(buf + 48, 4);
+
+  /* RET */
+  put_u32_le(buf + 60, pack(0x01, 0, 0, 0, 0));
+
+  zasm_rt_engine_t* e = NULL;
+  assert(zasm_rt_engine_create(&e) == ZASM_RT_OK);
+
+  zasm_rt_diag_t d;
+  zasm_rt_module_t* m = NULL;
+  assert(zasm_rt_module_load_v2(e, buf, sizeof(buf), NULL, &m, &d) == ZASM_RT_OK);
+  assert(m != NULL);
+
+  zasm_rt_policy_t pol = zasm_rt_policy_default;
+  pol.allow_primitives = 0;
+  pol.mem_base = 0; /* let runtime allocate */
+  pol.mem_size = 2ull * 1024ull * 1024ull;
+
+  zasm_rt_instance_t* inst = NULL;
+  zasm_rt_err_t ce = zasm_rt_instance_create(e, m, &pol, NULL, &inst, &d);
+  if (ce == ZASM_RT_ERR_UNSUPPORTED) {
+    /* Host arch not supported by this build. */
+    zasm_rt_module_destroy(m);
+    zasm_rt_engine_destroy(e);
+    return;
+  }
+  assert(ce == ZASM_RT_OK);
+  assert(inst != NULL);
+
+  assert(zasm_rt_instance_run(inst, &d) == ZASM_RT_OK);
+
+  zasm_rt_instance_destroy(inst);
+  zasm_rt_module_destroy(m);
+  zasm_rt_engine_destroy(e);
+}
+
 int main(void) {
+  /* Default policy should be deterministic with respect to env/time. */
+  assert(zasm_rt_policy_is_deterministic(NULL) != 0);
+
   test_load_ok_minimal_ret();
   test_load_bad_magic();
+  test_instance_create_run_minimal_ret();
   printf("zasm_rt smoke tests passed\n");
   return 0;
 }

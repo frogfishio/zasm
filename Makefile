@@ -1043,13 +1043,15 @@ ZASM_VERIFY_SRC := \
 	src/common/zasm_verify.c
 
 ZASM_RT_SRC := \
-	src/common/zasm_rt.c
+	src/common/zasm_rt.c \
+	src/common/lembeh_cloak.c
 
 ZASM_VERIFY_OBJ := \
 	$(ZASM_VERIFY_BUILD)/zasm_verify.o
 
 ZASM_RT_OBJ := \
-	$(ZASM_RT_BUILD)/zasm_rt.o
+	$(ZASM_RT_BUILD)/zasm_rt.o \
+	$(ZASM_RT_BUILD)/lembeh_cloak.o
 
 $(ZASM_BIN_BUILD)/%.o: src/common/%.c $(VERSION_HEADER) | dirs
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
@@ -1090,8 +1092,9 @@ test-zasm-verify-decode: zasm-verify-lib
 	$(CC) $(CFLAGS) -Iinclude test/zasm_verify_decode.c $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_verify_decode; \
 	$(BUILD)/zasm_verify_decode
 
-test-zasm-rt-smoke: zasm-bin-lib zasm-verify-lib zasm-rt-lib
-	$(CC) $(CFLAGS) -Iinclude test/zasm_rt_smoke.c $(BIN)/libzasm_rt.a $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_rt_smoke; \
+
+test-zasm-rt-smoke: zxc-lib zasm-bin-lib zasm-verify-lib zasm-rt-lib
+	$(CC) $(CFLAGS) -Iinclude test/zasm_rt_smoke.c $(BIN)/libzasm_rt.a $(BIN)/libzxc.a $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_rt_smoke; \
 	$(BUILD)/zasm_rt_smoke
 
 # ---- zcc (IR -> C) ----

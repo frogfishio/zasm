@@ -21,16 +21,16 @@
   - [x] Add structured error codes (no printf-only failures) for embedder integration
   - [x] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
 
-- [ ] Track 2 — Embeddable runtime API (what integrators call)
+- [x] Track 2 — Embeddable runtime API (what integrators call)
   - [x] Define a stable C header for the “engine/module/instance” API (create/destroy; load; instantiate; run)
-  - [ ] Define the policy object (mem limits, step/fuel limit, strictness knobs) and default behavior
-  - [ ] Define the host interface binding to zingcore/zABI (imports + policing + fail-closed behavior)
-  - [ ] Determinism: ensure identical module+policy yields deterministic results (no timestamps/env by default)
+  - [x] Define the policy object (mem limits, step/fuel limit, strictness knobs) and default behavior
+  - [x] Define the host interface binding to zingcore/zABI (imports + policing + fail-closed behavior)
+  - [x] Determinism: ensure identical module+policy yields deterministic results (no timestamps/env by default)
 
 - [ ] Track 3 — Arm64 JIT backend MVP (fast path)
-  - [ ] Integrate current translation backend (`libzxc` arm64) behind the runtime API
+  - [x] Integrate current translation backend (`libzxc` arm64) behind the runtime API
   - [x] Ensure `zxc` ingests raw opcode bytes as an input format (non-container)
-  - [ ] Enforce W^X code memory discipline in the runtime (no executable+writable at once)
+  - [x] Enforce W^X code memory discipline in the runtime (no executable+writable at once)
   - [ ] Define a target selection API for translation (arm64 first; x86_64 next)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
   - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)

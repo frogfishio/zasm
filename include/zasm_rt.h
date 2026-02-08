@@ -6,6 +6,7 @@
 
 #include "zasm_bin.h"
 #include "zasm_verify.h"
+#include "lembeh_cloak.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -16,8 +17,11 @@ typedef enum zasm_rt_err {
 
   ZASM_RT_ERR_NULL = 1,
   ZASM_RT_ERR_OOM,
+  ZASM_RT_ERR_BAD_POLICY,
   ZASM_RT_ERR_BAD_CONTAINER,
   ZASM_RT_ERR_VERIFY_FAIL,
+  ZASM_RT_ERR_TRANSLATE_FAIL,
+  ZASM_RT_ERR_EXEC_FAIL,
   ZASM_RT_ERR_UNSUPPORTED,
 } zasm_rt_err_t;
 
@@ -25,7 +29,27 @@ typedef enum zasm_rt_err {
  * (0 caps mean "unlimited"; prefer setting caps for untrusted inputs.)
  */
 typedef struct zasm_rt_policy {
+  /* Compatibility / strictness knobs. */
   int allow_primitives;
+
+  /* Guest memory policy used by backends for bounds checks. */
+  uint64_t mem_base;
+  uint64_t mem_size;
+
+  /* Optional execution fuel/step limit (0 = unlimited). */
+  uint64_t fuel;
+
+  /* Determinism policy.
+   * By default, the runtime must not depend on wall-clock time or host env.
+   * If an embedder wants those features, it must explicitly opt in.
+   */
+  int allow_time;
+  int allow_env;
+
+  /* When non-zero, prefer fail-closed behavior for ambiguous cases.
+   * (Currently used for forward-compat; more checks will land as Track 2/4 progresses.) */
+  int strict;
+
   uint32_t max_file_len;
   uint32_t max_dir_count;
   uint32_t max_code_len;
@@ -69,12 +93,21 @@ void zasm_rt_module_destroy(zasm_rt_module_t* module);
 
 const uint8_t* zasm_rt_module_code(const zasm_rt_module_t* module, size_t* out_len);
 
+/* Returns non-zero if the policy is "deterministic by construction".
+ * (Currently: no env/time features enabled.)
+ */
+int zasm_rt_policy_is_deterministic(const zasm_rt_policy_t* policy);
+
+/* Validates policy invariants. When `diag` is provided, sets diag->err on failure. */
+zasm_rt_err_t zasm_rt_policy_validate(const zasm_rt_policy_t* policy, zasm_rt_diag_t* diag);
+
 /* Instance API: placeholder for Track 2+3 work.
  * For now these return ZASM_RT_ERR_UNSUPPORTED.
  */
 zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
                                       const zasm_rt_module_t* module,
                                       const zasm_rt_policy_t* policy,
+                                      const lembeh_host_vtable_t* host,
                                       zasm_rt_instance_t** out_instance,
                                       zasm_rt_diag_t* diag);
 void zasm_rt_instance_destroy(zasm_rt_instance_t* instance);
