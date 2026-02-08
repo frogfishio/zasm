@@ -21,7 +21,8 @@ typedef enum zasm_verify_err {
   ZASM_VERIFY_ERR_BAD_REG,
   ZASM_VERIFY_ERR_BAD_FIELDS,
   ZASM_VERIFY_ERR_BAD_IMM,
-  ZASM_VERIFY_ERR_BAD_TARGET
+  ZASM_VERIFY_ERR_BAD_TARGET,
+  ZASM_VERIFY_ERR_IMPT_MISMATCH
 } zasm_verify_err_t;
 
 typedef struct zasm_verify_opts {
@@ -47,6 +48,13 @@ typedef struct zasm_verify_result {
  */
 zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
                                         const zasm_verify_opts_t* opts);
+
+/* Verify that an IMPT primitive mask exactly matches what CODE uses.
+ * This is only relevant when a container includes an IMPT section.
+ */
+zasm_verify_result_t zasm_verify_preflight_impt(const uint8_t* code, size_t code_len,
+                                                const zasm_verify_opts_t* opts,
+                                                uint32_t prim_mask_declared);
 
 const char* zasm_verify_err_str(zasm_verify_err_t err);
 

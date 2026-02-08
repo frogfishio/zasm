@@ -26,6 +26,7 @@ typedef enum zasm_bin_err {
 
   ZASM_BIN_ERR_SECTION_FLAGS,
   ZASM_BIN_ERR_SECTION_RANGE,
+  ZASM_BIN_ERR_BAD_IMPT,
   ZASM_BIN_ERR_DUP_CODE,
   ZASM_BIN_ERR_MISSING_CODE,
   ZASM_BIN_ERR_BAD_CODE_LEN
@@ -47,6 +48,10 @@ typedef struct zasm_bin_v2 {
   uint32_t file_len;
   uint32_t dir_off;
   uint32_t dir_count;
+
+  /* Optional preflight imports decl (IMPT). */
+  int has_impt;
+  uint32_t prim_mask;
 } zasm_bin_v2_t;
 
 /* Parse a .zasm.bin v2 container and locate the CODE section.

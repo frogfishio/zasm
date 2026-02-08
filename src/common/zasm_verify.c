@@ -40,6 +40,43 @@ static int is_primitive_opcode(uint8_t op) {
   return op >= 0xF0 && op <= 0xF5;
 }
 
+static uint32_t prim_bit_from_opcode(uint8_t op) {
+  if (op < 0xF0 || op > 0xF5) return 0;
+  return 1u << (uint32_t)(op - 0xF0);
+}
+
+static zasm_verify_result_t prim_mask_from_code(const uint8_t* code, size_t code_len,
+                                                const zasm_verify_opts_t* opts,
+                                                uint32_t* out_mask) {
+  if (!out_mask) return fail(ZASM_VERIFY_ERR_NULL, 0, 0);
+  *out_mask = 0;
+  if (!code) return fail(ZASM_VERIFY_ERR_NULL, 0, 0);
+  if (code_len == 0) return fail(ZASM_VERIFY_ERR_EMPTY, 0, 0);
+  if ((code_len % 4u) != 0) return fail(ZASM_VERIFY_ERR_ALIGN, 0, 0);
+
+  size_t off = 0;
+  uint32_t mask = 0;
+  while (off < code_len) {
+    if (off + 4 > code_len) return fail(ZASM_VERIFY_ERR_TRUNC, off, 0);
+    uint32_t w = u32_le(code + off);
+    uint8_t op = (uint8_t)(w >> 24);
+    int32_t imm12 = imm12_sext(w);
+    mask |= prim_bit_from_opcode(op);
+
+    size_t next = off + 4;
+    if (op == 0x70) {
+      if (imm12 == -2048) next += 4;
+      else if (imm12 == -2047) next += 8;
+    }
+    if (next > code_len) return fail(ZASM_VERIFY_ERR_TRUNC, off, op);
+    off = next;
+    (void)opts;
+  }
+
+  *out_mask = mask;
+  return fail(ZASM_VERIFY_OK, 0, 0);
+}
+
 static zasm_verify_result_t build_insn_start_map(const uint8_t* code, size_t code_len,
                                                  const zasm_verify_opts_t* opts,
                                                  uint8_t** out_is_start,
@@ -276,6 +313,46 @@ const char* zasm_verify_err_str(zasm_verify_err_t err) {
     case ZASM_VERIFY_ERR_BAD_FIELDS: return "invalid operand field encoding";
     case ZASM_VERIFY_ERR_BAD_IMM: return "invalid immediate encoding";
     case ZASM_VERIFY_ERR_BAD_TARGET: return "invalid control-flow target";
+    case ZASM_VERIFY_ERR_IMPT_MISMATCH: return "IMPT primitive mask mismatch";
     default: return "unknown error";
   }
+}
+
+zasm_verify_result_t zasm_verify_preflight_impt(const uint8_t* code, size_t code_len,
+                                                const zasm_verify_opts_t* opts,
+                                                uint32_t prim_mask_declared) {
+  zasm_verify_result_t r = zasm_verify_decode(code, code_len, opts);
+  if (r.err != ZASM_VERIFY_OK) return r;
+
+  uint32_t used = 0;
+  r = prim_mask_from_code(code, code_len, opts, &used);
+  if (r.err != ZASM_VERIFY_OK) return r;
+
+  /* Restrict to current known primitive bits (0..5). */
+  if ((prim_mask_declared & ~0x3Fu) != 0) {
+    return fail(ZASM_VERIFY_ERR_BAD_FIELDS, 0, 0);
+  }
+
+  if (used != prim_mask_declared) {
+    /* Try to pinpoint the first primitive used that's not declared. */
+    size_t off = 0;
+    while (off < code_len) {
+      uint32_t w = u32_le(code + off);
+      uint8_t op = (uint8_t)(w >> 24);
+      int32_t imm12 = imm12_sext(w);
+      uint32_t bit = prim_bit_from_opcode(op);
+      if (bit && ((prim_mask_declared & bit) == 0)) {
+        return fail(ZASM_VERIFY_ERR_IMPT_MISMATCH, off, op);
+      }
+      size_t next = off + 4;
+      if (op == 0x70) {
+        if (imm12 == -2048) next += 4;
+        else if (imm12 == -2047) next += 8;
+      }
+      off = next;
+    }
+    return fail(ZASM_VERIFY_ERR_IMPT_MISMATCH, 0, 0);
+  }
+
+  return fail(ZASM_VERIFY_OK, 0, 0);
 }

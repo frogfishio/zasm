@@ -57,6 +57,9 @@ zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
   const uint8_t* code = NULL;
   uint32_t code_len = 0;
 
+  int has_impt = 0;
+  uint32_t prim_mask = 0;
+
   for (uint32_t i = 0; i < dir_count; i++) {
     const uint8_t* ent = in + dir_off + (size_t)i * 20u;
     uint32_t off = u32_le(ent + 4);
@@ -76,6 +79,17 @@ zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
       code = in + off;
       code_len = len;
     }
+
+    if (tag_eq4(ent, "IMPT")) {
+      /* Payload: u32 prim_mask, u32 reserved(0) */
+      if (len != 8) return ZASM_BIN_ERR_BAD_IMPT;
+      if (off + 8u > file_len) return ZASM_BIN_ERR_SECTION_RANGE;
+      uint32_t pm = u32_le(in + off);
+      uint32_t reserved2 = u32_le(in + off + 4);
+      if (reserved2 != 0) return ZASM_BIN_ERR_BAD_IMPT;
+      has_impt = 1;
+      prim_mask = pm;
+    }
   }
 
   if (!code) return ZASM_BIN_ERR_MISSING_CODE;
@@ -85,6 +99,8 @@ zasm_bin_err_t zasm_bin_parse_v2(const uint8_t* in, size_t in_len,
   out->file_len = file_len;
   out->dir_off = dir_off;
   out->dir_count = dir_count;
+  out->has_impt = has_impt;
+  out->prim_mask = prim_mask;
   return ZASM_BIN_OK;
 }
 
@@ -103,6 +119,7 @@ const char* zasm_bin_err_str(zasm_bin_err_t err) {
     case ZASM_BIN_ERR_DIR_RANGE: return "invalid directory range";
     case ZASM_BIN_ERR_SECTION_FLAGS: return "invalid section flags/reserved";
     case ZASM_BIN_ERR_SECTION_RANGE: return "invalid section range";
+    case ZASM_BIN_ERR_BAD_IMPT: return "invalid IMPT section";
     case ZASM_BIN_ERR_DUP_CODE: return "duplicate CODE section";
     case ZASM_BIN_ERR_MISSING_CODE: return "missing CODE section";
     case ZASM_BIN_ERR_BAD_CODE_LEN: return "invalid CODE length";

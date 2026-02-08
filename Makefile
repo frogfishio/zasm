@@ -322,7 +322,7 @@ chew-lower: zem lower zingcore25
 	fi
 	bash ./scripts/chew_lower.sh --input "$(INPUT)" $(CHEW)
 
-test-fuzz: test-fuzz-zas test-fuzz-zld
+test-fuzz: test-fuzz-zas test-fuzz-zld test-fuzz-zasm-bin-verify
 
 test-zop-bytes: zop
 	sh test/zop_bytes.sh
@@ -701,6 +701,10 @@ test-fuzz-zas: zas
 
 test-fuzz-zld: zld
 	test/fuzz_zld_jsonl.sh
+
+test-fuzz-zasm-bin-verify: zasm-bin-lib zasm-verify-lib
+	$(CC) $(CFLAGS) -Iinclude test/zasm_bin_verify_fuzz.c $(BIN)/libzasm_bin.a $(BIN)/libzasm_verify.a -o $(BUILD)/zasm_bin_verify_fuzz; \
+	$(BUILD)/zasm_bin_verify_fuzz
 
 test-abi-linker: zas zld
 	test/abi_linker.sh

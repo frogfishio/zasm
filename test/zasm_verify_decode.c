@@ -100,6 +100,29 @@ static void test_jr_backward_ok(void) {
   assert(r.err == ZASM_VERIFY_OK);
 }
 
+static void test_impt_preflight_match_ok(void) {
+  uint8_t buf[8];
+  /* primitive IN opcode is 0xF0 */
+  write_u32_le(buf + 0, pack(0xF0, 0, 0, 0, 0));
+  write_u32_le(buf + 4, pack(0x01, 0, 0, 0, 0));
+  zasm_verify_result_t r = zasm_verify_preflight_impt(buf, sizeof(buf), NULL, 0x01u);
+  assert(r.err == ZASM_VERIFY_OK);
+}
+
+static void test_impt_preflight_mismatch_fails(void) {
+  uint8_t buf[4];
+  write_u32_le(buf, pack(0xF0, 0, 0, 0, 0));
+  zasm_verify_result_t r = zasm_verify_preflight_impt(buf, sizeof(buf), NULL, 0x00u);
+  assert(r.err == ZASM_VERIFY_ERR_IMPT_MISMATCH);
+}
+
+static void test_impt_preflight_unknown_bits_reject(void) {
+  uint8_t buf[4];
+  write_u32_le(buf, pack(0x01, 0, 0, 0, 0));
+  zasm_verify_result_t r = zasm_verify_preflight_impt(buf, sizeof(buf), NULL, 0x40u);
+  assert(r.err == ZASM_VERIFY_ERR_BAD_FIELDS);
+}
+
 int main(void) {
   test_ok_ret();
   test_bad_reg();
@@ -111,6 +134,9 @@ int main(void) {
   test_jr_target_oob();
   test_call_target_into_ld_ext_word();
   test_jr_backward_ok();
+  test_impt_preflight_match_ok();
+  test_impt_preflight_mismatch_fails();
+  test_impt_preflight_unknown_bits_reject();
   printf("zasm_verify decode tests passed\n");
   return 0;
 }

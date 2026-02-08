@@ -17,9 +17,9 @@
   - [ ] Implement verifier MVP:
     - [x] Opcode decode validity (reserved opcode/fields/regs/ext arity) per `docs/spec/opcode_encoding.md`
     - [x] Control-flow target validation for `JR`/`CALL` (in-bounds, instruction boundary)
-    - [ ] Module preflight checks (`IMPT` primitive mask agreement, if present)
+    - [x] Module preflight checks (`IMPT` primitive mask agreement, if present)
   - [ ] Add structured error codes (no printf-only failures) for embedder integration
-  - [ ] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
+  - [x] Add fuzz harness for parser+verifier (crash-free, OOM-safe) and wire into CI target
 
 - [ ] Track 2 — Embeddable runtime API (what integrators call)
   - [ ] Define a stable C header for the “engine/module/instance” API (create/destroy; load; instantiate; run)
