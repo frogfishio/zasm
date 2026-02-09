@@ -2,7 +2,7 @@
 
 #include "zi_caps.h"
 #include "zi_event_bus25.h"
-#include "zi_file_fs25.h"
+#include "zi_file_aio25.h"
 #include "zi_handles25.h"
 #include "zi_net_tcp25.h"
 #include "zi_proc_argv25.h"
@@ -10,6 +10,7 @@
 #include "zi_proc_hopper25.h"
 #include "zi_runtime25.h"
 #include "zi_sys_info25.h"
+#include "zi_sys_loop25.h"
 #include "zi_sysabi25.h"
 
 #include <errno.h>
@@ -27,7 +28,7 @@
 // end-to-end smoke:
 // - CAPS_LIST via zi_ctl
 // - open proc/argv and read its packed stream
-// - open file/fs, write+read a file (uses ZI_FS_ROOT if set; else writes in /tmp)
+// - open file/aio, write+read a file asynchronously
 
 typedef struct {
   int fd;
@@ -429,6 +430,20 @@ static void build_fs_params(uint8_t params[20], const char *path, uint32_t oflag
   zcl1_write_u32(params + 8, (uint32_t)strlen(path));
   zcl1_write_u32(params + 12, oflags);
   zcl1_write_u32(params + 16, create_mode);
+}
+
+static int read_frame_spin(zi_handle_t h, uint8_t *out, uint32_t cap) {
+  uint32_t off = 0;
+  for (;;) {
+    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(out + off), (zi_size32_t)(cap - off));
+    if (n == ZI_E_AGAIN) continue;
+    if (n <= 0) return 0;
+    off += (uint32_t)n;
+    if (off >= 24) {
+      uint32_t pl = zcl1_read_u32(out + 20);
+      if (off >= 24u + pl) return (int)(24u + pl);
+    }
+  }
 }
 
 static void dump_caps_list(void) {
@@ -1112,7 +1127,7 @@ static int event_bus_smoke(void) {
   return 1;
 }
 
-static int fs_smoke(void) {
+static int aio_smoke(void) {
   const char *root = getenv("ZI_FS_ROOT");
   const char *guest_path = "/all_caps_demo.txt";
 
@@ -1124,48 +1139,100 @@ static int fs_smoke(void) {
     guest_path = tmpfile;
   }
 
-  const char *msg = "hello from file/fs\n";
+  const char *msg = "hello from file/aio\n";
 
-  uint8_t params[20];
-  uint8_t req[40];
-
-  // Write
-  build_fs_params(params, guest_path, ZI_FILE_O_WRITE | ZI_FILE_O_CREATE | ZI_FILE_O_TRUNC, 0644);
-  build_open_req(req, ZI_CAP_KIND_FILE, ZI_CAP_NAME_FS, params, (uint32_t)sizeof(params));
-  zi_handle_t hw = zi_cap_open((zi_ptr_t)(uintptr_t)req);
-  if (hw < 3) {
-    fprintf(stderr, "file/fs open(write) failed: %d\n", hw);
-    return 0;
-  }
-  int32_t wn = zi_write(hw, (zi_ptr_t)(uintptr_t)msg, (zi_size32_t)strlen(msg));
-  if (wn != (int32_t)strlen(msg)) {
-    fprintf(stderr, "file/fs write failed: %d\n", wn);
-    (void)zi_end(hw);
-    return 0;
-  }
-  (void)zi_end(hw);
-
-  // Read
-  build_fs_params(params, guest_path, ZI_FILE_O_READ, 0);
-  build_open_req(req, ZI_CAP_KIND_FILE, ZI_CAP_NAME_FS, params, (uint32_t)sizeof(params));
-  zi_handle_t hr = zi_cap_open((zi_ptr_t)(uintptr_t)req);
-  if (hr < 3) {
-    fprintf(stderr, "file/fs open(read) failed: %d\n", hr);
-    return 0;
-  }
-  char buf[128];
-  memset(buf, 0, sizeof(buf));
-  int32_t rn = zi_read(hr, (zi_ptr_t)(uintptr_t)buf, (zi_size32_t)(sizeof(buf) - 1));
-  (void)zi_end(hr);
-  if (rn <= 0) {
-    fprintf(stderr, "file/fs read failed: %d\n", rn);
-    return 0;
-  }
-  if ((size_t)rn != strlen(msg) || memcmp(buf, msg, (size_t)rn) != 0) {
-    fprintf(stderr, "file/fs content mismatch\n");
+  uint8_t open_req[40];
+  build_open_req(open_req, ZI_CAP_KIND_FILE, ZI_CAP_NAME_AIO, NULL, 0);
+  zi_handle_t aio = zi_cap_open((zi_ptr_t)(uintptr_t)open_req);
+  if (aio < 3) {
+    fprintf(stderr, "file/aio open failed: %d\n", aio);
     return 0;
   }
 
+  uint8_t params[20];
+  build_fs_params(params, guest_path, ZI_FILE_O_READ | ZI_FILE_O_WRITE | ZI_FILE_O_CREATE | ZI_FILE_O_TRUNC, 0644);
+
+  uint8_t fr[65536];
+
+  // OPEN (rid=1)
+  uint8_t req[24 + 32];
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_OPEN, 1, params, (uint32_t)sizeof(params));
+  if (zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(params)) != (int32_t)(24u + sizeof(params))) {
+    fprintf(stderr, "file/aio OPEN submit failed\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  int got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr));
+  if (got < 24 || zcl1_status(fr) != 1 || zcl1_read_u32(fr + 8) != 1u) {
+    fprintf(stderr, "file/aio OPEN ack failed\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr));
+  if (got < 24 || zcl1_status(fr) != 1 || zcl1_read_u32(fr + 8) != 1u) {
+    fprintf(stderr, "file/aio OPEN done failed\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+  const uint8_t *pl = fr + 24;
+  if (zcl1_read_u32(pl + 4) != 0u) {
+    fprintf(stderr, "file/aio OPEN result unexpected\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+  uint64_t file_id = (uint64_t)zcl1_read_u32(pl + 8) | ((uint64_t)zcl1_read_u32(pl + 12) << 32);
+  if (file_id == 0) {
+    fprintf(stderr, "file/aio OPEN file_id=0\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // WRITE (rid=2)
+  uint8_t wpl[32];
+  write_u64le(wpl + 0, file_id);
+  write_u64le(wpl + 8, 0);
+  write_u64le(wpl + 16, (uint64_t)(uintptr_t)msg);
+  zcl1_write_u32(wpl + 24, (uint32_t)strlen(msg));
+  zcl1_write_u32(wpl + 28, 0);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_WRITE, 2, wpl, (uint32_t)sizeof(wpl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(wpl));
+  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+
+  // READ (rid=3)
+  uint8_t rpl2[24];
+  write_u64le(rpl2 + 0, file_id);
+  write_u64le(rpl2 + 8, 0);
+  zcl1_write_u32(rpl2 + 16, 128u);
+  zcl1_write_u32(rpl2 + 20, 0);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_READ, 3, rpl2, (uint32_t)sizeof(rpl2));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(rpl2));
+  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio READ done failed\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+  pl = fr + 24;
+  uint32_t nbytes = zcl1_read_u32(pl + 4);
+  if (nbytes != (uint32_t)strlen(msg) || memcmp(pl + 8, msg, nbytes) != 0) {
+    fprintf(stderr, "file/aio READ content mismatch\n");
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // CLOSE (rid=4)
+  uint8_t cpl[8];
+  write_u64le(cpl, file_id);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_CLOSE, 4, cpl, (uint32_t)sizeof(cpl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(cpl));
+  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+
+  (void)zi_end(aio);
   return 1;
 }
 
@@ -1218,12 +1285,13 @@ int main(int argc, char **argv) {
   (void)zi_cap_register(&cap_demo_echo_v1);
   (void)zi_cap_register(&cap_demo_version_v1);
   (void)zi_event_bus25_register();
-  (void)zi_file_fs25_register();
+  (void)zi_file_aio25_register();
   (void)zi_net_tcp25_register();
   (void)zi_proc_argv25_register();
   (void)zi_proc_env25_register();
   (void)zi_proc_hopper25_register();
   (void)zi_sys_info25_register();
+  (void)zi_sys_loop25_register();
 
   // Wire stdio handles.
   (void)zi_handles25_init();
@@ -1240,7 +1308,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const char *banner = "all_caps_demo: caps + argv + file/fs\n";
+  const char *banner = "all_caps_demo: caps + argv + file/aio\n";
   (void)zi_write(h_out, (zi_ptr_t)(uintptr_t)banner, (zi_size32_t)strlen(banner));
 
   dump_caps_list();
@@ -1265,8 +1333,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (!fs_smoke()) {
-    fprintf(stderr, "file/fs smoke failed\n");
+  if (!aio_smoke()) {
+    fprintf(stderr, "file/aio smoke failed\n");
     return 1;
   }
 

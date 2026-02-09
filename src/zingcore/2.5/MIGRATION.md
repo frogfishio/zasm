@@ -185,10 +185,15 @@ zi_handle_t h_err = zi_handle25_alloc(&fd_ops, &s_err, ZI_H_WRITABLE);
 All golden caps are production-ready with tests, docs, and sandboxing:
 
 - **file/fs**: Filesystem with `ZI_FS_ROOT` sandbox.
+- **file/aio**: Async filesystem jobs + completions (await via `sys/loop`).
 - **proc/argv, proc/env**: Read-only access to args/env.
 - **proc/hopper**: Safe arena allocator with catalog + optional direct-call ABI.
 - **net/tcp**: TCP client with DNS resolution, gated by `ZI_NET_ALLOW`.
 - **async/default**: Async invocation with futures, cancellation, event streams.
+
+Notes:
+- `file/fs@v1` is compiled but not registered by default; prefer `file/aio@v1` for an async-first model.
+- `sys/loop@v1` is the unified blocking primitive (WATCH + POLL + retry on `ZI_E_AGAIN`).
 
 ### 2. Hopper Direct-Call ABI (`zi_hopabi25`)
 

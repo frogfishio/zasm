@@ -70,15 +70,12 @@ If a runtime exposes any capabilities, it must provide the caps extension (`zi_c
 `zi_handle_hflags`). Capability discovery is done via `zi_ctl` (CAPS_LIST) which returns a
 deterministic list and per-cap flags/metadata.
 
-## File capability (golden)
+## File capabilities (golden)
 
-zingcore 2.5 includes a production-ready **file system capability**:
+zingcore 2.5 provides an async-first filesystem surface built around `sys/loop`:
 
-- kind: `"file"`
-- name: `"fs"`
-- version: `1`
-
-It is opened via `zi_cap_open()` and returns a stream handle usable with `zi_read`/`zi_write`/`zi_end`.
+- `file/aio@v1` (async, completion-based; pollable via `sys/loop`)
+- `file/fs@v1` (sync stream files; compiled but not registered by default)
 
 ### zi_cap_open request format
 
@@ -92,7 +89,18 @@ It is opened via `zi_cap_open()` and returns a stream handle usable with `zi_rea
 - `u64 params_ptr`
 - `u32 params_len`
 
-### file/fs open params format
+### file/aio protocol (overview)
+
+`file/aio@v1` is opened via `zi_cap_open()` with **empty params** and returns a pollable stream handle.
+
+- Requests are written as ZCL1 frames (`zi_write`).
+- Immediate acks are read back as ZCL1 frames (`zi_read`).
+- Completions are delivered asynchronously as ZCL1 frames with `op = 100` (`EV_DONE`) and `rid` equal to the request `rid`.
+- Guests block only in `sys/loop.POLL`: WATCH the `file/aio` handle for readability, POLL, then read completions.
+
+Normative spec: `abi/FILE_AIO_PROTOCOL.md`.
+
+### file/fs open params format (optional)
 
 When kind/name select file/fs, `params_ptr` points at a packed little-endian params blob (20 bytes):
 

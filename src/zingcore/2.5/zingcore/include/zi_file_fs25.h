@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "zi_caps.h"
+#include "zi_file_open_flags25.h"
 #include "zi_sysabi25.h"
 
 #ifdef __cplusplus
@@ -33,14 +34,6 @@ extern "C" {
 // - If env var ZI_FS_ROOT is set, absolute guest paths like "/a/b.txt" are resolved
 //   under that host folder using openat(); ".." is rejected and symlinks are rejected
 //   in any path segment.
-
-enum {
-  ZI_FILE_O_READ = 1u << 0,
-  ZI_FILE_O_WRITE = 1u << 1,
-  ZI_FILE_O_CREATE = 1u << 2,
-  ZI_FILE_O_TRUNC = 1u << 3,
-  ZI_FILE_O_APPEND = 1u << 4,
-};
 
 // Returns the cap descriptor for file/fs (version 1).
 const zi_cap_v1 *zi_file_fs25_cap(void);

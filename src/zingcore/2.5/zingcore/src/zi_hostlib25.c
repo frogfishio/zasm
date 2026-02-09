@@ -4,7 +4,7 @@
 
 #include "zi_caps.h"
 #include "zi_event_bus25.h"
-#include "zi_file_fs25.h"
+#include "zi_file_aio25.h"
 #include "zi_handles25.h"
 #include "zi_net_http25.h"
 #include "zi_net_tcp25.h"
@@ -123,7 +123,7 @@ static int32_t host_telemetry(void *ctx, zi_ptr_t topic_ptr, zi_size32_t topic_l
 
 static int register_all_caps(void) {
   if (!zi_event_bus25_register()) return 0;
-  if (!zi_file_fs25_register()) return 0;
+  if (!zi_file_aio25_register()) return 0;
   if (!zi_net_tcp25_register()) return 0;
   if (!zi_net_http25_register()) return 0;
   if (!zi_proc_argv25_register()) return 0;

@@ -15,9 +15,10 @@ extern "C" {
 // Key properties:
 // - Guest pointers are treated as native pointers (via zi_mem_v1_native_init).
 // - Standard streams are exposed as handles 0/1/2 (stdin/stdout/stderr).
-// - Built-in caps are registered (event/bus, file/fs, net/tcp, net/http,
+// - Built-in caps are registered (event/bus, file/aio, net/tcp, net/http,
 //   proc/{argv,env,hopper}, sys/{info,loop}).
 // - async/default@v1 is compiled but not registered by default.
+// - file/fs@v1 is compiled but not registered by default.
 
 // Initializes zingcore25 + host wiring with a permissive configuration.
 //

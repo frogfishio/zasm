@@ -39,7 +39,8 @@ The following capabilities are **production-ready** and **stable** within zABI 2
 
 | Capability | Identity | Sandbox | Status |
 |------------|----------|---------|--------|
-| Filesystem | `file/fs@v1` | `ZI_FS_ROOT` | Golden |
+| Async Filesystem | `file/aio@v1` | `ZI_FS_ROOT` | Golden |
+| Sync Filesystem | `file/fs@v1` | `ZI_FS_ROOT` | Optional (not registered by default) |
 | Process Args | `proc/argv@v1` | read-only | Golden |
 | Process Env | `proc/env@v1` | read-only | Golden |
 | Hopper Arena | `proc/hopper@v1` | isolated instance | Golden |

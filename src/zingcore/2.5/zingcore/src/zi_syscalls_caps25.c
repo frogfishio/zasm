@@ -4,7 +4,7 @@
 #include "zi_caps.h"
 #include "zi_async_default25.h"
 #include "zi_event_bus25.h"
-#include "zi_file_fs25.h"
+#include "zi_file_aio25.h"
 #include "zi_net_tcp25.h"
 #include "zi_net_http25.h"
 #include "zi_proc_argv25.h"
@@ -136,9 +136,9 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   if (!found) return (zi_handle_t)ZI_E_NOENT;
   if ((found->cap_flags & ZI_CAP_CAN_OPEN) == 0) return (zi_handle_t)ZI_E_DENIED;
 
-  // file/fs v1
-  if (strcmp(found->kind, ZI_CAP_KIND_FILE) == 0 && strcmp(found->name, ZI_CAP_NAME_FS) == 0 && found->version == 1) {
-    return zi_file_fs25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  // file/aio v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_FILE) == 0 && strcmp(found->name, ZI_CAP_NAME_AIO) == 0 && found->version == 1) {
+    return zi_file_aio25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
   // async/default v1 (no params)
