@@ -30,6 +30,9 @@ typedef enum zasm_rt_trap {
   ZASM_RT_TRAP_FUEL = 1,
   ZASM_RT_TRAP_OOB = 2,
   ZASM_RT_TRAP_DIV0 = 3,
+  /* Translation-time traps (reported when translation fails). */
+  ZASM_RT_TRAP_UNSUPPORTED_OP = 4,
+  ZASM_RT_TRAP_DECODE = 5,
 } zasm_rt_trap_t;
 
 /* Translation/execution target selection.

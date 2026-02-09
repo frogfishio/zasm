@@ -183,6 +183,24 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   zasm_rt_instance_t *inst = NULL;
   e = zasm_rt_instance_create(engine, module, &policy, host, &inst, &diag);
   if (e != ZASM_RT_OK) {
+    if (e == ZASM_RT_ERR_TRANSLATE_FAIL && diag.trap != ZASM_RT_TRAP_NONE) {
+      switch (diag.trap) {
+        case ZASM_RT_TRAP_UNSUPPORTED_OP:
+          fprintf(stderr, "zrt: trap: unsupported opcode\n");
+          break;
+        case ZASM_RT_TRAP_DECODE:
+          fprintf(stderr, "zrt: trap: invalid instruction encoding\n");
+          break;
+        default:
+          fprintf(stderr, "zrt: trap\n");
+          break;
+      }
+      print_diag(&diag);
+      zasm_rt_module_destroy(module);
+      zasm_rt_engine_destroy(engine);
+      return 1;
+    }
+
     fprintf(stderr, "zrt: error: instance_create: %s\n", zasm_rt_err_str(e));
     print_diag(&diag);
     zasm_rt_module_destroy(module);

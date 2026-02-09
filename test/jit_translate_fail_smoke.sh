@@ -63,7 +63,7 @@ EOF
 
 "$BIN_DIR/zop" --container build/jit_translate_fail/bad_shift.opcodes.jsonl > build/jit_translate_fail/bad_shift.zasm.bin
 run_case "bad_shift" 1 \
-  "zrt: error: instance_create: translation failed" \
+  "zrt: trap: invalid instruction encoding" \
   "diag: translate: err=4(opcode) off=0 opcode=0x30 insn=0x30000040"
 
 echo "jit_translate_fail_smoke: all cases passed"

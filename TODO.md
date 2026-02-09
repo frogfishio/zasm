@@ -48,6 +48,7 @@
       - [ ] ABI misuse / host-call failure (structured trap)
       - [ ] OOM (structured trap)
     - [ ] Extend runtime diagnostics to include trap category + best-effort PC/offset
+      - [x] Translation failure diagnostics include err/off/opcode/insn
     - [ ] Ensure all failures are fail-closed (no host crashes, no UB)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
     - [ ] Define cache key precisely (target arch + any codegen-affecting policy bits)
@@ -59,6 +60,7 @@
       - [x] Fuel trap smoke coverage
       - [x] OOB trap smoke coverage (JIT-only)
       - [x] DIV0 trap smoke coverage (JIT-only)
+      - [x] Translate-fail smoke coverage (diag: translate: ...)
       - [ ] Unsupported-op smoke coverage
       - [ ] ABI misuse smoke coverage
   - [x] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr

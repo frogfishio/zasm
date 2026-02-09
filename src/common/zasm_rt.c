@@ -558,6 +558,10 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 #endif
   if (tr.err != ZXC_OK) {
     if (diag) {
+      if (tr.err == ZXC_ERR_UNIMPL) diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
+      else if (tr.err == ZXC_ERR_TRUNC || tr.err == ZXC_ERR_ALIGN || tr.err == ZXC_ERR_OPCODE) {
+        diag->trap = ZASM_RT_TRAP_DECODE;
+      }
       diag->translate_err = (uint32_t)tr.err;
       diag->translate_off = tr.in_off;
       diag->translate_opcode = 0;
