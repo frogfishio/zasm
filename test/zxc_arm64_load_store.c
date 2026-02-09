@@ -20,6 +20,8 @@ static uint32_t read_u32_le(const uint8_t* p) {
 int main(void) {
   uint8_t in[12];
   uint8_t out[256];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* LD8U DE, [HL+4]; LD16S DE, [HL-2]; ST32 [HL], A */
   uint32_t ld8u = (0x71u << 24) | (1u << 20) | (0u << 16) | (0u << 12) | 4u;
@@ -36,7 +38,7 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 124) {
+  if (r.out_len != 148) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
@@ -50,7 +52,7 @@ int main(void) {
     0xF2A2000Au, /* movk x10, #0x1000, lsl #16 */
     0x8B090149u, /* add x9, x10, x9 */
     0x39400121u, /* ldrb w1, [x9] */
-    0x14000001u, /* b +1 */
+    0x14000002u, /* b +2 */
     0xD4200000u  /* brk */
   };
   uint32_t expect_ld16s[] = {
@@ -63,7 +65,7 @@ int main(void) {
     0x8B090149u, /* add x9, x10, x9 */
     0x79400121u, /* ldrh w1, [x9] */
     0x13003C21u, /* sxth w1, w1 */
-    0x14000001u, /* b +1 */
+    0x14000002u, /* b +2 */
     0xD4200000u  /* brk */
   };
   uint32_t expect_st32[] = {
@@ -75,26 +77,26 @@ int main(void) {
     0xF2A2000Au, /* movk x10, #0x1000, lsl #16 */
     0x8B090149u, /* add x9, x10, x9 */
     0xB9000122u, /* str w2, [x9] */
-    0x14000001u, /* b +1 */
+    0x14000002u, /* b +2 */
     0xD4200000u  /* brk */
   };
 
   for (int i = 0; i < 10; i++) {
-    uint32_t got = read_u32_le(out + (size_t)i * 4);
+    uint32_t got = read_u32_le(out + prologue_bytes + (size_t)i * 4);
     if (got != expect_ld8u[i]) {
       fprintf(stderr, "unexpected LD8U encoding at %d\n", i);
       return 1;
     }
   }
   for (int i = 0; i < 11; i++) {
-    uint32_t got = read_u32_le(out + (size_t)(10 + i) * 4);
+    uint32_t got = read_u32_le(out + prologue_bytes + (size_t)(10 + i) * 4);
     if (got != expect_ld16s[i]) {
       fprintf(stderr, "unexpected LD16S encoding at %d\n", i);
       return 1;
     }
   }
   for (int i = 0; i < 10; i++) {
-    uint32_t got = read_u32_le(out + (size_t)(21 + i) * 4);
+    uint32_t got = read_u32_le(out + prologue_bytes + (size_t)(21 + i) * 4);
     if (got != expect_st32[i]) {
       fprintf(stderr, "unexpected ST32 encoding at %d\n", i);
       return 1;

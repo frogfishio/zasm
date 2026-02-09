@@ -20,6 +20,8 @@ static uint32_t read_u32_le(const uint8_t* p) {
 int main(void) {
   uint8_t in[8];
   uint8_t out[256];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* LDIR; FILL */
   uint32_t ldir = (0x90u << 24);
@@ -34,7 +36,7 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 124) {
+  if (r.out_len != 148) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
@@ -56,7 +58,7 @@ int main(void) {
     0x91000421u, /* add x1, x1, #1 */
     0xD1000463u, /* sub x3, x3, #1 */
     0xB5FFFE83u, /* cbnz x3, loop */
-    0x14000001u, /* b +1 */
+    0x14000002u, /* b +2 */
     0xD4200000u  /* brk */
   };
   uint32_t expect_fill[] = {
@@ -71,19 +73,19 @@ int main(void) {
     0x91000400u, /* add x0, x0, #1 */
     0xD1000463u, /* sub x3, x3, #1 */
     0xB5FFFF23u, /* cbnz x3, loop */
-    0x14000001u, /* b +1 */
+    0x14000002u, /* b +2 */
     0xD4200000u  /* brk */
   };
 
   for (int i = 0; i < 18; i++) {
-    uint32_t got = read_u32_le(out + (size_t)i * 4);
+    uint32_t got = read_u32_le(out + prologue_bytes + (size_t)i * 4);
     if (got != expect_ldir[i]) {
       fprintf(stderr, "ldir encoding mismatch at %d\n", i);
       return 1;
     }
   }
   for (int i = 0; i < 13; i++) {
-    uint32_t got = read_u32_le(out + (size_t)(18 + i) * 4);
+    uint32_t got = read_u32_le(out + prologue_bytes + (size_t)(18 + i) * 4);
     if (got != expect_fill[i]) {
       fprintf(stderr, "fill encoding mismatch at %d\n", i);
       return 1;

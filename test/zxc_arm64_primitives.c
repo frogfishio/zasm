@@ -39,6 +39,18 @@ static uint32_t enc_mov_reg(uint8_t rd, uint8_t rn) {
   return 0xAA1F0000u | ((uint32_t)rn << 5) | rd;
 }
 
+static uint32_t enc_sub_imm_x(uint8_t rd, uint8_t rn, uint16_t imm12) {
+  return 0xD1000000u | ((uint32_t)imm12 << 10) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_add_imm_x(uint8_t rd, uint8_t rn, uint16_t imm12) {
+  return 0x91000000u | ((uint32_t)imm12 << 10) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_str_x_unsigned(uint8_t rt, uint8_t rn, uint16_t imm12_scaled) {
+  return 0xF9000000u | ((uint32_t)imm12_scaled << 10) | ((uint32_t)rn << 5) | rt;
+}
+
 static uint32_t enc_ldr_x_off(uint8_t rt, uint8_t rn, uint16_t imm12_scaled) {
   return 0xF9400000u | ((uint32_t)imm12_scaled << 10) | ((uint32_t)rn << 5) | rt;
 }
@@ -62,10 +74,13 @@ int main(void) {
     return 1;
   }
 
-  const size_t prim_words = 9;
-  const size_t prim_bytes = prim_words * 4;
-  if (res.out_len < prim_bytes + 4) {
-    fprintf(stderr, "output too small: %zu\n", res.out_len);
+  const size_t prim_prologue_words = 2; /* mov sys_ptr,x2; mov res_handle,x1 */
+  const size_t frame_prologue_words = 6;
+  const size_t prim_body_words = 13; /* includes syscall LR save/restore */
+  const size_t want_words = prim_prologue_words + frame_prologue_words + prim_body_words + 5; /* RET epilogue (4) + ret (1) */
+  const size_t want_bytes = want_words * 4;
+  if (res.out_len != want_bytes) {
+    fprintf(stderr, "unexpected output length: %zu\n", res.out_len);
     return 1;
   }
 
@@ -75,32 +90,36 @@ int main(void) {
     return 1;
   }
 
-  size_t prim_off = ret_off - prim_bytes;
-  if (prim_off < 8) {
-    fprintf(stderr, "missing primitive prologue\n");
+  /* primitive prologue at start */
+  if (read_u32_le(out + 0) != enc_mov_reg(ZXC_SYS_PTR, 2)) {
+    fprintf(stderr, "missing syscalls pointer staging\n");
     return 1;
   }
-
-  uint32_t expect_tail = enc_mov_reg(ZXC_RES_HANDLE, 1);
-  if (read_u32_le(out + prim_off - 4) != expect_tail) {
+  if (read_u32_le(out + 4) != enc_mov_reg(ZXC_RES_HANDLE, 1)) {
     fprintf(stderr, "missing res handle staging\n");
     return 1;
   }
 
+  const size_t prim_off = (prim_prologue_words + frame_prologue_words) * 4;
+
   const uint16_t sys_slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, write) / 8);
-  const uint32_t expect[9] = {
+  const uint32_t expect[13] = {
     enc_mov_reg(ZXC_SCRATCH, 0),
     enc_mov_reg(ZXC_SCRATCH2, 1),
     enc_mov_reg(0, ZXC_RES_HANDLE),
     enc_mov_reg(1, ZXC_SCRATCH),
     enc_mov_reg(2, ZXC_SCRATCH2),
+    enc_sub_imm_x(31, 31, 16),
+    enc_str_x_unsigned(30, 31, 0),
     enc_ldr_x_off(ZXC_CMP, ZXC_SYS_PTR, sys_slot),
     enc_blr(ZXC_CMP),
+    enc_ldr_x_off(30, 31, 0),
+    enc_add_imm_x(31, 31, 16),
     enc_mov_reg(0, ZXC_SCRATCH),
     enc_mov_reg(1, ZXC_SCRATCH2)
   };
 
-  for (size_t i = 0; i < prim_words; i++) {
+  for (size_t i = 0; i < prim_body_words; i++) {
     uint32_t got = read_u32_le(out + prim_off + i * 4);
     if (got != expect[i]) {
       fprintf(stderr, "prim[%zu]: expected %08x got %08x\n", i, expect[i], got);

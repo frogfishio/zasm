@@ -261,6 +261,15 @@ static int imm_from_operand_any(const operand_t* op,
   return 1;
 }
 
+static int pick_tmp_reg(int avoid0, int avoid1) {
+  /* Prefer A (common scratch), then IX, then others as a last resort. */
+  const int cand[] = {2, 4, 3, 1, 0};
+  for (size_t i = 0; i < sizeof(cand) / sizeof(cand[0]); i++) {
+    if (cand[i] != avoid0 && cand[i] != avoid1) return cand[i];
+  }
+  return -1;
+}
+
 static int label_from_operand(const operand_t* op, const symtab_t* syms, int64_t* out, char* err, size_t errlen) {
   if (!op) return 1;
   if (op->t == JOP_SYM && op->s) {
@@ -418,6 +427,14 @@ static int encode_instr(const record_t* r,
     uint32_t w = pack_word(op, (uint8_t)r0, (uint8_t)r0, 0, 0);
     return emit_word(buf, cap, out_len, w);
   }
+
+  if (strcmp(m, "DROP") == 0) {
+    if (nops != 1) { snprintf(err, errlen, "DROP expects 1 operand"); return 1; }
+    int r0 = -1;
+    if (!is_reg_operand(&ops[0], &r0)) { snprintf(err, errlen, "DROP expects register operand"); return 1; }
+    uint32_t w = pack_word(0x04, (uint8_t)r0, 0, 0, 0);
+    return emit_word(buf, cap, out_len, w);
+  }
   if (strcmp(m, "CALL") == 0) {
     if (nops != 1) { snprintf(err, errlen, "CALL expects 1 operand"); return 1; }
     if (ops[0].t == JOP_SYM && ops[0].s) {
@@ -552,16 +569,38 @@ static int encode_instr(const record_t* r,
         return 1;
       }
       int rd = -1, rs1 = -1, rs2 = -1;
+      int64_t imm = 0;
+      const operand_t* rhs = NULL;
       if (nops == 2) {
-        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs2)) {
-          snprintf(err, errlen, "%s expects register operands", m);
+        rhs = &ops[1];
+        if (!is_reg_operand(&ops[0], &rd)) {
+          snprintf(err, errlen, "%s expects register destination", m);
           return 1;
         }
         rs1 = rd;
+        if (is_reg_operand(rhs, &rs2)) {
+          /* ok */
+        } else {
+          if (imm_from_operand_any(rhs, const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
+          int tmp = pick_tmp_reg(rd, rs1);
+          if (tmp < 0) { snprintf(err, errlen, "%s immediate form needs a scratch register", m); return 1; }
+          if (emit_ld_imm(buf, cap, out_len, (uint8_t)tmp, imm, err, errlen) != 0) return 1;
+          rs2 = tmp;
+        }
       } else {
-        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs1) || !is_reg_operand(&ops[2], &rs2)) {
+        rhs = &ops[2];
+        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs1)) {
           snprintf(err, errlen, "%s expects register operands", m);
           return 1;
+        }
+        if (is_reg_operand(rhs, &rs2)) {
+          /* ok */
+        } else {
+          if (imm_from_operand_any(rhs, const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
+          int tmp = pick_tmp_reg(rd, rs1);
+          if (tmp < 0) { snprintf(err, errlen, "%s immediate form needs a scratch register", m); return 1; }
+          if (emit_ld_imm(buf, cap, out_len, (uint8_t)tmp, imm, err, errlen) != 0) return 1;
+          rs2 = tmp;
         }
       }
       uint32_t w = pack_word(arith[i].op, (uint8_t)rd, (uint8_t)rs1, (uint8_t)rs2, 0);
@@ -598,6 +637,20 @@ static int encode_instr(const record_t* r,
     }
   }
 
+  struct { const char* name; uint8_t op; } bitops[] = {
+    {"CLZ",0x35},{"CTZ",0x36},{"POPC",0x37},
+    {"CLZ64",0x45},{"CTZ64",0x46},{"POPC64",0x47}
+  };
+  for (size_t i = 0; i < sizeof(bitops)/sizeof(bitops[0]); i++) {
+    if (strcmp(m, bitops[i].name) == 0) {
+      if (nops != 1) { snprintf(err, errlen, "%s expects 1 operand", m); return 1; }
+      int rd = -1;
+      if (!is_reg_operand(&ops[0], &rd)) { snprintf(err, errlen, "%s expects register operand", m); return 1; }
+      uint32_t w = pack_word(bitops[i].op, (uint8_t)rd, (uint8_t)rd, (uint8_t)rd, 0);
+      return emit_word(buf, cap, out_len, w);
+    }
+  }
+
   struct { const char* name; uint8_t op; } cmps[] = {
     {"EQ",0x50},{"NE",0x51},{"LTS",0x52},{"LES",0x53},{"GTS",0x54},{"GES",0x55},
     {"LTU",0x56},{"LEU",0x57},{"GTU",0x58},{"GEU",0x59},
@@ -611,16 +664,38 @@ static int encode_instr(const record_t* r,
         return 1;
       }
       int rd = -1, rs1 = -1, rs2 = -1;
+      int64_t imm = 0;
+      const operand_t* rhs = NULL;
       if (nops == 2) {
-        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs2)) {
-          snprintf(err, errlen, "%s expects register operands", m);
+        rhs = &ops[1];
+        if (!is_reg_operand(&ops[0], &rd)) {
+          snprintf(err, errlen, "%s expects register destination", m);
           return 1;
         }
         rs1 = rd;
+        if (is_reg_operand(rhs, &rs2)) {
+          /* ok */
+        } else {
+          if (imm_from_operand_any(rhs, const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
+          int tmp = pick_tmp_reg(rd, rs1);
+          if (tmp < 0) { snprintf(err, errlen, "%s immediate form needs a scratch register", m); return 1; }
+          if (emit_ld_imm(buf, cap, out_len, (uint8_t)tmp, imm, err, errlen) != 0) return 1;
+          rs2 = tmp;
+        }
       } else {
-        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs1) || !is_reg_operand(&ops[2], &rs2)) {
+        rhs = &ops[2];
+        if (!is_reg_operand(&ops[0], &rd) || !is_reg_operand(&ops[1], &rs1)) {
           snprintf(err, errlen, "%s expects register operands", m);
           return 1;
+        }
+        if (is_reg_operand(rhs, &rs2)) {
+          /* ok */
+        } else {
+          if (imm_from_operand_any(rhs, const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
+          int tmp = pick_tmp_reg(rd, rs1);
+          if (tmp < 0) { snprintf(err, errlen, "%s immediate form needs a scratch register", m); return 1; }
+          if (emit_ld_imm(buf, cap, out_len, (uint8_t)tmp, imm, err, errlen) != 0) return 1;
+          rs2 = tmp;
         }
       }
       uint32_t w = pack_word(cmps[i].op, (uint8_t)rd, (uint8_t)rs1, (uint8_t)rs2, 0);
@@ -655,7 +730,16 @@ static int encode_instr(const record_t* r,
       int base = reg_id(ops[0].s);
       if (base < 0) { snprintf(err, errlen, "%s expects register memory base", m); return 1; }
       int rs2 = -1;
-      if (!is_reg_operand(&ops[1], &rs2)) { snprintf(err, errlen, "%s expects register source", m); return 1; }
+      if (is_reg_operand(&ops[1], &rs2)) {
+        /* ok */
+      } else {
+        int64_t imm = 0;
+        if (imm_from_operand_any(&ops[1], const_syms, data_syms, code_syms, &imm, err, errlen) != 0) return 1;
+        int tmp = pick_tmp_reg(base, base);
+        if (tmp < 0) { snprintf(err, errlen, "%s immediate form needs a scratch register", m); return 1; }
+        if (emit_ld_imm(buf, cap, out_len, (uint8_t)tmp, imm, err, errlen) != 0) return 1;
+        rs2 = tmp;
+      }
       uint32_t w = pack_word(stores[i].op, (uint8_t)rs2, (uint8_t)base, (uint8_t)rs2, 0);
       return emit_word(buf, cap, out_len, w);
     }
@@ -873,6 +957,120 @@ static int instr_size_hint(const record_t* r,
       }
       *out_size = 12 + 4;
       return 0;
+    }
+  }
+
+  /* Arithmetic immediate forms are macro-expanded into: LD tmp, imm ; OP rd,rs1,tmp */
+  {
+    const char* m = r->m;
+    int is_arith = 0;
+    const char* names[] = {
+      "ADD","SUB","MUL","DIVS","DIVU","REMS","REMU","AND","OR","XOR",
+      "ADD64","SUB64","MUL64","DIVS64","DIVU64","REMS64","REMU64","AND64","OR64","XOR64"
+    };
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+      if (strcmp(m, names[i]) == 0) { is_arith = 1; break; }
+    }
+    if (is_arith && (r->nops == 2 || r->nops == 3)) {
+      const operand_t* rhs = (r->nops == 2) ? &r->ops[1] : &r->ops[2];
+      int rhs_reg = -1;
+      if (!is_reg_operand(rhs, &rhs_reg)) {
+        int64_t imm = 0;
+        if (rhs->t == JOP_NUM) {
+          imm = rhs->n;
+        } else if (rhs->t == JOP_SYM && rhs->s && reg_id(rhs->s) < 0) {
+          if (symtab_get_any(const_syms, data_syms, code_syms, rhs->s, &imm) != 0) {
+            /* Unknown symbol in hint; conservatively assume imm64 encoding. */
+            *out_size = 12 + 4;
+            return 0;
+          }
+        } else {
+          *out_size = 12 + 4;
+          return 0;
+        }
+
+        if (imm12_ok(imm)) { *out_size = 4 + 4; return 0; }
+        if (imm >= INT32_MIN && imm <= INT32_MAX) { *out_size = 8 + 4; return 0; }
+        *out_size = 12 + 4;
+        return 0;
+      }
+    }
+  }
+
+  /* Compare immediate forms are macro-expanded into: LD tmp, imm ; CMP rd,rs1,tmp */
+  {
+    const char* m = r->m;
+    int is_cmp = 0;
+    const char* names[] = {
+      "EQ","NE","LTS","LES","GTS","GES","LTU","LEU","GTU","GEU",
+      "EQ64","NE64","LTS64","LES64","GTS64","GES64","LTU64","LEU64","GTU64","GEU64"
+    };
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+      if (strcmp(m, names[i]) == 0) { is_cmp = 1; break; }
+    }
+    if (is_cmp && (r->nops == 2 || r->nops == 3)) {
+      const operand_t* rhs = (r->nops == 2) ? &r->ops[1] : &r->ops[2];
+      int rhs_reg = -1;
+      if (!is_reg_operand(rhs, &rhs_reg)) {
+        int64_t imm = 0;
+        if (rhs->t == JOP_NUM) {
+          imm = rhs->n;
+        } else if (rhs->t == JOP_SYM && rhs->s && reg_id(rhs->s) < 0) {
+          if (symtab_get_any(const_syms, data_syms, code_syms, rhs->s, &imm) != 0) {
+            *out_size = 12 + 4;
+            return 0;
+          }
+        } else {
+          *out_size = 12 + 4;
+          return 0;
+        }
+
+        if (imm12_ok(imm)) { *out_size = 4 + 4; return 0; }
+        if (imm >= INT32_MIN && imm <= INT32_MAX) { *out_size = 8 + 4; return 0; }
+        *out_size = 12 + 4;
+        return 0;
+      }
+    }
+  }
+
+  /* CLZ/CTZ/POPC are single-word R-format ops. */
+  if (strcmp(r->m, "CLZ") == 0 || strcmp(r->m, "CTZ") == 0 || strcmp(r->m, "POPC") == 0 ||
+      strcmp(r->m, "CLZ64") == 0 || strcmp(r->m, "CTZ64") == 0 || strcmp(r->m, "POPC64") == 0) {
+    *out_size = 4;
+    (void)err;
+    (void)errlen;
+    return 0;
+  }
+
+  /* Store immediate forms are macro-expanded into: LD tmp, imm ; STxx (base), tmp */
+  {
+    const char* m = r->m;
+    int is_store = 0;
+    const char* names[] = {"ST8","ST8_64","ST16","ST16_64","ST32","ST32_64","ST64"};
+    for (size_t i = 0; i < sizeof(names)/sizeof(names[0]); i++) {
+      if (strcmp(m, names[i]) == 0) { is_store = 1; break; }
+    }
+    if (is_store && r->nops == 2) {
+      int rhs_reg = -1;
+      if (!is_reg_operand(&r->ops[1], &rhs_reg)) {
+        int64_t imm = 0;
+        if (r->ops[1].t == JOP_NUM) {
+          imm = r->ops[1].n;
+        } else if (r->ops[1].t == JOP_SYM && r->ops[1].s && reg_id(r->ops[1].s) < 0) {
+          if (symtab_get_any(const_syms, data_syms, code_syms, r->ops[1].s, &imm) != 0) {
+            *out_size = 12 + 4;
+            return 0;
+          }
+        } else {
+          *out_size = 12 + 4;
+          return 0;
+        }
+
+        if (imm12_ok(imm)) { *out_size = 4 + 4; return 0; }
+        if (imm >= INT32_MIN && imm <= INT32_MAX) { *out_size = 8 + 4; return 0; }
+        *out_size = 12 + 4;
+        return 0;
+      }
     }
   }
 

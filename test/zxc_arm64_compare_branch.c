@@ -20,6 +20,8 @@ static uint32_t read_u32_le(const uint8_t* p) {
 int main(void) {
   uint8_t in[12];
   uint8_t out[64];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* CP HL, DE; JR EQ, +1; RET */
   uint32_t cp = (0x03u << 24) | (0u << 20) | (0u << 16) | (1u << 12);
@@ -36,20 +38,20 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 16) {
+  if (r.out_len != 56) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
 
   uint32_t expect0 = 0x4B01000Bu; /* sub w11, w0, w1 */
   uint32_t expect1 = 0x6B1F017Fu; /* cmp w11, wzr */
-  uint32_t expect2 = 0x54000000u; /* b.eq +0 */
+  uint32_t expect2 = 0x54000020u; /* b.eq +1 */
   uint32_t expect3 = 0xD65F03C0u; /* ret */
 
-  uint32_t got0 = read_u32_le(out + 0);
-  uint32_t got1 = read_u32_le(out + 4);
-  uint32_t got2 = read_u32_le(out + 8);
-  uint32_t got3 = read_u32_le(out + 12);
+  uint32_t got0 = read_u32_le(out + prologue_bytes + 0);
+  uint32_t got1 = read_u32_le(out + prologue_bytes + 4);
+  uint32_t got2 = read_u32_le(out + prologue_bytes + 8);
+  uint32_t got3 = read_u32_le(out + (r.out_len - 4));
   if (got0 != expect0 || got1 != expect1 || got2 != expect2 || got3 != expect3) {
     fprintf(stderr, "unexpected CP/JR encoding\n");
     return 1;
@@ -67,16 +69,16 @@ int main(void) {
     fprintf(stderr, "translate failed: err=%d at %zu\n", r2.err, r2.in_off);
     return 1;
   }
-  if (r2.out_len != 12) {
+  if (r2.out_len != 52) {
     fprintf(stderr, "unexpected output length (EQ): %zu\n", r2.out_len);
     return 1;
   }
 
   uint32_t expect_eq0 = 0x6B01001Fu; /* cmp w0, w1 */
   uint32_t expect_eq1 = 0x1A9F17E0u; /* cset w0, eq */
-  uint32_t got_eq0 = read_u32_le(out + 0);
-  uint32_t got_eq1 = read_u32_le(out + 4);
-  uint32_t got_eq2 = read_u32_le(out + 8);
+  uint32_t got_eq0 = read_u32_le(out + prologue_bytes + 0);
+  uint32_t got_eq1 = read_u32_le(out + prologue_bytes + 4);
+  uint32_t got_eq2 = read_u32_le(out + (r2.out_len - 4));
   if (got_eq0 != expect_eq0 || got_eq1 != expect_eq1 || got_eq2 != expect3) {
     fprintf(stderr, "unexpected EQ encoding\n");
     return 1;

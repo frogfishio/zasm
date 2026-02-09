@@ -179,10 +179,19 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
       continue;
     }
 
-    /* Register indices 5..15 are illegal. */
-    if (!reg_ok(rd) || !reg_ok(rs1) || !reg_ok(rs2)) {
-      free(is_start);
-      return fail(ZASM_VERIFY_ERR_BAD_REG, off, op);
+    /* Register indices 5..15 are illegal.
+     * Note: JR stores its condition code in rs1, not a register index.
+     */
+    if (op == 0x02) {
+      if (!reg_ok(rd) || !reg_ok(rs2)) {
+        free(is_start);
+        return fail(ZASM_VERIFY_ERR_BAD_REG, off, op);
+      }
+    } else {
+      if (!reg_ok(rd) || !reg_ok(rs1) || !reg_ok(rs2)) {
+        free(is_start);
+        return fail(ZASM_VERIFY_ERR_BAD_REG, off, op);
+      }
     }
 
     switch (op) {
@@ -200,6 +209,12 @@ zasm_verify_result_t zasm_verify_decode(const uint8_t* code, size_t code_len,
             return fail(ZASM_VERIFY_ERR_BAD_TARGET, off, op);
           }
         }
+        off += 4;
+        break;
+
+      case 0x04: /* DROP: consume a register value (R format) */
+        if (imm12 != 0) return fail(ZASM_VERIFY_ERR_BAD_IMM, off, op);
+        if (rs1 != 0 || rs2 != 0) return fail(ZASM_VERIFY_ERR_BAD_FIELDS, off, op);
         off += 4;
         break;
 

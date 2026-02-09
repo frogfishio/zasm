@@ -16,6 +16,8 @@ static void write_u32_le(uint8_t* out, uint32_t v) {
 int main(void) {
   uint8_t in[16];
   uint8_t out[64];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* LD HL, 42; MUL64 HL, DE; SLA64 HL, 1; RET */
   uint32_t ld = (0x70u << 24) | (0u << 20) | (0u << 16) | (0u << 12) | 42u;
@@ -34,26 +36,27 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 20) {
+  if (r.out_len != 60) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
 
-  uint32_t expect_add = 0x91000000u | (42u << 10) | (31u << 5) | 0u;
+  uint32_t expect_add = 0xD2800000u | (42u << 5) | 0u;
   uint32_t expect_mul = 0x9B000000u | (1u << 16) | (31u << 10) | (0u << 5) | 0u;
   uint32_t expect_sh = 0x91000000u | (1u << 10) | (31u << 5) | 9u;
   uint32_t expect_sla = 0x9AC02000u | (9u << 16) | (0u << 5) | 0u;
   uint32_t expect_ret = 0xD65F03C0u;
-  uint32_t got_add = (uint32_t)out[0] | ((uint32_t)out[1] << 8) |
-                     ((uint32_t)out[2] << 16) | ((uint32_t)out[3] << 24);
-  uint32_t got_mul = (uint32_t)out[4] | ((uint32_t)out[5] << 8) |
-                     ((uint32_t)out[6] << 16) | ((uint32_t)out[7] << 24);
-  uint32_t got_sh = (uint32_t)out[8] | ((uint32_t)out[9] << 8) |
-                    ((uint32_t)out[10] << 16) | ((uint32_t)out[11] << 24);
-  uint32_t got_sla = (uint32_t)out[12] | ((uint32_t)out[13] << 8) |
-                     ((uint32_t)out[14] << 16) | ((uint32_t)out[15] << 24);
-  uint32_t got_ret = (uint32_t)out[16] | ((uint32_t)out[17] << 8) |
-                     ((uint32_t)out[18] << 16) | ((uint32_t)out[19] << 24);
+  uint32_t got_add = (uint32_t)out[prologue_bytes + 0] | ((uint32_t)out[prologue_bytes + 1] << 8) |
+                     ((uint32_t)out[prologue_bytes + 2] << 16) | ((uint32_t)out[prologue_bytes + 3] << 24);
+  uint32_t got_mul = (uint32_t)out[prologue_bytes + 4] | ((uint32_t)out[prologue_bytes + 5] << 8) |
+                     ((uint32_t)out[prologue_bytes + 6] << 16) | ((uint32_t)out[prologue_bytes + 7] << 24);
+  uint32_t got_sh = (uint32_t)out[prologue_bytes + 8] | ((uint32_t)out[prologue_bytes + 9] << 8) |
+                    ((uint32_t)out[prologue_bytes + 10] << 16) | ((uint32_t)out[prologue_bytes + 11] << 24);
+  uint32_t got_sla = (uint32_t)out[prologue_bytes + 12] | ((uint32_t)out[prologue_bytes + 13] << 8) |
+                     ((uint32_t)out[prologue_bytes + 14] << 16) | ((uint32_t)out[prologue_bytes + 15] << 24);
+  size_t ret_off = r.out_len - 4;
+  uint32_t got_ret = (uint32_t)out[ret_off + 0] | ((uint32_t)out[ret_off + 1] << 8) |
+                     ((uint32_t)out[ret_off + 2] << 16) | ((uint32_t)out[ret_off + 3] << 24);
   if (got_add != expect_add || got_mul != expect_mul ||
       got_sh != expect_sh || got_sla != expect_sla || got_ret != expect_ret) {
     fprintf(stderr, "unexpected encoding: add=%08x mul=%08x sh=%08x sla=%08x ret=%08x\n",

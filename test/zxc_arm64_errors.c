@@ -56,7 +56,7 @@ int main(void) {
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(ZOP_LD, 0, 0, 0, -2048));
-    failed |= expect_err("trunc-imm32", in, sizeof(in), 16, ZXC_ERR_TRUNC);
+    failed |= expect_err("trunc-imm32", in, sizeof(in), 64, ZXC_ERR_TRUNC);
   }
 
   /* truncation: LD imm64 sentinel missing ext words */
@@ -64,42 +64,42 @@ int main(void) {
     uint8_t in[8];
     write_word(in, 0, pack_word(ZOP_LD, 0, 0, 0, -2047));
     write_word(in, 4, 0x01020304u);
-    failed |= expect_err("trunc-imm64", in, sizeof(in), 16, ZXC_ERR_TRUNC);
+    failed |= expect_err("trunc-imm64", in, sizeof(in), 64, ZXC_ERR_TRUNC);
   }
 
   /* invalid register index */
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(ZOP_ADD, 7, 0, 0, 0));
-    failed |= expect_err("bad-reg", in, sizeof(in), 16, ZXC_ERR_OPCODE);
+    failed |= expect_err("bad-reg", in, sizeof(in), 64, ZXC_ERR_OPCODE);
   }
 
   /* unknown opcode */
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(0xEE, 0, 0, 0, 0));
-    failed |= expect_err("unimpl-op", in, sizeof(in), 16, ZXC_ERR_UNIMPL);
+    failed |= expect_err("unimpl-op", in, sizeof(in), 64, ZXC_ERR_UNIMPL);
   }
 
   /* invalid shift amount (>= width) */
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(ZOP_SLA, 0, 0, 0, 64));
-    failed |= expect_err("bad-shift", in, sizeof(in), 16, ZXC_ERR_OPCODE);
+    failed |= expect_err("bad-shift", in, sizeof(in), 64, ZXC_ERR_OPCODE);
   }
 
   /* invalid shift amount (negative) */
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(ZOP_SLA, 0, 0, 0, -1));
-    failed |= expect_err("bad-shift-neg", in, sizeof(in), 16, ZXC_ERR_OPCODE);
+    failed |= expect_err("bad-shift-neg", in, sizeof(in), 64, ZXC_ERR_OPCODE);
   }
 
   /* invalid JR condition code */
   {
     uint8_t in[4];
     write_word(in, 0, pack_word(ZOP_JR, 0, 11, 0, 0));
-    failed |= expect_err("bad-jr-cond", in, sizeof(in), 16, ZXC_ERR_OPCODE);
+    failed |= expect_err("bad-jr-cond", in, sizeof(in), 64, ZXC_ERR_OPCODE);
   }
 
   /* branch target beyond end of stream */
@@ -107,7 +107,7 @@ int main(void) {
     uint8_t in[8];
     write_word(in, 0, pack_word(ZOP_JR, 0, 0, 0, 3));
     write_word(in, 4, pack_word(ZOP_ADD, 0, 0, 0, 0));
-    failed |= expect_err("jr-oob", in, sizeof(in), 16, ZXC_ERR_TRUNC);
+    failed |= expect_err("jr-oob", in, sizeof(in), 64, ZXC_ERR_TRUNC);
   }
 
   /* output buffer too small */

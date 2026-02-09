@@ -20,6 +20,8 @@ static uint32_t read_u32_le(const uint8_t* p) {
 int main(void) {
   uint8_t in[4];
   uint8_t out[64];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* DIVS HL, DE */
   uint32_t divs = (0x13u << 24) | (0u << 20) | (0u << 16) | (1u << 12);
@@ -32,20 +34,20 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 16) {
+  if (r.out_len != 40) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
 
   uint32_t expect0 = 0x34000061u; /* cbz w1, +3 */
   uint32_t expect1 = 0x1AC10C00u; /* sdiv w0, w0, w1 */
-  uint32_t expect2 = 0x14000001u; /* b +1 */
+  uint32_t expect2 = 0x14000002u; /* b +2 */
   uint32_t expect3 = 0xD4200000u; /* brk #0 */
 
-  uint32_t got0 = read_u32_le(out + 0);
-  uint32_t got1 = read_u32_le(out + 4);
-  uint32_t got2 = read_u32_le(out + 8);
-  uint32_t got3 = read_u32_le(out + 12);
+  uint32_t got0 = read_u32_le(out + prologue_bytes + 0);
+  uint32_t got1 = read_u32_le(out + prologue_bytes + 4);
+  uint32_t got2 = read_u32_le(out + prologue_bytes + 8);
+  uint32_t got3 = read_u32_le(out + prologue_bytes + 12);
 
   if (got0 != expect0 || got1 != expect1 || got2 != expect2 || got3 != expect3) {
     fprintf(stderr, "unexpected div guard encoding\n");

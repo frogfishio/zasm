@@ -11,7 +11,6 @@
 #include "zi_telemetry.h"
 
 #include <errno.h>
-#include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,30 +59,6 @@ struct zasm_rt_instance {
 static size_t g_guest_mem_cap = 0;
 static size_t g_guest_heap_off = 0;
 
-static int zasm_rt_trace_syscalls_enabled(void) {
-  static int enabled = -1;
-  if (enabled != -1) return enabled;
-  const char* v = getenv("ZASM_RT_TRACE_SYSCALLS");
-  enabled = (v && *v && strcmp(v, "0") != 0) ? 1 : 0;
-  return enabled;
-}
-
-static int32_t zi_read_trace(int32_t h, uint64_t dst_ptr, uint32_t cap) {
-  if (zasm_rt_trace_syscalls_enabled()) {
-    fprintf(stderr, "[zrt] zi_read(h=%d, dst=%" PRIu64 ", cap=%u)\n", h, dst_ptr, cap);
-    fflush(stderr);
-  }
-  return zi_read(h, dst_ptr, cap);
-}
-
-static int32_t zi_write_trace(int32_t h, uint64_t src_ptr, uint32_t len) {
-  if (zasm_rt_trace_syscalls_enabled()) {
-    fprintf(stderr, "[zrt] zi_write(h=%d, src=%" PRIu64 ", len=%u)\n", h, src_ptr, len);
-    fflush(stderr);
-  }
-  return zi_write(h, src_ptr, len);
-}
-
 static uint64_t guest_alloc(uint32_t size) {
   if (g_guest_mem_cap == 0) return 0;
   if (size == 0) return 0;
@@ -110,7 +85,16 @@ static int32_t guest_telemetry(uint64_t topic_ptr, uint32_t topic_len,
   if (!mem->map_ro(mem->ctx, (zi_ptr_t)topic_ptr, (zi_size32_t)topic_len, &topic) || !topic) return ZI_E_BOUNDS;
   if (!mem->map_ro(mem->ctx, (zi_ptr_t)msg_ptr, (zi_size32_t)msg_len, &msg) || !msg) return ZI_E_BOUNDS;
 
-  (void)zi_telemetry_stderr_jsonl(NULL, topic, (uint32_t)topic_len, msg, (uint32_t)msg_len);
+  /* Match the reference runner's legacy formatting:
+   *   [topic] <body><\n>
+   * We always add a trailing newline, even if the body already ends with one.
+   */
+  (void)fputc('[', stderr);
+  (void)fwrite(topic, 1, (size_t)topic_len, stderr);
+  (void)fwrite("] ", 1, 2, stderr);
+  (void)fwrite(msg, 1, (size_t)msg_len, stderr);
+  (void)fputc('\n', stderr);
+  (void)fflush(stderr);
   return 0;
 }
 
@@ -598,8 +582,8 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
 #endif
 
   static zxc_zi_syscalls_v1_t g_sys = {
-    .read = zi_read_trace,
-    .write = zi_write_trace,
+    .read = zi_read,
+    .write = zi_write,
     .alloc = guest_alloc,
     .free = guest_free,
     .ctl = zi_ctl,

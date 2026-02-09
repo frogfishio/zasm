@@ -19,7 +19,9 @@ static uint32_t read_u32_le(const uint8_t* p) {
 
 int main(void) {
   uint8_t in[8];
-  uint8_t out[32];
+  uint8_t out[96];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* CALL +1; RET */
   uint32_t call = (0x00u << 24) | (0u << 20) | (0u << 16) | (0u << 12) | 1u;
@@ -34,15 +36,15 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 8) {
+  if (r.out_len != 48) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
 
-  uint32_t expect0 = 0x94000000u; /* bl +0 */
+  uint32_t expect0 = 0x94000001u; /* bl +1 */
   uint32_t expect1 = 0xD65F03C0u; /* ret */
-  uint32_t got0 = read_u32_le(out + 0);
-  uint32_t got1 = read_u32_le(out + 4);
+  uint32_t got0 = read_u32_le(out + prologue_bytes + 0);
+  uint32_t got1 = read_u32_le(out + (r.out_len - 4));
   if (got0 != expect0 || got1 != expect1) {
     fprintf(stderr, "unexpected CALL encoding\n");
     return 1;

@@ -7,7 +7,7 @@
   - [x] Archive/retire `.zasm.bin` v1 spec (`docs/spec/zasm_bin_v1.md`)
   - [x] Update `zop --container` to emit `.zasm.bin` v2 (at minimum: header+dir+`CODE`)
   - [x] Teach the parser/runtime to parse + apply optional `DATA` section initializers
-  - [ ] Teach the `zir | zop --container` path to emit optional `DATA` (keep `CODE.len % 4 == 0`)
+  - [x] Teach the `zir | zop --container` path to emit optional `DATA` (keep `CODE.len % 4 == 0`)
   - [x] Update `zxc` to parse `.zasm.bin` v2 by extracting `CODE`
   - [x] Align tool docs to v2 (`docs/tools/zop.md`, `docs/tools/zir.md`, `docs/spec/zxc.md`, `docs/tools/zxc_lib.md`)
   - [ ] Decide v1 support policy (dev-only vs hard reject) and enforce consistently across tools
@@ -55,7 +55,7 @@
     - [ ] Compare against a reference runner (choose one):
       - [x] WASM path: `zrun` (behavioral oracle for ABI-visible semantics)
       - [ ] Interpreter path: `zem` (only where it matches runtime semantics; do not treat as VM design source)
-    - [ ] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures (currently: cat + alloc; hello pending DATA emission)
+      - [x] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures (currently: ret_only + hello + cat + upper + alloc + isa_smoke + log)
     - [ ] Add minimization hook (optional) for shrinking divergent cases
 
   - [x] Fix arm64 bounds-check trailer (was trapping unconditionally due to `b +1; brk` sequence)

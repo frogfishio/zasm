@@ -27,7 +27,9 @@ static uint32_t enc_movk(uint8_t rd, uint16_t imm16, uint8_t hw) {
 
 int main(void) {
   uint8_t in[24];
-  uint8_t out[64];
+  uint8_t out[128];
+  const size_t prologue_words = 6;
+  const size_t prologue_bytes = prologue_words * 4;
 
   /* LD HL, imm32 (sentinel -2048) + imm64 (sentinel -2047), RET */
   uint32_t ld32 = (0x70u << 24) | (0u << 20) | (0u << 16) | (0u << 12) | 0x800u;
@@ -51,7 +53,7 @@ int main(void) {
     return 1;
   }
 
-  if (r.out_len != 28) {
+  if (r.out_len != 68) {
     fprintf(stderr, "unexpected output length: %zu\n", r.out_len);
     return 1;
   }
@@ -64,13 +66,13 @@ int main(void) {
   uint32_t expect5 = enc_movk(0, 0x1122, 3);
   uint32_t expect6 = 0xD65F03C0u;
 
-  uint32_t got0 = read_u32_le(out + 0);
-  uint32_t got1 = read_u32_le(out + 4);
-  uint32_t got2 = read_u32_le(out + 8);
-  uint32_t got3 = read_u32_le(out + 12);
-  uint32_t got4 = read_u32_le(out + 16);
-  uint32_t got5 = read_u32_le(out + 20);
-  uint32_t got6 = read_u32_le(out + 24);
+  uint32_t got0 = read_u32_le(out + prologue_bytes + 0);
+  uint32_t got1 = read_u32_le(out + prologue_bytes + 4);
+  uint32_t got2 = read_u32_le(out + prologue_bytes + 8);
+  uint32_t got3 = read_u32_le(out + prologue_bytes + 12);
+  uint32_t got4 = read_u32_le(out + prologue_bytes + 16);
+  uint32_t got5 = read_u32_le(out + prologue_bytes + 20);
+  uint32_t got6 = read_u32_le(out + (r.out_len - 4));
 
   if (got0 != expect0 || got1 != expect1 || got2 != expect2 ||
       got3 != expect3 || got4 != expect4 || got5 != expect5 || got6 != expect6) {
