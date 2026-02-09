@@ -6,6 +6,7 @@
 #include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
 #include "zi_net_tcp25.h"
+#include "zi_net_http25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
@@ -169,6 +170,11 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   // net/tcp v1
   if (strcmp(found->kind, ZI_CAP_KIND_NET) == 0 && strcmp(found->name, ZI_CAP_NAME_TCP) == 0 && found->version == 1) {
     return zi_net_tcp25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
+  // net/http v1
+  if (strcmp(found->kind, ZI_CAP_KIND_NET) == 0 && strcmp(found->name, ZI_CAP_NAME_HTTP) == 0 && found->version == 1) {
+    return zi_net_http25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
   // sys/info v1 (no params)

@@ -7,6 +7,7 @@
 #include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
 #include "zi_handles25.h"
+#include "zi_net_http25.h"
 #include "zi_net_tcp25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
@@ -125,6 +126,7 @@ static int register_all_caps(void) {
   if (!zi_event_bus25_register()) return 0;
   if (!zi_file_fs25_register()) return 0;
   if (!zi_net_tcp25_register()) return 0;
+  if (!zi_net_http25_register()) return 0;
   if (!zi_proc_argv25_register()) return 0;
   if (!zi_proc_env25_register()) return 0;
   if (!zi_proc_hopper25_register()) return 0;

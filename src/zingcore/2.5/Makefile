@@ -31,6 +31,7 @@ SRC := \
 	$(SRCDIR)/zi_proc_env25.c \
 	$(SRCDIR)/zi_proc_hopper25.c \
 	$(SRCDIR)/zi_net_tcp25.c \
+	$(SRCDIR)/zi_net_http25.c \
 	$(SRCDIR)/zi_sys_info25.c \
 	$(SRCDIR)/vendor/hopper/hopper.c \
 	$(SRCDIR)/vendor/hopper/pic.c \
@@ -56,6 +57,7 @@ OBJ := \
 	$(BUILD)/zi_proc_env25.o \
 	$(BUILD)/zi_proc_hopper25.o \
 	$(BUILD)/zi_net_tcp25.o \
+	$(BUILD)/zi_net_http25.o \
 	$(BUILD)/zi_sys_info25.o \
 	$(BUILD)/vendor/hopper/hopper.o \
 	$(BUILD)/vendor/hopper/pic.o \
@@ -65,7 +67,7 @@ OBJ := \
 	$(BUILD)/zi_hopabi25.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_tcp_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_sysabi25_async_default_cap test_sysabi25_event_bus_cap test_sysabi25_sys_info_cap test_bus_rpc_v1 test_hopabi25_basic
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_tcp_cap test_sysabi25_http_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_sysabi25_async_default_cap test_sysabi25_event_bus_cap test_sysabi25_sys_info_cap test_bus_rpc_v1 test_hopabi25_basic
 
 EXAMPLES := stdio_caps_demo all_caps_demo hopabi_guest_demo
 
