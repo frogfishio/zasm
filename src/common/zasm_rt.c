@@ -60,6 +60,17 @@ struct zasm_rt_instance {
   int jit_is_exec;
 };
 
+/* Hard ceilings to keep the runtime multi-tenant safe even if an embedder
+ * supplies an overly permissive policy (e.g. "unlimited").
+ *
+ * These are not tunables yet; they are guardrails against pathological inputs.
+ */
+static const uint64_t ZASM_RT_HARD_MAX_GUEST_MEM = 256ull * 1024ull * 1024ull; /* 256 MiB */
+static const uint32_t ZASM_RT_HARD_MAX_FILE_LEN = 256u * 1024u * 1024u;        /* 256 MiB */
+static const uint32_t ZASM_RT_HARD_MAX_DIR_COUNT = 16384u;
+static const uint32_t ZASM_RT_HARD_MAX_CODE_LEN = 64u * 1024u * 1024u;         /* 64 MiB */
+static const size_t ZASM_RT_HARD_MAX_JIT_BYTES = 256u * 1024u * 1024u;          /* 256 MiB */
+
 static size_t g_guest_mem_cap = 0;
 static size_t g_guest_heap_off = 0;
 
@@ -157,6 +168,7 @@ const zasm_rt_policy_t zasm_rt_policy_default = {
   .max_dir_count = 1024u,
   .max_code_len = 32u * 1024u * 1024u,
   .max_insn_words = 0,
+  .max_jit_bytes = 0,
 };
 static zasm_rt_target_t zasm_rt_host_target(void) {
 #if defined(__aarch64__) || defined(__arm64__)
@@ -193,6 +205,37 @@ static int zasm_rt_test_fail_alloc_enabled(void) {
   if (cached != -1) return cached;
   cached = (getenv("ZASM_RT_TEST_FAIL_ALLOC") != NULL) ? 1 : 0;
   return cached;
+}
+
+static size_t zasm_rt_test_max_jit_bytes(void) {
+  static size_t cached = (size_t)-1;
+  if (cached != (size_t)-1) return cached;
+  const char* v = getenv("ZASM_RT_TEST_MAX_JIT_BYTES");
+  if (!v || v[0] == '\0') {
+    cached = 0;
+    return cached;
+  }
+  char* end = NULL;
+  unsigned long long n = strtoull(v, &end, 0);
+  if (!end || *end != '\0') {
+    cached = 0;
+    return cached;
+  }
+  cached = (size_t)n;
+  return cached;
+}
+
+static size_t zasm_rt_max_jit_bytes_effective(const zasm_rt_policy_t* policy) {
+  size_t cap = ZASM_RT_HARD_MAX_JIT_BYTES;
+  if (policy && policy->max_jit_bytes != 0) {
+    size_t pcap = (size_t)policy->max_jit_bytes;
+    if (pcap < cap) cap = pcap;
+  }
+
+  /* Test-only override for deterministic smoke coverage. */
+  size_t test_cap = zasm_rt_test_max_jit_bytes();
+  if (test_cap != 0) return test_cap;
+  return cap;
 }
 
 static void* zasm_rt_malloc(size_t n) {
@@ -247,6 +290,31 @@ zasm_rt_err_t zasm_rt_policy_validate(const zasm_rt_policy_t* policy_in, zasm_rt
 
   /* Basic invariants. */
   if (policy_in->mem_size == 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  if (policy_in->mem_size > ZASM_RT_HARD_MAX_GUEST_MEM) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+
+  /* In strict mode, require runtime-owned guest memory.
+   * This prevents accidental/hostile mem_base pointers from crashing the host.
+   */
+  if (policy_in->strict && policy_in->mem_base != 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+
+  /* Upper-bound policy caps if explicitly set (0 means "use hard ceiling"). */
+  if (policy_in->max_file_len != 0 && policy_in->max_file_len > ZASM_RT_HARD_MAX_FILE_LEN) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
+  if (policy_in->max_dir_count != 0 && policy_in->max_dir_count > ZASM_RT_HARD_MAX_DIR_COUNT) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
+  if (policy_in->max_code_len != 0 && policy_in->max_code_len > ZASM_RT_HARD_MAX_CODE_LEN) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
+  if (policy_in->max_insn_words != 0 &&
+      policy_in->max_insn_words > (uint32_t)(ZASM_RT_HARD_MAX_CODE_LEN / 4u)) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
+
+  if (policy_in->max_jit_bytes != 0 && (size_t)policy_in->max_jit_bytes > ZASM_RT_HARD_MAX_JIT_BYTES) {
+    return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
+  }
 
   if (policy_in->target != ZASM_RT_TARGET_HOST &&
       policy_in->target != ZASM_RT_TARGET_ARM64 &&
@@ -289,15 +357,38 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
 
   const zasm_rt_policy_t policy = policy_in ? *policy_in : zasm_rt_policy_default;
 
+  zasm_rt_err_t pe = zasm_rt_policy_validate(&policy, diag);
+  if (pe != ZASM_RT_OK) {
+  *out_module = NULL;
+  return pe;
+  }
+
+  const uint32_t eff_max_file_len =
+    (policy.max_file_len == 0 || policy.max_file_len > ZASM_RT_HARD_MAX_FILE_LEN)
+      ? ZASM_RT_HARD_MAX_FILE_LEN
+      : policy.max_file_len;
+  const uint32_t eff_max_dir_count =
+    (policy.max_dir_count == 0 || policy.max_dir_count > ZASM_RT_HARD_MAX_DIR_COUNT)
+      ? ZASM_RT_HARD_MAX_DIR_COUNT
+      : policy.max_dir_count;
+  const uint32_t eff_max_code_len =
+    (policy.max_code_len == 0 || policy.max_code_len > ZASM_RT_HARD_MAX_CODE_LEN)
+      ? ZASM_RT_HARD_MAX_CODE_LEN
+      : policy.max_code_len;
+  const uint32_t eff_max_insn_words =
+    (policy.max_insn_words == 0 || policy.max_insn_words > (eff_max_code_len / 4u))
+      ? (eff_max_code_len / 4u)
+      : policy.max_insn_words;
+
   zasm_bin_caps_t caps = zasm_bin_default_caps;
-  caps.max_file_len = policy.max_file_len;
-  caps.max_dir_count = policy.max_dir_count;
-  caps.max_code_len = policy.max_code_len;
+  caps.max_file_len = eff_max_file_len;
+  caps.max_dir_count = eff_max_dir_count;
+  caps.max_code_len = eff_max_code_len;
 
   zasm_verify_opts_t vopts = zasm_verify_default_opts;
   vopts.allow_primitives = policy.allow_primitives;
-  vopts.max_code_len = policy.max_code_len;
-  vopts.max_insn_words = policy.max_insn_words;
+  vopts.max_code_len = eff_max_code_len;
+  vopts.max_insn_words = eff_max_insn_words;
 
   zasm_bin_v2_t parsed;
   zasm_bin_diag_t bdiag;
@@ -545,7 +636,53 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     return diag_fail(diag, ZASM_RT_ERR_NULL);
   }
 
-  size_t out_cap = code_len * 64u;
+  size_t out_cap = 0;
+#if defined(__aarch64__) || defined(__arm64__)
+  {
+    uint64_t fuel_ptr = 0;
+    uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+    uint64_t trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
+    if (inst->policy.fuel != 0) {
+      fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
+    }
+    zxc_result_t ms = zxc_arm64_measure(code, code_len,
+                                        inst->policy.mem_base, inst->policy.mem_size,
+                                        fuel_ptr, trap_ptr, trap_off_ptr);
+    if (ms.err != ZXC_OK) {
+      if (diag) {
+        if (ms.err == ZXC_ERR_UNIMPL) diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
+        else if (ms.err == ZXC_ERR_TRUNC || ms.err == ZXC_ERR_ALIGN || ms.err == ZXC_ERR_OPCODE) {
+          diag->trap = ZASM_RT_TRAP_DECODE;
+        }
+        diag->translate_err = (uint32_t)ms.err;
+        diag->translate_off = ms.in_off;
+        diag->translate_opcode = 0;
+        diag->translate_insn = 0;
+        if (ms.in_off + 4u <= code_len) {
+          uint32_t w = u32_le(code + ms.in_off);
+          diag->translate_insn = w;
+          diag->translate_opcode = (uint8_t)(w >> 24);
+        }
+      }
+      zasm_rt_instance_destroy(inst);
+      *out_instance = NULL;
+      return diag_fail(diag, ZASM_RT_ERR_TRANSLATE_FAIL);
+    }
+    out_cap = ms.out_len;
+    if (out_cap > zasm_rt_max_jit_bytes_effective(policy)) {
+      zasm_rt_instance_destroy(inst);
+      *out_instance = NULL;
+      return diag_fail_oom(diag);
+    }
+  }
+#else
+  out_cap = code_len * 64u;
+  if (out_cap > zasm_rt_max_jit_bytes_effective(policy)) {
+    zasm_rt_instance_destroy(inst);
+    *out_instance = NULL;
+    return diag_fail_oom(diag);
+  }
+#endif
   if (out_cap < 4096u) out_cap = 4096u;
   out_cap = zasm_rt_round_up_page(out_cap);
 

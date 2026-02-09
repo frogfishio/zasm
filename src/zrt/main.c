@@ -32,7 +32,9 @@ static void print_help(FILE *out) {
           "  --safe             Apply tighter caps; disable primitives by default\n"
           "  --allow-primitives Allow host primitive calls (overrides --safe)\n"
           "  --timeout-ms <n>   Kill the guest after n milliseconds\n"
-          "  --fuel <n>         Trap after n guest instructions (0 = unlimited)\n");
+          "  --fuel <n>         Trap after n guest instructions (0 = unlimited)\n"
+          "  --mem-size <n>     Guest memory size in bytes (0 = default)\n"
+          "  --max-jit-bytes <n> Max JIT output bytes (0 = default)\n");
 }
 
 static void print_version(void) {
@@ -139,7 +141,8 @@ static uint64_t monotonic_ms(void) {
   return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
 }
 
-static int run_guest(const char *path, int safe_mode, int allow_primitives, uint64_t timeout_ms, uint64_t fuel) {
+static int run_guest(const char *path, int safe_mode, int allow_primitives,
+                     uint64_t timeout_ms, uint64_t fuel, uint64_t mem_size, uint64_t max_jit_bytes) {
   (void)timeout_ms;
 
   if (!zi_hostlib25_init_all(1, (const char *const *)&path, (const char *const *)environ)) {
@@ -165,6 +168,8 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   }
   if (allow_primitives) policy.allow_primitives = 1;
   policy.fuel = fuel;
+  if (mem_size != 0) policy.mem_size = mem_size;
+  if (max_jit_bytes != 0) policy.max_jit_bytes = max_jit_bytes;
 
   zasm_rt_engine_t *engine = NULL;
   zasm_rt_err_t e = zasm_rt_engine_create(&engine);
@@ -306,14 +311,15 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   return 0;
 }
 
-static int run_guest_isolated(const char *path, int safe_mode, int allow_primitives, uint64_t timeout_ms, uint64_t fuel) {
+static int run_guest_isolated(const char *path, int safe_mode, int allow_primitives,
+                              uint64_t timeout_ms, uint64_t fuel, uint64_t mem_size, uint64_t max_jit_bytes) {
   pid_t pid = fork();
   if (pid < 0) {
     fprintf(stderr, "zrt: error: fork failed (%s)\n", strerror(errno));
     return 1;
   }
   if (pid == 0) {
-    int rc = run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel);
+    int rc = run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel, mem_size, max_jit_bytes);
     _exit(rc);
   }
 
@@ -357,6 +363,8 @@ int main(int argc, char **argv) {
   int allow_primitives = 0;
   uint64_t timeout_ms = 0;
   uint64_t fuel = 0;
+  uint64_t mem_size = 0;
+  uint64_t max_jit_bytes = 0;
 
   const char *path = NULL;
 
@@ -409,6 +417,36 @@ int main(int argc, char **argv) {
       fuel = (uint64_t)n;
       continue;
     }
+    if (strcmp(a, "--mem-size") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "zrt: error: --mem-size requires a value\n");
+        return 2;
+      }
+      const char *v = argv[++i];
+      char *end = NULL;
+      unsigned long long n = strtoull(v, &end, 0);
+      if (!v || v[0] == '\0' || !end || *end != '\0') {
+        fprintf(stderr, "zrt: error: invalid --mem-size value\n");
+        return 2;
+      }
+      mem_size = (uint64_t)n;
+      continue;
+    }
+    if (strcmp(a, "--max-jit-bytes") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "zrt: error: --max-jit-bytes requires a value\n");
+        return 2;
+      }
+      const char *v = argv[++i];
+      char *end = NULL;
+      unsigned long long n = strtoull(v, &end, 0);
+      if (!v || v[0] == '\0' || !end || *end != '\0') {
+        fprintf(stderr, "zrt: error: invalid --max-jit-bytes value\n");
+        return 2;
+      }
+      max_jit_bytes = (uint64_t)n;
+      continue;
+    }
     if (a[0] == '-') {
       fprintf(stderr, "zrt: error: unknown option: %s\n", a);
       print_help(stderr);
@@ -429,7 +467,7 @@ int main(int argc, char **argv) {
 
   /* Only fork/isolate when explicitly requested. */
   if (safe_mode || timeout_ms != 0 || fuel != 0) {
-    return run_guest_isolated(path, safe_mode, allow_primitives, timeout_ms, fuel);
+    return run_guest_isolated(path, safe_mode, allow_primitives, timeout_ms, fuel, mem_size, max_jit_bytes);
   }
-  return run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel);
+  return run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel, mem_size, max_jit_bytes);
 }

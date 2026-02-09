@@ -1050,7 +1050,10 @@ test-zrt-duel: build
 .PHONY: test-zrt-duel
 
 test-zrt-smoke: build
+	bash test/jit_max_jit_bytes_smoke.sh
 	bash test/jit_oom_trap_smoke.sh
+	bash test/jit_policy_hard_caps_smoke.sh
+	bash test/jit_mem_size_smoke.sh
 	bash test/jit_traps_smoke.sh
 	bash test/jit_translate_fail_smoke.sh
 	bash test/jit_verify_traps_smoke.sh

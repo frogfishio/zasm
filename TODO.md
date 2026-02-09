@@ -77,7 +77,11 @@
 
 - [ ] Track 4 — Nanoservice hardening (multi-tenant runner ready)
   - [ ] Resource controls: instruction budget/fuel (deterministic accounting) + memory cap enforcement
+    - [x] `zrt --mem-size` guest memory cap (with hard ceiling + smoke)
+    - [x] `zrt --max-jit-bytes` cap executable JIT output (bounded by hard ceiling + smoke)
   - [ ] DoS defenses: max module size, max code size, max sections/exports/imports; fail fast
+    - [x] Hard ceilings on parse/verify caps (file/dir/code/insn words) even if policy says “unlimited”
+    - [x] Remove arm64 JIT outbuf heuristic; allocate exact measured output size
   - [ ] Observability: stable lifecycle events + counters (start/stop/trap) routed via telemetry
   - [ ] Abuse cases: hostile pointer/len inputs to zABI calls never crash host; add regression tests
 

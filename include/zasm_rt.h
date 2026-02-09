@@ -85,6 +85,9 @@ typedef struct zasm_rt_policy {
   uint32_t max_dir_count;
   uint32_t max_code_len;
   uint32_t max_insn_words;
+
+  /* Optional JIT output bytes ceiling (0 = default/hard ceiling). */
+  uint64_t max_jit_bytes;
 } zasm_rt_policy_t;
 
 extern const zasm_rt_policy_t zasm_rt_policy_default;

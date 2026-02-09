@@ -823,6 +823,70 @@ static int zxc_arm64_out_offset(const uint8_t* in, size_t in_len,
   return 1;
 }
 
+static size_t prim_prologue_size(unsigned prim_mask) {
+  if (!prim_mask) return 0;
+  /* Keep in sync with emit_primitive_prologue(). */
+  size_t insns = 1; /* mov sys_ptr, x2 */
+  if (prim_mask & PRIM_BIT_IN) insns += 1;
+  if (prim_mask & PRIM_BIT_OUT) insns += 1;
+  return insns * 4u;
+}
+
+zxc_result_t zxc_arm64_measure(const uint8_t* in, size_t in_len,
+                               uint64_t mem_base, uint64_t mem_size,
+                               uint64_t fuel_ptr, uint64_t trap_ptr,
+                               uint64_t trap_off_ptr) {
+  zxc_result_t res;
+  memset(&res, 0, sizeof(res));
+
+  const int trap_enabled = (trap_ptr != 0);
+  const int fuel_enabled = (fuel_ptr != 0 && trap_ptr != 0);
+  const int trap_off_enabled = (trap_ptr != 0 && trap_off_ptr != 0);
+
+  if ((in_len % 4) != 0) {
+    res.err = ZXC_ERR_ALIGN;
+    return res;
+  }
+
+  unsigned prim_mask = 0;
+  zxc_err_t prim_err = ZXC_OK;
+  if (!detect_primitive_mask(in, in_len, &prim_mask, &prim_err)) {
+    res.err = prim_err;
+    return res;
+  }
+
+  /* Deterministic prologue sizing (must match translate()). */
+  size_t prologue_len = 0;
+  prologue_len += prim_prologue_size(prim_mask);
+  prologue_len += 9u * 4u; /* frame setup */
+  if (trap_enabled) prologue_len += mov_imm64_size(trap_ptr);
+  if (trap_off_enabled) prologue_len += mov_imm64_size(trap_off_ptr);
+  if (fuel_enabled) prologue_len += mov_imm64_size(fuel_ptr);
+  prologue_len += 9u * 4u; /* skip-branch + epilogue stub */
+
+  size_t body_len = 0;
+  for (size_t off = 0; off < in_len; ) {
+    size_t sz = 0;
+    size_t next = 0;
+    zxc_err_t err = ZXC_OK;
+    if (!zxc_arm64_size_at(in, in_len, off,
+                           mem_base, mem_size,
+                           fuel_ptr, trap_ptr, trap_off_ptr,
+                           &sz, &next, &err)) {
+      res.err = err;
+      res.in_off = off;
+      res.out_len = prologue_len + body_len;
+      return res;
+    }
+    body_len += sz;
+    off = next;
+  }
+
+  res.err = ZXC_OK;
+  res.out_len = prologue_len + body_len;
+  return res;
+}
+
 zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                                  uint8_t* out, size_t out_cap,
                                  uint64_t mem_base, uint64_t mem_size,
