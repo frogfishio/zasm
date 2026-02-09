@@ -3,11 +3,14 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "version.h"
@@ -24,8 +27,12 @@ static void print_help(FILE *out) {
           "  zrt <program.zasm.bin>\n"
           "\n"
           "Options:\n"
-          "  --help        Show this help message\n"
-          "  --version     Show version information\n");
+          "  --help             Show this help message\n"
+          "  --version          Show version information\n"
+          "  --safe             Apply tighter caps; disable primitives by default\n"
+          "  --allow-primitives Allow host primitive calls (overrides --safe)\n"
+          "  --timeout-ms <n>   Kill the guest after n milliseconds\n"
+          "  --fuel <n>         Trap after n guest instructions (0 = unlimited)\n");
 }
 
 static void print_version(void) {
@@ -101,25 +108,16 @@ static void print_diag(const zasm_rt_diag_t *d) {
   }
 }
 
-int main(int argc, char **argv) {
-  if (argc < 2) {
-    print_help(stderr);
-    return 2;
-  }
+static uint64_t monotonic_ms(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+  return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
 
-  if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
-    print_help(stdout);
-    return 0;
-  }
+static int run_guest(const char *path, int safe_mode, int allow_primitives, uint64_t timeout_ms, uint64_t fuel) {
+  (void)timeout_ms;
 
-  if (strcmp(argv[1], "--version") == 0) {
-    print_version();
-    return 0;
-  }
-
-  const char *path = argv[1];
-
-  if (!zi_hostlib25_init_all(argc, (const char *const *)argv, (const char *const *)environ)) {
+  if (!zi_hostlib25_init_all(1, (const char *const *)&path, (const char *const *)environ)) {
     fprintf(stderr, "zrt: error: zi_hostlib25_init_all failed\n");
     return 1;
   }
@@ -131,6 +129,18 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  zasm_rt_policy_t policy = zasm_rt_policy_default;
+  if (safe_mode) {
+    policy.strict = 1;
+    policy.allow_primitives = 0;
+    /* Fail-closed caps for untrusted inputs. */
+    policy.max_file_len = 4u * 1024u * 1024u;
+    policy.max_code_len = 2u * 1024u * 1024u;
+    policy.max_insn_words = policy.max_code_len / 4u;
+  }
+  if (allow_primitives) policy.allow_primitives = 1;
+  policy.fuel = fuel;
+
   zasm_rt_engine_t *engine = NULL;
   zasm_rt_err_t e = zasm_rt_engine_create(&engine);
   if (e != ZASM_RT_OK) {
@@ -141,7 +151,7 @@ int main(int argc, char **argv) {
 
   zasm_rt_diag_t diag;
   zasm_rt_module_t *module = NULL;
-  e = zasm_rt_module_load_v2(engine, file, file_len, NULL, &module, &diag);
+  e = zasm_rt_module_load_v2(engine, file, file_len, &policy, &module, &diag);
   free(file);
   if (e != ZASM_RT_OK) {
     fprintf(stderr, "zrt: error: module_load_v2: %s\n", zasm_rt_err_str(e));
@@ -152,7 +162,7 @@ int main(int argc, char **argv) {
 
   const zi_host_v1 *host = zi_runtime25_host();
   zasm_rt_instance_t *inst = NULL;
-  e = zasm_rt_instance_create(engine, module, NULL, host, &inst, &diag);
+  e = zasm_rt_instance_create(engine, module, &policy, host, &inst, &diag);
   if (e != ZASM_RT_OK) {
     fprintf(stderr, "zrt: error: instance_create: %s\n", zasm_rt_err_str(e));
     print_diag(&diag);
@@ -163,6 +173,13 @@ int main(int argc, char **argv) {
 
   e = zasm_rt_instance_run(inst, &diag);
   if (e != ZASM_RT_OK) {
+    if (e == ZASM_RT_ERR_EXEC_FAIL && diag.trap == ZASM_RT_TRAP_FUEL) {
+      fprintf(stderr, "zrt: trap: fuel exhausted\n");
+      zasm_rt_instance_destroy(inst);
+      zasm_rt_module_destroy(module);
+      zasm_rt_engine_destroy(engine);
+      return 1;
+    }
     fprintf(stderr, "zrt: error: instance_run: %s\n", zasm_rt_err_str(e));
     print_diag(&diag);
     zasm_rt_instance_destroy(inst);
@@ -175,4 +192,132 @@ int main(int argc, char **argv) {
   zasm_rt_module_destroy(module);
   zasm_rt_engine_destroy(engine);
   return 0;
+}
+
+static int run_guest_isolated(const char *path, int safe_mode, int allow_primitives, uint64_t timeout_ms, uint64_t fuel) {
+  pid_t pid = fork();
+  if (pid < 0) {
+    fprintf(stderr, "zrt: error: fork failed (%s)\n", strerror(errno));
+    return 1;
+  }
+  if (pid == 0) {
+    int rc = run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel);
+    _exit(rc);
+  }
+
+  uint64_t start = monotonic_ms();
+  for (;;) {
+    int status = 0;
+    pid_t w = waitpid(pid, &status, WNOHANG);
+    if (w == pid) {
+      if (WIFEXITED(status)) return WEXITSTATUS(status);
+      if (WIFSIGNALED(status)) {
+        int sig = WTERMSIG(status);
+        fprintf(stderr, "zrt: error: guest terminated by signal %d\n", sig);
+        return 1;
+      }
+      return 1;
+    }
+    if (w < 0) {
+      fprintf(stderr, "zrt: error: waitpid failed (%s)\n", strerror(errno));
+      return 1;
+    }
+
+    if (timeout_ms != 0) {
+      uint64_t now = monotonic_ms();
+      if (now - start >= timeout_ms) {
+        (void)kill(pid, SIGKILL);
+        (void)waitpid(pid, NULL, 0);
+        fprintf(stderr, "zrt: error: timeout after %llu ms\n", (unsigned long long)timeout_ms);
+        return 1;
+      }
+    }
+
+    struct timespec slp;
+    slp.tv_sec = 0;
+    slp.tv_nsec = 1000000; /* 1ms */
+    (void)nanosleep(&slp, NULL);
+  }
+}
+
+int main(int argc, char **argv) {
+  int safe_mode = 0;
+  int allow_primitives = 0;
+  uint64_t timeout_ms = 0;
+  uint64_t fuel = 0;
+
+  const char *path = NULL;
+
+  for (int i = 1; i < argc; i++) {
+    const char *a = argv[i];
+    if (!a) continue;
+    if (strcmp(a, "--help") == 0 || strcmp(a, "-h") == 0) {
+      print_help(stdout);
+      return 0;
+    }
+    if (strcmp(a, "--version") == 0) {
+      print_version();
+      return 0;
+    }
+    if (strcmp(a, "--safe") == 0) {
+      safe_mode = 1;
+      continue;
+    }
+    if (strcmp(a, "--allow-primitives") == 0) {
+      allow_primitives = 1;
+      continue;
+    }
+    if (strcmp(a, "--timeout-ms") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "zrt: error: --timeout-ms requires a value\n");
+        return 2;
+      }
+      const char *v = argv[++i];
+      char *end = NULL;
+      unsigned long long n = strtoull(v, &end, 10);
+      if (!v || v[0] == '\0' || !end || *end != '\0') {
+        fprintf(stderr, "zrt: error: invalid --timeout-ms value\n");
+        return 2;
+      }
+      timeout_ms = (uint64_t)n;
+      continue;
+    }
+    if (strcmp(a, "--fuel") == 0) {
+      if (i + 1 >= argc) {
+        fprintf(stderr, "zrt: error: --fuel requires a value\n");
+        return 2;
+      }
+      const char *v = argv[++i];
+      char *end = NULL;
+      unsigned long long n = strtoull(v, &end, 10);
+      if (!v || v[0] == '\0' || !end || *end != '\0') {
+        fprintf(stderr, "zrt: error: invalid --fuel value\n");
+        return 2;
+      }
+      fuel = (uint64_t)n;
+      continue;
+    }
+    if (a[0] == '-') {
+      fprintf(stderr, "zrt: error: unknown option: %s\n", a);
+      print_help(stderr);
+      return 2;
+    }
+    if (!path) {
+      path = a;
+      continue;
+    }
+    fprintf(stderr, "zrt: error: unexpected extra argument: %s\n", a);
+    return 2;
+  }
+
+  if (!path) {
+    print_help(stderr);
+    return 2;
+  }
+
+  /* Only fork/isolate when explicitly requested. */
+  if (safe_mode || timeout_ms != 0 || fuel != 0) {
+    return run_guest_isolated(path, safe_mode, allow_primitives, timeout_ms, fuel);
+  }
+  return run_guest(path, safe_mode, allow_primitives, timeout_ms, fuel);
 }

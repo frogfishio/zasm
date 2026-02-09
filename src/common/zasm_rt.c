@@ -50,6 +50,9 @@ struct zasm_rt_instance {
 
   size_t heap_off;
 
+  uint64_t fuel_remaining;
+  zasm_rt_trap_t trap;
+
   uint8_t* jit_mem;
   size_t jit_cap;
   size_t jit_len;
@@ -519,13 +522,31 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 
   zxc_result_t tr;
 #if defined(__aarch64__) || defined(__arm64__)
-  tr = zxc_arm64_translate(code, code_len,
-                           inst->jit_mem, inst->jit_cap,
-                           inst->policy.mem_base, inst->policy.mem_size);
+  {
+    uint64_t fuel_ptr = 0;
+    uint64_t trap_ptr = 0;
+    if (inst->policy.fuel != 0) {
+      fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
+      trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+    }
+    tr = zxc_arm64_translate(code, code_len,
+                             inst->jit_mem, inst->jit_cap,
+                             inst->policy.mem_base, inst->policy.mem_size,
+                             fuel_ptr, trap_ptr);
+  }
 #elif defined(__x86_64__) || defined(_M_X64)
-  tr = zxc_x86_64_translate(code, code_len,
-                            inst->jit_mem, inst->jit_cap,
-                            inst->policy.mem_base, inst->policy.mem_size);
+  {
+    uint64_t fuel_ptr = 0;
+    uint64_t trap_ptr = 0;
+    if (inst->policy.fuel != 0) {
+      fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
+      trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+    }
+    tr = zxc_x86_64_translate(code, code_len,
+                              inst->jit_mem, inst->jit_cap,
+                              inst->policy.mem_base, inst->policy.mem_size,
+                              fuel_ptr, trap_ptr);
+  }
 #else
   (void)tr;
   zasm_rt_instance_destroy(inst);
@@ -560,6 +581,9 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   if (!instance) return diag_fail(diag, ZASM_RT_ERR_NULL);
   if (!instance->jit_mem || instance->jit_len == 0) return diag_fail(diag, ZASM_RT_ERR_NULL);
 
+  instance->trap = ZASM_RT_TRAP_NONE;
+  instance->fuel_remaining = instance->policy.fuel;
+
   uint8_t* mem = (uint8_t*)(uintptr_t)instance->policy.mem_base;
   size_t mem_cap = (size_t)instance->policy.mem_size;
   if (!mem || mem_cap == 0) return diag_fail(diag, ZASM_RT_ERR_BAD_POLICY);
@@ -592,6 +616,11 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   void (*entry)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*) =
       (void (*)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*))instance->jit_mem;
   entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &g_sys);
+
+  if (instance->trap != ZASM_RT_TRAP_NONE) {
+    if (diag) diag->trap = instance->trap;
+    return diag_fail(diag, ZASM_RT_ERR_EXEC_FAIL);
+  }
 
   instance->heap_off = g_guest_heap_off;
   return ZASM_RT_OK;

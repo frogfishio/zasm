@@ -25,6 +25,11 @@ typedef enum zasm_rt_err {
   ZASM_RT_ERR_UNSUPPORTED,
 } zasm_rt_err_t;
 
+typedef enum zasm_rt_trap {
+  ZASM_RT_TRAP_NONE = 0,
+  ZASM_RT_TRAP_FUEL = 1,
+} zasm_rt_trap_t;
+
 /* Translation/execution target selection.
  * - HOST: choose the current host architecture.
  * - Explicit targets are validated against the host for now (no cross-arch execution).
@@ -77,6 +82,9 @@ extern const zasm_rt_policy_t zasm_rt_policy_default;
 
 typedef struct zasm_rt_diag {
   zasm_rt_err_t err;
+
+  /* Optional exec detail (when err==EXEC_FAIL). */
+  zasm_rt_trap_t trap;
 
   /* Optional container-parse detail (when err==BAD_CONTAINER). */
   zasm_bin_err_t bin_err;

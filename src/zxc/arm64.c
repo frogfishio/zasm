@@ -73,6 +73,7 @@ enum { ZXC_CMP = 11 };
 enum { ZXC_SYS_PTR = 20, ZXC_REQ_HANDLE = 5, ZXC_RES_HANDLE = 6 };
 enum { ZXC_ENTRY_LR = 19 }; /* callee-saved to hold caller LR */
 enum { ZXC_LR_SAVE = 8 };   /* caller-saved scratch for host-call LR save */
+enum { ZXC_FUEL_PTR = 21, ZXC_TRAP_PTR = 22 };
 
 static uint8_t map_reg(unsigned reg) {
   switch (reg) {
@@ -500,6 +501,7 @@ static int emit_prim_ctl(uint8_t* out, size_t out_cap, size_t* out_len) {
 
 static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
                              uint64_t mem_base, uint64_t mem_size,
+                             uint64_t fuel_ptr, uint64_t trap_ptr,
                              size_t* out_size, size_t* next_off, zxc_err_t* err) {
   if (off + 4 > in_len) { *err = ZXC_ERR_TRUNC; return 0; }
   uint32_t w = (uint32_t)in[off] |
@@ -622,7 +624,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
       sz = 4;
       break;
     case ZOP_RET:
-      sz = 20; /* ldr x19; ldr x29; ldr x30; add sp; ret */
+      sz = 4; /* b epilogue */
       break;
     case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
     case 0x56: case 0x57: case 0x58: case 0x59:
@@ -664,6 +666,14 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
       break;
   }
 
+  /* Optional fuel metering adds a fixed prologue before every guest instruction.
+   * When enabled, the translator prepends:
+   *   ldr/cbz/sub/str/cbnz/mov/str/b  (8 insns = 32 bytes)
+   */
+  if (fuel_ptr != 0 && trap_ptr != 0) {
+    sz += 32;
+  }
+
   *out_size = sz;
   *next_off = n_off;
   return 1;
@@ -671,6 +681,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
 
 static int zxc_arm64_out_offset(const uint8_t* in, size_t in_len,
                                 uint64_t mem_base, uint64_t mem_size,
+                                uint64_t fuel_ptr, uint64_t trap_ptr,
                                 size_t target_off, size_t prologue_len,
                                 size_t* out_off, zxc_err_t* err) {
   size_t off = 0;
@@ -678,7 +689,7 @@ static int zxc_arm64_out_offset(const uint8_t* in, size_t in_len,
   while (off < target_off) {
     size_t sz = 0;
     size_t next = 0;
-    if (!zxc_arm64_size_at(in, in_len, off, mem_base, mem_size, &sz, &next, err)) return 0;
+    if (!zxc_arm64_size_at(in, in_len, off, mem_base, mem_size, fuel_ptr, trap_ptr, &sz, &next, err)) return 0;
     out += sz;
     off = next;
   }
@@ -689,9 +700,12 @@ static int zxc_arm64_out_offset(const uint8_t* in, size_t in_len,
 
 zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                                  uint8_t* out, size_t out_cap,
-                                 uint64_t mem_base, uint64_t mem_size) {
+                                 uint64_t mem_base, uint64_t mem_size,
+                                 uint64_t fuel_ptr, uint64_t trap_ptr) {
   zxc_result_t res;
   memset(&res, 0, sizeof(res));
+
+  const int fuel_enabled = (fuel_ptr != 0 && trap_ptr != 0);
 
   if ((in_len % 4) != 0) {
     res.err = ZXC_ERR_ALIGN;
@@ -716,14 +730,16 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
   }
   /*
    * prologue: create a simple C-style frame
-   * sp -= 32
+   * sp -= 48
    * [sp]     = x19 (callee-saved we repurpose for entry LR copy)
-   * [sp,#16] = x29
-   * [sp,#24] = x30 (caller LR)
+   * [sp,#8]  = x21
+   * [sp,#16] = x22
+   * [sp,#24] = x29
+   * [sp,#32] = x30 (caller LR)
    * x29 = sp
    * x19 = x30 (remember entry LR)
    */
-  if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 31, 31, 32))) { /* sub sp,sp,#32 */
+  if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 31, 31, 48))) { /* sub sp,sp,#48 */
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
@@ -731,11 +747,19 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
-  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(29, 31, 2))) { /* str x29,[sp,#16] */
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_FUEL_PTR, 31, 1))) { /* str x21,[sp,#8] */
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
-  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(30, 31, 3))) { /* str x30,[sp,#24] */
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_TRAP_PTR, 31, 2))) { /* str x22,[sp,#16] */
+    res.err = ZXC_ERR_OUTBUF;
+    return res;
+  }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(29, 31, 3))) { /* str x29,[sp,#24] */
+    res.err = ZXC_ERR_OUTBUF;
+    return res;
+  }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(30, 31, 4))) { /* str x30,[sp,#32] */
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
@@ -747,7 +771,52 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
     res.err = ZXC_ERR_OUTBUF;
     return res;
   }
-  prologue_len = out_len;
+
+  if (fuel_enabled) {
+    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_FUEL_PTR, fuel_ptr)) {
+      res.err = ZXC_ERR_OUTBUF;
+      return res;
+    }
+    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_TRAP_PTR, trap_ptr)) {
+      res.err = ZXC_ERR_OUTBUF;
+      return res;
+    }
+  }
+
+  /* Emit a shared epilogue stub immediately after prologue, and branch over it.
+   * ZOP_RET (and fuel traps) jump back to this stub.
+   */
+  {
+    const int32_t skip_imm26 = 8; /* 1 + (epilogue_insns=7) */
+    if (!emit_u32(out, out_cap, &out_len, enc_b(skip_imm26))) {
+      res.err = ZXC_ERR_OUTBUF;
+      return res;
+    }
+
+    const size_t epilogue_off = out_len;
+    (void)epilogue_off;
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(19, 31, 0))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_FUEL_PTR, 31, 1))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_TRAP_PTR, 31, 2))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(29, 31, 3))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(30, 31, 4))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 31, 31, 48))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, 0xD65F03C0u)) { res.err = ZXC_ERR_OUTBUF; return res; } /* ret */
+
+    /* The stub address is fixed; stash it in prologue_len so the main loop can branch back.
+     * prologue_len is the start of translated guest code (i.e., after the stub).
+     */
+    prologue_len = out_len;
+
+    /* Use the fixed stub address as the epilogue target for ZOP_RET and fuel traps. */
+    /* Keep in outer scope via a dedicated variable. */
+    (void)epilogue_off;
+  }
+
+  /* The epilogue stub begins exactly 4 bytes after the skip-branch in the prologue.
+   * Derive it from prologue_len: prologue_len == (stub_end); stub_start == stub_end - 28.
+   */
+  const size_t epilogue_off = prologue_len - 28;
 
   for (size_t off = 0; off < in_len; ) {
     size_t insn_off = off;
@@ -775,6 +844,64 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
       res.in_off = insn_off;
       res.out_len = out_len;
       return res;
+    }
+
+    if (fuel_enabled) {
+      /* Tick fuel per guest instruction.
+       * fuel==0 means unlimited.
+       * On exhaustion, write trap code then jump to shared epilogue.
+       */
+      if (!emit_u32(out, out_cap, &out_len, enc_ldr_x(ZXC_SCRATCH, ZXC_FUEL_PTR))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, ZXC_SCRATCH, 7))) { /* skip 7 insns */
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, ZXC_SCRATCH, ZXC_SCRATCH, 1))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_str_x(ZXC_SCRATCH, ZXC_FUEL_PTR))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_cbnz(1, ZXC_SCRATCH, 4))) { /* skip 4 insns */
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_movz(ZXC_SCRATCH, 1, 0))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_str_w(ZXC_SCRATCH, ZXC_TRAP_PTR))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      {
+        int32_t imm26 = (int32_t)((epilogue_off - out_len) / 4);
+        if (!emit_u32(out, out_cap, &out_len, enc_b(imm26))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+      }
     }
 
     uint32_t enc = 0;
@@ -1445,7 +1572,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         size_t target_off = (size_t)target64;
         zxc_err_t err = ZXC_OK;
         size_t target_out = 0;
-        if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, target_off, prologue_len, &target_out, &err)) {
+        if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, fuel_ptr, trap_ptr, target_off, prologue_len, &target_out, &err)) {
           res.err = err;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -1510,7 +1637,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         size_t target_off = (size_t)target64;
         zxc_err_t err = ZXC_OK;
         size_t target_out = 0;
-        if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, target_off, prologue_len, &target_out, &err)) {
+        if (!zxc_arm64_out_offset(in, in_len, mem_base, mem_size, fuel_ptr, trap_ptr, target_off, prologue_len, &target_out, &err)) {
           res.err = err;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -1908,32 +2035,8 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_RET: {
-        /* restore frame: x29,x30 and x19, then return */
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(19, 31, 0))) { /* ldr x19,[sp] */
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(29, 31, 2))) { /* ldr x29,[sp,#16] */
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(30, 31, 3))) { /* ldr x30,[sp,#24] */
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 31, 31, 32))) { /* add sp,sp,#32 */
-          res.err = ZXC_ERR_OUTBUF;
-          res.in_off = insn_off;
-          res.out_len = out_len;
-          return res;
-        }
-        enc = 0xD65F03C0u; /* ret */
+        int32_t imm26 = (int32_t)((epilogue_off - out_len) / 4);
+        enc = enc_b(imm26);
         break;
       }
       case ZOP_PRIM_IN: {
