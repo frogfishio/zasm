@@ -11,6 +11,7 @@
 #include "zi_telemetry.h"
 
 #include <errno.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +21,17 @@
 #include <unistd.h>
 #endif
 
+typedef struct zasm_rt_jit_cache_entry zasm_rt_jit_cache_entry_t;
+
 struct zasm_rt_engine {
-  int _unused;
+  zasm_rt_jit_cache_entry_t** jit_cache_buckets;
+  size_t jit_cache_bucket_count;
+
+  zasm_rt_jit_cache_entry_t* jit_cache_lru_head;
+  zasm_rt_jit_cache_entry_t* jit_cache_lru_tail;
+
+  size_t jit_cache_bytes_used;
+  size_t jit_cache_bytes_cap;
 };
 
 struct zasm_rt_module {
@@ -37,7 +47,21 @@ typedef struct zasm_rt_mem_ctx {
   size_t cap;
 } zasm_rt_mem_ctx_t;
 
+typedef struct zasm_rt_jit_ctx {
+  /* Must begin with zxc_zi_syscalls_v1_t so the arm64 translator can treat
+   * x2 as the syscalls table pointer at offset 0.
+   */
+  zxc_zi_syscalls_v1_t sys;
+
+  /* Slots accessed by zxc_arm64_translate_ctx(). */
+  uint64_t mem_base;
+  uint64_t fuel_ptr;
+  uint64_t trap_ptr;
+  uint64_t trap_off_ptr;
+} zasm_rt_jit_ctx_t;
+
 struct zasm_rt_instance {
+  zasm_rt_engine_t* engine;
   const zasm_rt_module_t* module;
   const zi_host_v1* host;
   zasm_rt_policy_t policy;
@@ -58,6 +82,29 @@ struct zasm_rt_instance {
   size_t jit_cap;
   size_t jit_len;
   int jit_is_exec;
+
+  zasm_rt_jit_ctx_t jit_ctx;
+  zasm_rt_jit_cache_entry_t* jit_entry;
+};
+
+struct zasm_rt_jit_cache_entry {
+  /* Hash table chaining. */
+  zasm_rt_jit_cache_entry_t* hnext;
+
+  /* LRU list (most-recent at head). */
+  zasm_rt_jit_cache_entry_t* lru_prev;
+  zasm_rt_jit_cache_entry_t* lru_next;
+
+  uint64_t hash;
+  uint64_t mem_size;
+  uint32_t code_len;
+  uint32_t salt;
+
+  uint8_t* mem;
+  size_t cap;
+  size_t len;
+
+  uint32_t refcnt;
 };
 
 /* Hard ceilings to keep the runtime multi-tenant safe even if an embedder
@@ -73,6 +120,132 @@ static const size_t ZASM_RT_HARD_MAX_JIT_BYTES = 256u * 1024u * 1024u;          
 
 static size_t g_guest_mem_cap = 0;
 static size_t g_guest_heap_off = 0;
+
+static uint64_t guest_alloc(uint32_t size);
+static int32_t guest_free(uint64_t ptr);
+static int32_t guest_telemetry(uint64_t topic_ptr, uint32_t topic_len,
+                               uint64_t msg_ptr, uint32_t msg_len);
+
+static const zxc_zi_syscalls_v1_t g_syscalls_v1 = {
+  .read = zi_read,
+  .write = zi_write,
+  .alloc = guest_alloc,
+  .free = guest_free,
+  .ctl = zi_ctl,
+  .telemetry = guest_telemetry,
+};
+
+static uint64_t fnv1a64_update(uint64_t h, const void* data, size_t len) {
+  const uint8_t* p = (const uint8_t*)data;
+  for (size_t i = 0; i < len; i++) {
+    h ^= (uint64_t)p[i];
+    h *= 1099511628211ull;
+  }
+  return h;
+}
+
+static uint64_t fnv1a64(const void* data, size_t len) {
+  return fnv1a64_update(14695981039346656037ull, data, len);
+}
+
+static void jit_cache_lru_remove(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!e || !ent) return;
+  if (ent->lru_prev) ent->lru_prev->lru_next = ent->lru_next;
+  else e->jit_cache_lru_head = ent->lru_next;
+  if (ent->lru_next) ent->lru_next->lru_prev = ent->lru_prev;
+  else e->jit_cache_lru_tail = ent->lru_prev;
+  ent->lru_prev = NULL;
+  ent->lru_next = NULL;
+}
+
+static void jit_cache_lru_insert_head(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!e || !ent) return;
+  ent->lru_prev = NULL;
+  ent->lru_next = e->jit_cache_lru_head;
+  if (e->jit_cache_lru_head) e->jit_cache_lru_head->lru_prev = ent;
+  e->jit_cache_lru_head = ent;
+  if (!e->jit_cache_lru_tail) e->jit_cache_lru_tail = ent;
+}
+
+static void jit_cache_lru_touch(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!e || !ent) return;
+  if (e->jit_cache_lru_head == ent) return;
+  jit_cache_lru_remove(e, ent);
+  jit_cache_lru_insert_head(e, ent);
+}
+
+static size_t jit_cache_bucket_index(const zasm_rt_engine_t* e, uint64_t hash) {
+  if (!e || e->jit_cache_bucket_count == 0) return 0;
+  return (size_t)(hash % (uint64_t)e->jit_cache_bucket_count);
+}
+
+static zasm_rt_jit_cache_entry_t* jit_cache_lookup(zasm_rt_engine_t* e,
+                                                   uint64_t hash,
+                                                   uint64_t mem_size,
+                                                   uint32_t code_len,
+                                                   uint32_t salt) {
+  if (!e || !e->jit_cache_buckets || e->jit_cache_bucket_count == 0) return NULL;
+  size_t bi = jit_cache_bucket_index(e, hash);
+  for (zasm_rt_jit_cache_entry_t* cur = e->jit_cache_buckets[bi]; cur; cur = cur->hnext) {
+    if (cur->hash == hash && cur->mem_size == mem_size && cur->code_len == code_len && cur->salt == salt) {
+      return cur;
+    }
+  }
+  return NULL;
+}
+
+static void jit_cache_hash_remove(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!e || !ent || !e->jit_cache_buckets || e->jit_cache_bucket_count == 0) return;
+  size_t bi = jit_cache_bucket_index(e, ent->hash);
+  zasm_rt_jit_cache_entry_t** p = &e->jit_cache_buckets[bi];
+  while (*p) {
+    if (*p == ent) {
+      *p = ent->hnext;
+      ent->hnext = NULL;
+      return;
+    }
+    p = &(*p)->hnext;
+  }
+}
+
+static void jit_cache_free_entry(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!ent) return;
+  if (e) {
+    if (e->jit_cache_bytes_used >= ent->cap) e->jit_cache_bytes_used -= ent->cap;
+    else e->jit_cache_bytes_used = 0;
+  }
+#if defined(__unix__) || defined(__APPLE__)
+  if (ent->mem && ent->cap) (void)munmap(ent->mem, ent->cap);
+#else
+  free(ent->mem);
+#endif
+  free(ent);
+}
+
+static int jit_cache_evict_to_fit(zasm_rt_engine_t* e, size_t need_bytes) {
+  if (!e) return 0;
+  if (e->jit_cache_bytes_cap == 0) return 0;
+  if (need_bytes > e->jit_cache_bytes_cap) return 0;
+  while (e->jit_cache_bytes_used + need_bytes > e->jit_cache_bytes_cap) {
+    zasm_rt_jit_cache_entry_t* victim = e->jit_cache_lru_tail;
+    while (victim && victim->refcnt != 0) victim = victim->lru_prev;
+    if (!victim) return 0;
+    jit_cache_lru_remove(e, victim);
+    jit_cache_hash_remove(e, victim);
+    jit_cache_free_entry(e, victim);
+  }
+  return 1;
+}
+
+static int jit_cache_insert(zasm_rt_engine_t* e, zasm_rt_jit_cache_entry_t* ent) {
+  if (!e || !ent || !e->jit_cache_buckets || e->jit_cache_bucket_count == 0) return 0;
+  size_t bi = jit_cache_bucket_index(e, ent->hash);
+  ent->hnext = e->jit_cache_buckets[bi];
+  e->jit_cache_buckets[bi] = ent;
+  jit_cache_lru_insert_head(e, ent);
+  e->jit_cache_bytes_used += ent->cap;
+  return 1;
+}
 
 static uint64_t guest_alloc(uint32_t size) {
   if (g_guest_mem_cap == 0) return 0;
@@ -337,12 +510,34 @@ zasm_rt_err_t zasm_rt_engine_create(zasm_rt_engine_t** out_engine) {
   if (!out_engine) return ZASM_RT_ERR_NULL;
   zasm_rt_engine_t* e = (zasm_rt_engine_t*)zasm_rt_calloc(1, sizeof(zasm_rt_engine_t));
   if (!e) return ZASM_RT_ERR_OOM;
+  e->jit_cache_bucket_count = 1024u;
+  e->jit_cache_buckets = (zasm_rt_jit_cache_entry_t**)zasm_rt_calloc(e->jit_cache_bucket_count, sizeof(*e->jit_cache_buckets));
+  if (!e->jit_cache_buckets) {
+    free(e);
+    return ZASM_RT_ERR_OOM;
+  }
   (void)zingcore25_init();
   *out_engine = e;
   return ZASM_RT_OK;
 }
 
 void zasm_rt_engine_destroy(zasm_rt_engine_t* engine) {
+  if (!engine) return;
+  if (engine->jit_cache_buckets) {
+    for (size_t i = 0; i < engine->jit_cache_bucket_count; i++) {
+      zasm_rt_jit_cache_entry_t* cur = engine->jit_cache_buckets[i];
+      while (cur) {
+        zasm_rt_jit_cache_entry_t* next = cur->hnext;
+        cur->hnext = NULL;
+        cur->lru_prev = NULL;
+        cur->lru_next = NULL;
+        jit_cache_free_entry(NULL, cur);
+        cur = next;
+      }
+      engine->jit_cache_buckets[i] = NULL;
+    }
+  }
+  free(engine->jit_cache_buckets);
   free(engine);
 }
 
@@ -473,7 +668,6 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
                                       const zi_host_v1* host,
                                       zasm_rt_instance_t** out_instance,
                                       zasm_rt_diag_t* diag) {
-  (void)engine;
   const zasm_rt_policy_t p = policy ? *policy : zasm_rt_policy_default;
   if (diag) diag_reset(diag);
   if (!module || !out_instance) return diag_fail(diag, ZASM_RT_ERR_NULL);
@@ -489,6 +683,7 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     *out_instance = NULL;
     return diag_fail_oom(diag);
   }
+  inst->engine = engine;
   inst->module = module;
   inst->host = host;
   inst->policy = p;
@@ -518,6 +713,15 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   inst->mem.ctx = &inst->mem_ctx;
   inst->mem.map_ro = zasm_rt_mem_map_ro;
   inst->mem.map_rw = zasm_rt_mem_map_rw;
+
+  /* JIT context: always valid (option B style). On arm64, translated code also
+   * loads mem_base/fuel/trap pointers from these slots.
+   */
+  inst->jit_ctx.sys = g_syscalls_v1;
+  inst->jit_ctx.mem_base = inst->policy.mem_base;
+  inst->jit_ctx.fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
+  inst->jit_ctx.trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+  inst->jit_ctx.trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
 
   /* Apply static memory initialization from the module's DATA section, if any.
    * Also advance the heap start past the highest initialized byte.
@@ -639,15 +843,48 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   size_t out_cap = 0;
 #if defined(__aarch64__) || defined(__arm64__)
   {
-    uint64_t fuel_ptr = 0;
-    uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
-    uint64_t trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
-    if (inst->policy.fuel != 0) {
-      fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
+    /* Option B: always-on ctx ABI + metering/trap logic.
+     * Disable fuel by setting fuel_remaining to 0 (unlimited).
+     */
+    const uint16_t mem_base_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, mem_base) / 8u);
+    const uint16_t fuel_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, fuel_ptr) / 8u);
+    const uint16_t trap_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, trap_ptr) / 8u);
+    const uint16_t trap_off_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, trap_off_ptr) / 8u);
+
+    const uint32_t salt = 0xA64C0001u;
+    uint64_t h = fnv1a64(code, code_len);
+    h = fnv1a64_update(h, &inst->policy.mem_size, sizeof(inst->policy.mem_size));
+    h = fnv1a64_update(h, &code_len, sizeof(code_len));
+    h = fnv1a64_update(h, &salt, sizeof(salt));
+
+    /* Configure engine cache cap from policy/env, and lookup cached blob. */
+    if (engine) {
+      size_t cap = zasm_rt_max_jit_bytes_effective(policy);
+      if (engine->jit_cache_bytes_cap == 0) engine->jit_cache_bytes_cap = cap;
+      else if (cap < engine->jit_cache_bytes_cap) engine->jit_cache_bytes_cap = cap;
+      /* If the cap shrank, evict to comply. */
+      (void)jit_cache_evict_to_fit(engine, 0);
+
+      zasm_rt_jit_cache_entry_t* hit = jit_cache_lookup(engine, h, inst->policy.mem_size, (uint32_t)code_len, salt);
+      if (hit) {
+        hit->refcnt++;
+        jit_cache_lru_touch(engine, hit);
+        inst->jit_entry = hit;
+        inst->jit_mem = hit->mem;
+        inst->jit_cap = hit->cap;
+        inst->jit_len = hit->len;
+        inst->jit_is_exec = 1;
+        *out_instance = inst;
+        return ZASM_RT_OK;
+      }
     }
-    zxc_result_t ms = zxc_arm64_measure(code, code_len,
-                                        inst->policy.mem_base, inst->policy.mem_size,
-                                        fuel_ptr, trap_ptr, trap_off_ptr);
+
+    zxc_result_t ms = zxc_arm64_measure_ctx(code, code_len,
+                                            inst->policy.mem_size,
+                                            mem_base_slot, fuel_ptr_slot, trap_ptr_slot, trap_off_ptr_slot,
+                                            /* fuel_enabled */ 1,
+                                            /* trap_enabled */ 1,
+                                            /* trap_off_enabled */ 1);
     if (ms.err != ZXC_OK) {
       if (diag) {
         if (ms.err == ZXC_ERR_UNIMPL) diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
@@ -669,10 +906,118 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
       return diag_fail(diag, ZASM_RT_ERR_TRANSLATE_FAIL);
     }
     out_cap = ms.out_len;
+
+    /* Cache/global cap enforcement. */
     if (out_cap > zasm_rt_max_jit_bytes_effective(policy)) {
       zasm_rt_instance_destroy(inst);
       *out_instance = NULL;
       return diag_fail_oom(diag);
+    }
+
+    /* If we have an engine, compile into a shared cache entry (RX) and pin it. */
+    if (engine) {
+      size_t blob_cap = out_cap;
+      if (blob_cap < 4096u) blob_cap = 4096u;
+      blob_cap = zasm_rt_round_up_page(blob_cap);
+      if (blob_cap > engine->jit_cache_bytes_cap) {
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail_oom(diag);
+      }
+      if (!jit_cache_evict_to_fit(engine, blob_cap)) {
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail_oom(diag);
+      }
+
+      zasm_rt_jit_cache_entry_t* ent = (zasm_rt_jit_cache_entry_t*)zasm_rt_calloc(1, sizeof(*ent));
+      if (!ent) {
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail_oom(diag);
+      }
+
+#if defined(__unix__) || defined(__APPLE__)
+      int mmap_flags = MAP_PRIVATE;
+#if defined(MAP_ANON)
+      mmap_flags |= MAP_ANON;
+#elif defined(MAP_ANONYMOUS)
+      mmap_flags |= MAP_ANONYMOUS;
+#else
+#error "Anonymous mmap not supported on this platform"
+#endif
+      ent->mem = (uint8_t*)mmap(NULL, blob_cap, PROT_READ | PROT_WRITE, mmap_flags, -1, 0);
+      if (ent->mem == MAP_FAILED) ent->mem = NULL;
+#else
+      ent->mem = (uint8_t*)zasm_rt_malloc(blob_cap);
+#endif
+      if (!ent->mem) {
+        free(ent);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail_oom(diag);
+      }
+
+      zxc_result_t tr = zxc_arm64_translate_ctx(code, code_len,
+                                                ent->mem, blob_cap,
+                                                inst->policy.mem_size,
+                                                mem_base_slot, fuel_ptr_slot, trap_ptr_slot, trap_off_ptr_slot,
+                                                1, 1, 1);
+      if (tr.err != ZXC_OK) {
+        if (diag) {
+          if (tr.err == ZXC_ERR_UNIMPL) diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
+          else if (tr.err == ZXC_ERR_TRUNC || tr.err == ZXC_ERR_ALIGN || tr.err == ZXC_ERR_OPCODE) {
+            diag->trap = ZASM_RT_TRAP_DECODE;
+          }
+          diag->translate_err = (uint32_t)tr.err;
+          diag->translate_off = tr.in_off;
+          diag->translate_opcode = 0;
+          diag->translate_insn = 0;
+          if (tr.in_off + 4u <= code_len) {
+            uint32_t w = u32_le(code + tr.in_off);
+            diag->translate_insn = w;
+            diag->translate_opcode = (uint8_t)(w >> 24);
+          }
+        }
+        jit_cache_free_entry(NULL, ent);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_TRANSLATE_FAIL);
+      }
+
+#if defined(__unix__) || defined(__APPLE__)
+      __builtin___clear_cache((char*)ent->mem, (char*)ent->mem + tr.out_len);
+      if (mprotect(ent->mem, blob_cap, PROT_READ | PROT_EXEC) != 0) {
+        jit_cache_free_entry(NULL, ent);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail(diag, ZASM_RT_ERR_EXEC_FAIL);
+      }
+#endif
+
+      ent->hash = h;
+      ent->mem_size = inst->policy.mem_size;
+      ent->code_len = (uint32_t)code_len;
+      ent->salt = salt;
+      ent->cap = blob_cap;
+      ent->len = tr.out_len;
+      ent->refcnt = 1;
+
+      if (!jit_cache_insert(engine, ent)) {
+        jit_cache_free_entry(NULL, ent);
+        zasm_rt_instance_destroy(inst);
+        *out_instance = NULL;
+        return diag_fail_oom(diag);
+      }
+
+      inst->jit_entry = ent;
+      inst->jit_mem = ent->mem;
+      inst->jit_cap = ent->cap;
+      inst->jit_len = ent->len;
+      inst->jit_is_exec = 1;
+
+      *out_instance = inst;
+      return ZASM_RT_OK;
     }
   }
 #else
@@ -717,16 +1062,15 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   zxc_result_t tr;
 #if defined(__aarch64__) || defined(__arm64__)
   {
-    uint64_t fuel_ptr = 0;
-    uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
-    uint64_t trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
-    if (inst->policy.fuel != 0) {
-      fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
-    }
-    tr = zxc_arm64_translate(code, code_len,
-                             inst->jit_mem, inst->jit_cap,
-                             inst->policy.mem_base, inst->policy.mem_size,
-                             fuel_ptr, trap_ptr, trap_off_ptr);
+    const uint16_t mem_base_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, mem_base) / 8u);
+    const uint16_t fuel_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, fuel_ptr) / 8u);
+    const uint16_t trap_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, trap_ptr) / 8u);
+    const uint16_t trap_off_ptr_slot = (uint16_t)(offsetof(zasm_rt_jit_ctx_t, trap_off_ptr) / 8u);
+    tr = zxc_arm64_translate_ctx(code, code_len,
+                                 inst->jit_mem, inst->jit_cap,
+                                 inst->policy.mem_size,
+                                 mem_base_slot, fuel_ptr_slot, trap_ptr_slot, trap_off_ptr_slot,
+                                 1, 1, 1);
   }
 #elif defined(__x86_64__) || defined(_M_X64)
   {
@@ -777,10 +1121,13 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 void zasm_rt_instance_destroy(zasm_rt_instance_t* instance) {
   if (!instance) return;
 #if defined(__unix__) || defined(__APPLE__)
-  if (instance->jit_mem) munmap(instance->jit_mem, instance->jit_cap);
+  if (instance->jit_mem && !instance->jit_entry) munmap(instance->jit_mem, instance->jit_cap);
 #else
-  free(instance->jit_mem);
+  if (!instance->jit_entry) free(instance->jit_mem);
 #endif
+  if (instance->jit_entry && instance->engine) {
+    if (instance->jit_entry->refcnt) instance->jit_entry->refcnt--;
+  }
   free(instance->owned_mem);
   free(instance);
 }
@@ -815,17 +1162,12 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   }
 #endif
 
-  static zxc_zi_syscalls_v1_t g_sys = {
-    .read = zi_read,
-    .write = zi_write,
-    .alloc = guest_alloc,
-    .free = guest_free,
-    .ctl = zi_ctl,
-    .telemetry = guest_telemetry,
-  };
-  void (*entry)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*) =
-      (void (*)(int32_t, int32_t, const zxc_zi_syscalls_v1_t*))instance->jit_mem;
-  entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &g_sys);
+  /* arm64 ctx ABI: x2 points at a context object whose prefix matches
+   * zxc_zi_syscalls_v1_t.
+   */
+  void (*entry)(int32_t, int32_t, const void*) =
+      (void (*)(int32_t, int32_t, const void*))instance->jit_mem;
+  entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &instance->jit_ctx);
 
   if (instance->trap != ZASM_RT_TRAP_NONE) {
     if (diag) {

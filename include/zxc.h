@@ -59,6 +59,38 @@ zxc_result_t zxc_arm64_measure(const uint8_t* in, size_t in_len,
                                uint64_t mem_base, uint64_t mem_size,
                                uint64_t fuel_ptr, uint64_t trap_ptr,
                                uint64_t trap_off_ptr);
+
+/* Context-based arm64 translation APIs.
+ *
+ * These variants avoid embedding per-instance pointers into the generated code.
+ * Instead, the translated code expects x2 to point at an embedder-provided
+ * context object whose first fields match `zxc_zi_syscalls_v1_t` (so primitive
+ * calls keep working), and which also contains:
+ *   - a `mem_base` pointer (host address of guest linear memory)
+ *   - optional pointers for fuel/trap state (fuel_remaining, trap, trap_off)
+ *
+ * The `*_slot` parameters are 8-byte slots (i.e. `offsetof(field)/8`) used for
+ * scaled arm64 LDR/STR encodings.
+ */
+zxc_result_t zxc_arm64_measure_ctx(const uint8_t* in, size_t in_len,
+                                   uint64_t mem_size,
+                                   uint16_t mem_base_slot,
+                                   uint16_t fuel_ptr_slot,
+                                   uint16_t trap_ptr_slot,
+                                   uint16_t trap_off_ptr_slot,
+                                   int fuel_enabled,
+                                   int trap_enabled,
+                                   int trap_off_enabled);
+zxc_result_t zxc_arm64_translate_ctx(const uint8_t* in, size_t in_len,
+                                     uint8_t* out, size_t out_cap,
+                                     uint64_t mem_size,
+                                     uint16_t mem_base_slot,
+                                     uint16_t fuel_ptr_slot,
+                                     uint16_t trap_ptr_slot,
+                                     uint16_t trap_off_ptr_slot,
+                                     int fuel_enabled,
+                                     int trap_enabled,
+                                     int trap_off_enabled);
 zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
                                   uint8_t* out, size_t out_cap,
                                   uint64_t mem_base, uint64_t mem_size,

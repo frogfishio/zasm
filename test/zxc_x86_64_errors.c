@@ -32,7 +32,8 @@ static int expect_err(const char* label, const uint8_t* in, size_t in_len,
   uint8_t out[64];
   memset(out, 0, sizeof(out));
   zxc_result_t res = zxc_x86_64_translate(in, in_len, out, out_cap,
-                                          0x10000000u, 0x1000u);
+                                          0x10000000u, 0x1000u,
+                                          0, 0, 0);
   if (res.err != want) {
     fprintf(stderr, "%s: expected err=%d got=%d (in_off=%zu out_len=%zu)\n",
             label, want, res.err, res.in_off, res.out_len);

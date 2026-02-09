@@ -74,6 +74,7 @@ enum { ZXC_SYS_PTR = 20, ZXC_REQ_HANDLE = 5, ZXC_RES_HANDLE = 6 };
 enum { ZXC_ENTRY_LR = 19 }; /* callee-saved to hold caller LR */
 enum { ZXC_LR_SAVE = 8 };   /* caller-saved scratch for host-call LR save */
 enum { ZXC_FUEL_PTR = 21, ZXC_TRAP_PTR = 22, ZXC_TRAP_OFF_PTR = 23 };
+enum { ZXC_MEM_BASE = 24 };
 
 /* Trap codes written through ZXC_TRAP_PTR.
  * Keep in sync with include/zasm_rt.h (zasm_rt_trap_t).
@@ -830,6 +831,1861 @@ static size_t prim_prologue_size(unsigned prim_mask) {
   if (prim_mask & PRIM_BIT_IN) insns += 1;
   if (prim_mask & PRIM_BIT_OUT) insns += 1;
   return insns * 4u;
+}
+
+static size_t prim_prologue_size_ctx(unsigned prim_mask) {
+  /* Context mode always receives a ctx pointer in x2.
+   * We move it into ZXC_SYS_PTR *after* saving callee-saved registers.
+   * Here we only account for optional handle moves.
+   * Keep in sync with emit_primitive_prologue_ctx().
+   */
+  size_t insns = 0;
+  if (prim_mask & PRIM_BIT_IN) insns += 1;
+  if (prim_mask & PRIM_BIT_OUT) insns += 1;
+  return insns * 4u;
+}
+
+static int emit_primitive_prologue_ctx(uint8_t* out, size_t out_cap, size_t* out_len,
+                                       unsigned prim_mask) {
+  if (!prim_mask) return 1;
+  if (prim_mask & PRIM_BIT_IN) {
+    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_REQ_HANDLE, 0))) return 0;
+  }
+  if (prim_mask & PRIM_BIT_OUT) {
+    if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_RES_HANDLE, 1))) return 0;
+  }
+  return 1;
+}
+
+static int zxc_arm64_size_at_ctx(const uint8_t* in, size_t in_len, size_t off,
+                                 uint64_t mem_size,
+                                 int fuel_enabled,
+                                 int trap_enabled,
+                                 int trap_off_enabled,
+                                 size_t* out_size, size_t* next_off, zxc_err_t* err) {
+  /* Identical to zxc_arm64_size_at(), except mem_base is assumed to be resident in a
+   * dedicated register loaded once in the prologue (no per-access imm materialization).
+   */
+  if (off + 4 > in_len) { *err = ZXC_ERR_TRUNC; return 0; }
+  uint32_t w = (uint32_t)in[off] |
+               ((uint32_t)in[off + 1] << 8) |
+               ((uint32_t)in[off + 2] << 16) |
+               ((uint32_t)in[off + 3] << 24);
+  uint8_t op = (uint8_t)(w >> 24);
+  uint8_t rs1 = (uint8_t)((w >> 16) & 0x0F);
+  int32_t imm12 = (int32_t)(w & 0xFFFu);
+  if (imm12 & 0x800) imm12 |= ~0xFFF;
+
+  size_t prim_abi_check_sz = 0;
+  if (trap_enabled) {
+    size_t trap_seq_insns = 3;
+    if (trap_off_enabled) trap_seq_insns += (mov_imm64_size((uint64_t)off) / 4u) + 1u;
+    /* cbnz(sys_ptr)+trap + cbnz(fn_ptr)+trap */
+    prim_abi_check_sz = 4u * (2u + 2u * trap_seq_insns);
+  }
+
+  size_t sz = 4;
+  size_t n_off = off + 4;
+
+  switch (op) {
+    case 0x35: /* CLZ */
+    case 0x45: /* CLZ64 */
+      sz = 4;
+      break;
+    case 0x36: /* CTZ */
+    case 0x46: /* CTZ64 */
+      sz = 8;
+      break;
+    case 0x37: /* POPC */
+    case 0x47: /* POPC64 */
+      {
+        int is64p = (op == 0x47);
+        uint64_t mask1 = is64p ? 0x5555555555555555ull : 0x55555555ull;
+        uint64_t mask2 = is64p ? 0x3333333333333333ull : 0x33333333ull;
+        uint64_t mask3 = is64p ? 0x0F0F0F0F0F0F0F0Full : 0x0F0F0F0Full;
+        uint64_t maskf = is64p ? 0x7Full : 0x3Full;
+        size_t mov_sz = mov_imm64_size(mask1) + mov_imm64_size(mask2) +
+                        mov_imm64_size(mask3) + mov_imm64_size(maskf);
+        size_t fixed_insn = is64p ? 23u : 20u;
+        sz = mov_sz + fixed_insn * 4u;
+      }
+      break;
+    case ZOP_DIVS:
+    case ZOP_DIVU:
+    case ZOP_DIVS64:
+    case ZOP_DIVU64:
+      sz = trap_enabled ? 24 : 16;
+      if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      break;
+    case ZOP_REMS:
+    case ZOP_REMU:
+    case ZOP_REMS64:
+    case ZOP_REMU64:
+      sz = trap_enabled ? 28 : 20;
+      if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      break;
+    case ZOP_SLA:
+    case ZOP_SRA:
+    case ZOP_SRL:
+    case ZOP_SLA64:
+    case ZOP_SRA64:
+    case ZOP_SRL64:
+      sz = 8;
+      break;
+    case ZOP_ROL:
+    case ZOP_ROR:
+    case ZOP_ROL64:
+    case ZOP_ROR64:
+      if (imm12 == 0) sz = 4;
+      else sz = 20;
+      break;
+    case ZOP_LD:
+      if (imm12 == -2048 || imm12 == -2047) {
+        size_t need = (imm12 == -2048) ? 4 : 8;
+        if (off + 4 + need > in_len) { *err = ZXC_ERR_TRUNC; return 0; }
+        uint32_t w1 = (uint32_t)in[off + 4] |
+                      ((uint32_t)in[off + 5] << 8) |
+                      ((uint32_t)in[off + 6] << 16) |
+                      ((uint32_t)in[off + 7] << 24);
+        uint64_t imm = 0;
+        if (imm12 == -2048) {
+          imm = (uint64_t)(int64_t)(int32_t)w1;
+          n_off = off + 8;
+        } else {
+          uint32_t w2 = (uint32_t)in[off + 8] |
+                        ((uint32_t)in[off + 9] << 8) |
+                        ((uint32_t)in[off + 10] << 16) |
+                        ((uint32_t)in[off + 11] << 24);
+          imm = ((uint64_t)w2 << 32) | (uint64_t)w1;
+          n_off = off + 12;
+        }
+        sz = mov_imm64_size(imm);
+      }
+      break;
+    case 0x71: case 0x73: case 0x75: case 0x76:
+    case 0x77: case 0x79: case 0x7B:
+    case 0x72: case 0x74: case 0x78: case 0x7A: case 0x7C:
+      {
+        uint32_t asz = mem_access_size(op);
+        size_t addr_sz = 4;
+        uint64_t limit = mem_size > asz ? (mem_size - asz) : 0;
+        size_t limit_sz = mov_imm64_size(limit);
+        size_t ls_sz = 4;
+        if (op == 0x72 || op == 0x74 || op == 0x78 || op == 0x7A || op == 0x7C) {
+          ls_sz = 8;
+        }
+        /* No mem_base imm materialization; mem_base is already in ZXC_MEM_BASE. */
+        sz = addr_sz + limit_sz + 4 + ls_sz + (trap_enabled ? 24 : 16);
+        if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      }
+      break;
+    case 0x80: case 0x82: case 0x84: case 0x86:
+    case 0x81: case 0x83: case 0x85:
+      {
+        uint32_t asz = mem_access_size(op);
+        size_t addr_sz = 4;
+        uint64_t limit = mem_size > asz ? (mem_size - asz) : 0;
+        size_t limit_sz = mov_imm64_size(limit);
+        size_t ls_sz = 4;
+        sz = addr_sz + limit_sz + 4 + ls_sz + (trap_enabled ? 24 : 16);
+        if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      }
+      break;
+    case ZOP_CP:
+      sz = 4;
+      break;
+    case ZOP_RET:
+      sz = 4;
+      break;
+    case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
+    case 0x56: case 0x57: case 0x58: case 0x59:
+    case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65:
+    case 0x66: case 0x67: case 0x68: case 0x69:
+      sz = 8;
+      break;
+    case ZOP_JR:
+      sz = (rs1 == 0 ? 4 : 8);
+      break;
+    case ZOP_CALL:
+      sz = 4;
+      break;
+    case 0x90: /* LDIR */
+      {
+        uint64_t limit = mem_size > 0 ? (mem_size - 1) : 0;
+        size_t limit_sz = mov_imm64_size(limit);
+        /* No mem_base imm here either. */
+        sz = limit_sz + 15 * 4 + (trap_enabled ? 8 : 0);
+        if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      }
+      break;
+    case 0x91: /* FILL */
+      {
+        uint64_t limit = mem_size > 0 ? (mem_size - 1) : 0;
+        size_t limit_sz = mov_imm64_size(limit);
+        sz = limit_sz + 10 * 4 + (trap_enabled ? 8 : 0);
+        if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
+      }
+      break;
+    case ZOP_PRIM_IN: sz = (size_t)((8 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_OUT: sz = (size_t)((9 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_LOG: sz = (size_t)((14 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_ALLOC: sz = (size_t)((2 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_FREE: sz = (size_t)((4 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_CTL: sz = (size_t)((13 + 4) * 4) + prim_abi_check_sz; break;
+    default:
+      sz = 4;
+      break;
+  }
+
+  if (fuel_enabled && trap_enabled) {
+    size_t trap_seq_insns = 3;
+    if (trap_off_enabled) trap_seq_insns += (mov_imm64_size((uint64_t)off) / 4u) + 1u;
+    sz += 4u * (5u + trap_seq_insns);
+  }
+
+  *out_size = sz;
+  *next_off = n_off;
+  return 1;
+}
+
+static int zxc_arm64_out_offset_ctx(const uint8_t* in, size_t in_len,
+                                    uint64_t mem_size,
+                                    int fuel_enabled,
+                                    int trap_enabled,
+                                    int trap_off_enabled,
+                                    size_t target_off, size_t prologue_len,
+                                    size_t* out_off, zxc_err_t* err) {
+  size_t off = 0;
+  size_t out = 0;
+  while (off < target_off) {
+    size_t sz = 0;
+    size_t next = 0;
+    if (!zxc_arm64_size_at_ctx(in, in_len, off, mem_size,
+                               fuel_enabled, trap_enabled, trap_off_enabled,
+                               &sz, &next, err)) return 0;
+    out += sz;
+    off = next;
+  }
+  if (off != target_off) { *err = ZXC_ERR_OPCODE; return 0; }
+  *out_off = out + prologue_len;
+  return 1;
+}
+
+zxc_result_t zxc_arm64_measure_ctx(const uint8_t* in, size_t in_len,
+                                   uint64_t mem_size,
+                                   uint16_t mem_base_slot,
+                                   uint16_t fuel_ptr_slot,
+                                   uint16_t trap_ptr_slot,
+                                   uint16_t trap_off_ptr_slot,
+                                   int fuel_enabled,
+                                   int trap_enabled,
+                                   int trap_off_enabled) {
+  zxc_result_t res;
+  memset(&res, 0, sizeof(res));
+
+  if ((in_len % 4) != 0) {
+    res.err = ZXC_ERR_ALIGN;
+    return res;
+  }
+
+  unsigned prim_mask = 0;
+  zxc_err_t prim_err = ZXC_OK;
+  if (!detect_primitive_mask(in, in_len, &prim_mask, &prim_err)) {
+    res.err = prim_err;
+    return res;
+  }
+
+  (void)mem_base_slot;
+  (void)fuel_ptr_slot;
+  (void)trap_ptr_slot;
+  (void)trap_off_ptr_slot;
+
+  size_t prologue_len = 0;
+  /* Deterministic prologue sizing (must match translate_ctx()). */
+  prologue_len += prim_prologue_size_ctx(prim_mask);
+  prologue_len += 11u * 4u; /* frame setup (save x20/x24 too) */
+  prologue_len += 4u;       /* mov sys_ptr, x2 */
+  prologue_len += 4u;       /* ldr mem_base */
+  if (trap_enabled) prologue_len += 4u;     /* ldr trap_ptr */
+  if (trap_off_enabled) prologue_len += 4u; /* ldr trap_off_ptr */
+  if (fuel_enabled) prologue_len += 4u;     /* ldr fuel_ptr */
+  prologue_len += 11u * 4u;  /* skip-branch + epilogue stub (10 insns) */
+
+  size_t body_len = 0;
+  for (size_t off = 0; off < in_len; ) {
+    size_t sz = 0;
+    size_t next = 0;
+    zxc_err_t err = ZXC_OK;
+    if (!zxc_arm64_size_at_ctx(in, in_len, off,
+                               mem_size,
+                               fuel_enabled, trap_enabled, trap_off_enabled,
+                               &sz, &next, &err)) {
+      res.err = err;
+      res.in_off = off;
+      res.out_len = prologue_len + body_len;
+      return res;
+    }
+    body_len += sz;
+    off = next;
+  }
+
+  res.err = ZXC_OK;
+  res.out_len = prologue_len + body_len;
+  return res;
+}
+
+zxc_result_t zxc_arm64_translate_ctx(const uint8_t* in, size_t in_len,
+                                     uint8_t* out, size_t out_cap,
+                                     uint64_t mem_size,
+                                     uint16_t mem_base_slot,
+                                     uint16_t fuel_ptr_slot,
+                                     uint16_t trap_ptr_slot,
+                                     uint16_t trap_off_ptr_slot,
+                                     int fuel_enabled,
+                                     int trap_enabled,
+                                     int trap_off_enabled) {
+  zxc_result_t res;
+  memset(&res, 0, sizeof(res));
+
+  const int fuel_on = (fuel_enabled && trap_enabled);
+  const int trap_off_on = (trap_off_enabled && trap_enabled);
+
+  if ((in_len % 4) != 0) {
+    res.err = ZXC_ERR_ALIGN;
+    return res;
+  }
+
+  unsigned prim_mask = 0;
+  zxc_err_t prim_err = ZXC_OK;
+  if (!detect_primitive_mask(in, in_len, &prim_mask, &prim_err)) {
+    res.err = prim_err;
+    return res;
+  }
+
+  size_t out_len = 0;
+  size_t prologue_len = 0;
+
+  /* Prologue: same as zxc_arm64_translate(), but save/restore x24 (mem base) and
+   * load mem_base/fuel/trap pointers from ctx slots.
+   */
+  if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 31, 31, 64))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(19, 31, 0))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_SYS_PTR, 31, 1))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_FUEL_PTR, 31, 2))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_TRAP_PTR, 31, 3))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(29, 31, 4))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(30, 31, 5))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_TRAP_OFF_PTR, 31, 6))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_str_x_unsigned(ZXC_MEM_BASE, 31, 7))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_mov_reg(29, 31))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (!emit_u32(out, out_cap, &out_len, enc_mov_reg(ZXC_ENTRY_LR, 30))) { res.err = ZXC_ERR_OUTBUF; return res; }
+
+  /* x2 carries the ctx pointer (syscalls table at offset 0). */
+  if (!emit_u32(out, out_cap, &out_len, enc_mov_reg(ZXC_SYS_PTR, 2))) { res.err = ZXC_ERR_OUTBUF; return res; }
+
+  if (!emit_primitive_prologue_ctx(out, out_cap, &out_len, prim_mask)) {
+    res.err = ZXC_ERR_OUTBUF;
+    return res;
+  }
+
+  if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_MEM_BASE, ZXC_SYS_PTR, mem_base_slot))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  if (trap_enabled) {
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_TRAP_PTR, ZXC_SYS_PTR, trap_ptr_slot))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  }
+  if (trap_off_on) {
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_TRAP_OFF_PTR, ZXC_SYS_PTR, trap_off_ptr_slot))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  }
+  if (fuel_on) {
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_FUEL_PTR, ZXC_SYS_PTR, fuel_ptr_slot))) { res.err = ZXC_ERR_OUTBUF; return res; }
+  }
+
+  /* Emit epilogue stub immediately after prologue, and branch over it. */
+  {
+    const int32_t skip_imm26 = 11; /* 1 + (epilogue_insns=10) */
+    if (!emit_u32(out, out_cap, &out_len, enc_b(skip_imm26))) { res.err = ZXC_ERR_OUTBUF; return res; }
+
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(19, 31, 0))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_SYS_PTR, 31, 1))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_FUEL_PTR, 31, 2))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_TRAP_PTR, 31, 3))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(29, 31, 4))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(30, 31, 5))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_TRAP_OFF_PTR, 31, 6))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_ldr_x_off(ZXC_MEM_BASE, 31, 7))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 31, 31, 64))) { res.err = ZXC_ERR_OUTBUF; return res; }
+    if (!emit_u32(out, out_cap, &out_len, 0xD65F03C0u)) { res.err = ZXC_ERR_OUTBUF; return res; }
+
+    prologue_len = out_len;
+  }
+
+  const size_t epilogue_off = prologue_len - 40;
+
+  for (size_t off = 0; off < in_len; ) {
+    size_t insn_off = off;
+    uint32_t w = (uint32_t)in[off] |
+                 ((uint32_t)in[off + 1] << 8) |
+                 ((uint32_t)in[off + 2] << 16) |
+                 ((uint32_t)in[off + 3] << 24);
+
+    uint8_t op = (uint8_t)(w >> 24);
+    uint8_t rd = (uint8_t)((w >> 20) & 0x0F);
+    uint8_t rs1 = (uint8_t)((w >> 16) & 0x0F);
+    uint8_t rs2 = (uint8_t)((w >> 12) & 0x0F);
+    int32_t imm12 = (int32_t)(w & 0xFFFu);
+    if (imm12 & 0x800) imm12 |= ~0xFFF;
+
+    uint8_t rd_m = map_reg(rd);
+    uint8_t rs2_m = map_reg(rs2);
+    uint8_t rs1_m = 0;
+    /* JR stores its condition code in rs1; it is not a register index. */
+    if (op != ZOP_JR) {
+      rs1_m = map_reg(rs1);
+    }
+    if (rd_m == 0xFF || rs2_m == 0xFF || (op != ZOP_JR && rs1_m == 0xFF)) {
+      res.err = ZXC_ERR_OPCODE;
+      res.in_off = insn_off;
+      res.out_len = out_len;
+      return res;
+    }
+
+    if (fuel_on) {
+      /* Tick fuel per guest instruction.
+       * fuel==0 means unlimited.
+       * On exhaustion, write trap code then jump to shared epilogue.
+       */
+      if (!emit_u32(out, out_cap, &out_len, enc_ldr_x(ZXC_SCRATCH, ZXC_FUEL_PTR))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      size_t trap_seq_insns = 3;
+      if (trap_off_on) trap_seq_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+      if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, ZXC_SCRATCH, (int32_t)(trap_seq_insns + 4u)))) { /* skip metering */
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, ZXC_SCRATCH, ZXC_SCRATCH, 1))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_str_x(ZXC_SCRATCH, ZXC_FUEL_PTR))) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_u32(out, out_cap, &out_len, enc_cbnz(1, ZXC_SCRATCH, (int32_t)(trap_seq_insns + 1u)))) { /* skip trap seq */
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+      if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                trap_off_on, (uint32_t)insn_off,
+                                (uint16_t)ZXC_TRAP_FUEL)) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+    }
+
+    uint32_t enc = 0;
+    int is64 = 0;
+    switch (op) {
+      case ZOP_DROP:
+        /* Read the dropped register but discard the value (matches WASM local.get + drop). */
+        enc = enc_orr_reg(1, 31, rd_m, 31);
+        break;
+      case 0x35: /* CLZ */
+        enc = enc_clz(0, rd_m, rd_m);
+        break;
+      case 0x45: /* CLZ64 */
+        enc = enc_clz(1, rd_m, rd_m);
+        break;
+      case 0x36: /* CTZ */
+        if (!emit_u32(out, out_cap, &out_len, enc_rbit(0, ZXC_SCRATCH, rd_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_clz(0, rd_m, ZXC_SCRATCH);
+        break;
+      case 0x46: /* CTZ64 */
+        if (!emit_u32(out, out_cap, &out_len, enc_rbit(1, ZXC_SCRATCH, rd_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_clz(1, rd_m, ZXC_SCRATCH);
+        break;
+      case 0x37: /* POPC */
+      case 0x47: /* POPC64 */
+        {
+          int is64p = (op == 0x47);
+          uint8_t x = rd_m;
+          uint8_t t = ZXC_SCRATCH;
+          uint8_t sh = ZXC_SCRATCH2;
+          uint8_t m1 = ZXC_SCRATCH3;
+          uint8_t m2 = ZXC_SCRATCH4;
+
+          uint64_t mask1 = is64p ? 0x5555555555555555ull : 0x55555555ull;
+          uint64_t mask2 = is64p ? 0x3333333333333333ull : 0x33333333ull;
+          uint64_t mask3 = is64p ? 0x0F0F0F0F0F0F0F0Full : 0x0F0F0F0Full;
+          uint64_t maskf = is64p ? 0x7Full : 0x3Full;
+
+          if (!emit_mov_imm64(out, out_cap, &out_len, m1, mask1)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_mov_imm64(out, out_cap, &out_len, m2, mask2)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = x - ((x >> 1) & mask1) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, t, t, m1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_sub_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = (x & mask2) + ((x >> 2) & mask2) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, t, t, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, sh, x, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, sh, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = (x + (x >> 4)) & mask3 */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 4))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_mov_imm64(out, out_cap, &out_len, m1, mask3)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, x, x, m1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x += x>>8; x += x>>16; (x += x>>32 for 64-bit) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 8))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 16))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          if (is64p) {
+            if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 32))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+          }
+
+          if (!emit_mov_imm64(out, out_cap, &out_len, m2, maskf)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, x, x, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          enc = 0;
+          off += 4;
+          continue;
+        }
+      case ZOP_ADD:   is64 = 0; enc = enc_add_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_SUB:   is64 = 0; enc = enc_sub_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_MUL:   is64 = 0; enc = enc_madd(is64, rd_m, rs1_m, rs2_m, 31); break;
+      case ZOP_DIVS: {
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(0, rs2_m, 3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sdiv(0, rd_m, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_DIVU: {
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(0, rs2_m, 3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_udiv(0, rd_m, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_REMS: {
+        uint8_t t = ZXC_SCRATCH;
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(0, rs2_m, 4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sdiv(0, t, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_msub(0, rd_m, t, rs2_m, rs1_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_REMU: {
+        uint8_t t = ZXC_SCRATCH;
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(0, rs2_m, 4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_udiv(0, t, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_msub(0, rd_m, t, rs2_m, rs1_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_AND:   is64 = 0; enc = enc_and_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_OR:    is64 = 0; enc = enc_orr_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_XOR:   is64 = 0; enc = enc_eor_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_ADD64: is64 = 1; enc = enc_add_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_SUB64: is64 = 1; enc = enc_sub_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_MUL64: is64 = 1; enc = enc_madd(is64, rd_m, rs1_m, rs2_m, 31); break;
+      case ZOP_DIVS64: {
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, rs2_m, 3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sdiv(1, rd_m, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_DIVU64: {
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, rs2_m, 3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_udiv(1, rd_m, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_REMS64: {
+        uint8_t t = ZXC_SCRATCH;
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, rs2_m, 4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sdiv(1, t, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_msub(1, rd_m, t, rs2_m, rs1_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_REMU64: {
+        uint8_t t = ZXC_SCRATCH;
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, rs2_m, 4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_udiv(1, t, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_msub(1, rd_m, t, rs2_m, rs1_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case ZOP_AND64: is64 = 1; enc = enc_and_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_OR64:  is64 = 1; enc = enc_orr_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_XOR64: is64 = 1; enc = enc_eor_reg(is64, rd_m, rs1_m, rs2_m); break;
+      case ZOP_SLA:
+      case ZOP_SRA:
+      case ZOP_SRL:
+      case ZOP_ROL:
+      case ZOP_ROR:
+      case ZOP_SLA64:
+      case ZOP_SRA64:
+      case ZOP_SRL64:
+      case ZOP_ROL64:
+      case ZOP_ROR64: {
+        int is64s = (op >= ZOP_SLA64);
+        int width = is64s ? 64 : 32;
+        if (imm12 < 0 || imm12 >= width) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = off;
+          res.out_len = out_len;
+          return res;
+        }
+        uint8_t sh = (uint8_t)imm12;
+        if (op == ZOP_ROL || op == ZOP_ROR || op == ZOP_ROL64 || op == ZOP_ROR64) {
+          if (sh == 0) {
+            enc = enc_orr_reg(is64s, rd_m, rs1_m, 31);
+            break;
+          }
+          uint8_t t1 = ZXC_SCRATCH;
+          uint8_t t2 = ZXC_SCRATCH2;
+          uint16_t sh2 = (uint16_t)(width - sh);
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64s, t1, 31, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64s, t2, 31, sh2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (op == ZOP_ROR || op == ZOP_ROR64) {
+            if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64s, t1, rs1_m, t1))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_lslv(is64s, t2, rs1_m, t2))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = off;
+              res.out_len = out_len;
+              return res;
+            }
+          } else {
+            if (!emit_u32(out, out_cap, &out_len, enc_lslv(is64s, t1, rs1_m, t1))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64s, t2, rs1_m, t2))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = off;
+              res.out_len = out_len;
+              return res;
+            }
+          }
+          enc = enc_orr_reg(is64s, rd_m, t1, t2);
+        } else {
+          uint8_t t = ZXC_SCRATCH;
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64s, t, 31, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (op == ZOP_SLA || op == ZOP_SLA64) {
+            enc = enc_lslv(is64s, rd_m, rs1_m, t);
+          } else if (op == ZOP_SRL || op == ZOP_SRL64) {
+            enc = enc_lsrv(is64s, rd_m, rs1_m, t);
+          } else {
+            enc = enc_asrv(is64s, rd_m, rs1_m, t);
+          }
+        }
+        break;
+      }
+      case ZOP_LD: {
+        /* Always materialize immediates, so LD behaves like a true load-immediate. */
+        uint64_t imm = (uint64_t)imm12;
+        if (imm12 == -2048 || imm12 == -2047) {
+          size_t need = (imm12 == -2048) ? 4 : 8;
+          if (off + 4 + need > in_len) {
+            res.err = ZXC_ERR_TRUNC;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          uint32_t w1 = (uint32_t)in[off + 4] |
+                        ((uint32_t)in[off + 5] << 8) |
+                        ((uint32_t)in[off + 6] << 16) |
+                        ((uint32_t)in[off + 7] << 24);
+          if (imm12 == -2048) {
+            imm = (uint64_t)(int64_t)(int32_t)w1;
+            off += 8;
+          } else {
+            uint32_t w2 = (uint32_t)in[off + 8] |
+                          ((uint32_t)in[off + 9] << 8) |
+                          ((uint32_t)in[off + 10] << 16) |
+                          ((uint32_t)in[off + 11] << 24);
+            imm = ((uint64_t)w2 << 32) | (uint64_t)w1;
+            off += 12;
+          }
+        } else {
+          off += 4;
+        }
+        if (!emit_mov_imm64(out, out_cap, &out_len, rd_m, imm)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        continue;
+      }
+      case ZOP_CP: {
+        enc = enc_sub_reg(0, ZXC_CMP, rs1_m, rs2_m);
+        break;
+      }
+      case ZOP_INC: {
+        enc = enc_add_imm(0, rd_m, rs1_m, 1);
+        break;
+      }
+      case ZOP_DEC: {
+        enc = enc_sub_imm(0, rd_m, rs1_m, 1);
+        break;
+      }
+      case ZOP_MOV: {
+        enc = enc_mov_reg(rd_m, rs1_m);
+        break;
+      }
+      case ZOP_CPI: {
+        /* Compare rs1 against imm12: ZXC_CMP := rs1 - imm12. */
+        if (imm12 >= 0) {
+          if (!emit_u32(out, out_cap, &out_len,
+                        enc_sub_imm(0, ZXC_CMP, rs1_m, (uint16_t)imm12))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+        } else {
+          uint16_t k = (uint16_t)(-imm12);
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(0, ZXC_CMP, rs1_m, k))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+        }
+        enc = 0;
+        off += 4;
+        continue;
+      }
+      case 0x50: case 0x51: case 0x52: case 0x53: case 0x54: case 0x55:
+      case 0x56: case 0x57: case 0x58: case 0x59:
+      case 0x60: case 0x61: case 0x62: case 0x63: case 0x64: case 0x65:
+      case 0x66: case 0x67: case 0x68: case 0x69: {
+        int is64c = (op >= 0x60);
+        uint8_t cond = 0;
+        switch (op) {
+          case 0x50: case 0x60: cond = 0; break;  /* EQ */
+          case 0x51: case 0x61: cond = 1; break;  /* NE */
+          case 0x52: case 0x62: cond = 11; break; /* LTS */
+          case 0x53: case 0x63: cond = 13; break; /* LES */
+          case 0x54: case 0x64: cond = 12; break; /* GTS */
+          case 0x55: case 0x65: cond = 10; break; /* GES */
+          case 0x56: case 0x66: cond = 3; break;  /* LTU */
+          case 0x57: case 0x67: cond = 9; break;  /* LEU */
+          case 0x58: case 0x68: cond = 8; break;  /* GTU */
+          case 0x59: case 0x69: cond = 2; break;  /* GEU */
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cmp_reg(is64c, rs1_m, rs2_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_cset(is64c, rd_m, cond);
+        break;
+      }
+      case ZOP_JR: {
+        uint8_t cond = 0xFF;
+        switch (rs1) {
+          case 0: cond = 14; break; /* always */
+          case 1: cond = 0; break;  /* EQ */
+          case 2: cond = 1; break;  /* NE */
+          case 3: cond = 11; break; /* LTS */
+          case 4: cond = 13; break; /* LES */
+          case 5: cond = 12; break; /* GTS */
+          case 6: cond = 10; break; /* GES */
+          case 7: cond = 3; break;  /* LTU */
+          case 8: cond = 9; break;  /* LEU */
+          case 9: cond = 8; break;  /* GTU */
+          case 10: cond = 2; break; /* GEU */
+          default:
+            res.err = ZXC_ERR_OPCODE;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+        }
+
+        int64_t target64 = (int64_t)insn_off + (int64_t)imm12 * 4ll;
+        if (target64 < 0 || (target64 & 3) != 0) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (target64 >= (int64_t)in_len) {
+          res.err = ZXC_ERR_TRUNC;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t target_off = (size_t)target64;
+        zxc_err_t err = ZXC_OK;
+        size_t target_out = 0;
+        if (!zxc_arm64_out_offset_ctx(in, in_len, mem_size,
+                                      fuel_on, trap_enabled, trap_off_on,
+                                      target_off, prologue_len,
+                                      &target_out, &err)) {
+          res.err = err;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+
+        if (cond == 14) {
+          int64_t delta = (int64_t)target_out - (int64_t)out_len;
+          if ((delta & 3) != 0) {
+            res.err = ZXC_ERR_OPCODE;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          int64_t imm26 = delta / 4;
+          if (imm26 < -(1 << 25) || imm26 > ((1 << 25) - 1)) {
+            res.err = ZXC_ERR_OPCODE;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = enc_b((int32_t)imm26);
+        } else {
+          if (!emit_u32(out, out_cap, &out_len, enc_cmp_reg(0, ZXC_CMP, 31))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          int64_t delta = (int64_t)target_out - (int64_t)out_len;
+          if ((delta & 3) != 0) {
+            res.err = ZXC_ERR_OPCODE;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          int64_t imm19 = delta / 4;
+          if (imm19 < -(1 << 18) || imm19 > ((1 << 18) - 1)) {
+            res.err = ZXC_ERR_OPCODE;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = enc_b_cond(cond, (int32_t)imm19);
+        }
+        break;
+      }
+      case ZOP_CALL: {
+        int64_t target64 = (int64_t)insn_off + (int64_t)imm12 * 4ll;
+        if (target64 < 0 || (target64 & 3) != 0) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (target64 >= (int64_t)in_len) {
+          res.err = ZXC_ERR_TRUNC;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t target_off = (size_t)target64;
+        zxc_err_t err = ZXC_OK;
+        size_t target_out = 0;
+        if (!zxc_arm64_out_offset_ctx(in, in_len, mem_size,
+                                      fuel_on, trap_enabled, trap_off_on,
+                                      target_off, prologue_len,
+                                      &target_out, &err)) {
+          res.err = err;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        int64_t delta = (int64_t)target_out - (int64_t)out_len;
+        if ((delta & 3) != 0) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        int64_t imm26 = delta / 4;
+        if (imm26 < -(1 << 25) || imm26 > ((1 << 25) - 1)) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_bl((int32_t)imm26);
+        break;
+      }
+      case 0x90: { /* LDIR */
+        if (mem_size < 1) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_SCRATCH3, mem_size - 1)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, 3, 14))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cmp_reg(1, 0, ZXC_SCRATCH3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b_cond(8, 11))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cmp_reg(1, 1, ZXC_SCRATCH3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b_cond(8, 9))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_reg(1, ZXC_SCRATCH4, ZXC_MEM_BASE, 0))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_ldr_b(9, ZXC_SCRATCH4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_reg(1, ZXC_SCRATCH4, ZXC_MEM_BASE, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_str_b(9, ZXC_SCRATCH4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 0, 0, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 1, 1, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 3, 3, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cbnz(1, 3, -12))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_OOB)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case 0x91: { /* FILL */
+        if (mem_size < 1) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_SCRATCH3, mem_size - 1)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cbz(1, 3, 9))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cmp_reg(1, 0, ZXC_SCRATCH3))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b_cond(8, 6))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_reg(1, ZXC_SCRATCH4, ZXC_MEM_BASE, 0))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_str_b(2, ZXC_SCRATCH4))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_imm(1, 0, 0, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_sub_imm(1, 3, 3, 1))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_cbnz(1, 3, -7))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t trap_payload_insns = 1;
+        if (trap_enabled) {
+          trap_payload_insns = 3;
+          if (trap_off_on) trap_payload_insns += (mov_imm64_size((uint64_t)insn_off) / 4u) + 1u;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_b((int32_t)(trap_payload_insns + 1u)))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off,
+                                    trap_off_on, (uint32_t)insn_off,
+                                    (uint16_t)ZXC_TRAP_OOB)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
+        break;
+      }
+      case 0x71: /* LD8U */
+      case 0x73: /* LD16U */
+      case 0x75: /* LD32 */
+      case 0x76: /* LD64 */
+      case 0x77: /* LD8U64 */
+      case 0x79: /* LD16U64 */
+      case 0x7B: /* LD32U64 */
+      case 0x72: /* LD8S */
+      case 0x74: /* LD16S */
+      case 0x78: /* LD8S64 */
+      case 0x7A: /* LD16S64 */
+      case 0x7C: /* LD32S64 */ {
+        uint32_t asz = mem_access_size(op);
+        if (mem_size < asz) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        uint8_t addr = ZXC_SCRATCH;
+        if (!emit_addr_offset(out, out_cap, &out_len, addr, rs1_m, imm12)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t ls_sz = (op == 0x72 || op == 0x74 || op == 0x78 || op == 0x7A || op == 0x7C) ? 8 : 4;
+        size_t payload_sz = 4 + ls_sz;
+        if (!emit_bounds_check(out, out_cap, &out_len, addr, mem_size, asz, payload_sz)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_reg(1, addr, ZXC_MEM_BASE, addr))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+
+        switch (op) {
+          case 0x71: enc = enc_ldr_b(rd_m, addr); break; /* LD8U */
+          case 0x73: enc = enc_ldr_h(rd_m, addr); break; /* LD16U */
+          case 0x75: enc = enc_ldr_w(rd_m, addr); break; /* LD32 */
+          case 0x76: enc = enc_ldr_x(rd_m, addr); break; /* LD64 */
+          case 0x77: enc = enc_ldr_b(rd_m, addr); break; /* LD8U64 */
+          case 0x79: enc = enc_ldr_h(rd_m, addr); break; /* LD16U64 */
+          case 0x7B: enc = enc_ldr_w(rd_m, addr); break; /* LD32U64 */
+          case 0x72: { /* LD8S (-> 32) */
+            if (!emit_u32(out, out_cap, &out_len, enc_ldr_b(rd_m, addr))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            enc = enc_sxtb_w(rd_m, rd_m);
+            break;
+          }
+          case 0x74: { /* LD16S (-> 32) */
+            if (!emit_u32(out, out_cap, &out_len, enc_ldr_h(rd_m, addr))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            enc = enc_sxth_w(rd_m, rd_m);
+            break;
+          }
+          case 0x78: { /* LD8S64 */
+            if (!emit_u32(out, out_cap, &out_len, enc_ldr_b(rd_m, addr))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            enc = enc_sxtb_x(rd_m, rd_m);
+            break;
+          }
+          case 0x7A: { /* LD16S64 */
+            if (!emit_u32(out, out_cap, &out_len, enc_ldr_h(rd_m, addr))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            enc = enc_sxth_x(rd_m, rd_m);
+            break;
+          }
+          case 0x7C: { /* LD32S64 */
+            if (!emit_u32(out, out_cap, &out_len, enc_ldr_w(rd_m, addr))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            enc = enc_sxtw_x(rd_m, rd_m);
+            break;
+          }
+        }
+        if (enc != 0) {
+          if (!emit_u32(out, out_cap, &out_len, enc)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        }
+        if (!emit_bounds_trailer(out, out_cap, &out_len, trap_enabled,
+                                 trap_off_on, (uint32_t)insn_off,
+                                 epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        break;
+      }
+      case 0x80: /* ST8 */
+      case 0x82: /* ST16 */
+      case 0x84: /* ST32 */
+      case 0x86: /* ST64 */
+      case 0x81: /* ST8_64 */
+      case 0x83: /* ST16_64 */
+      case 0x85: /* ST32_64 */ {
+        uint32_t asz = mem_access_size(op);
+        if (mem_size < asz) {
+          res.err = ZXC_ERR_OPCODE;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        uint8_t addr = ZXC_SCRATCH;
+        if (!emit_addr_offset(out, out_cap, &out_len, addr, rs1_m, imm12)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        size_t payload_sz = 4 + 4;
+        if (!emit_bounds_check(out, out_cap, &out_len, addr, mem_size, asz, payload_sz)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        if (!emit_u32(out, out_cap, &out_len, enc_add_reg(1, addr, ZXC_MEM_BASE, addr))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+
+        switch (op) {
+          case 0x80: enc = enc_str_b(rs2_m, addr); break; /* ST8 */
+          case 0x81: enc = enc_str_b(rs2_m, addr); break; /* ST8_64 */
+          case 0x82: enc = enc_str_h(rs2_m, addr); break; /* ST16 */
+          case 0x83: enc = enc_str_h(rs2_m, addr); break; /* ST16_64 */
+          case 0x84: enc = enc_str_w(rs2_m, addr); break; /* ST32 */
+          case 0x85: enc = enc_str_w(rs2_m, addr); break; /* ST32_64 */
+          case 0x86: enc = enc_str_x(rs2_m, addr); break; /* ST64 */
+        }
+        if (enc != 0) {
+          if (!emit_u32(out, out_cap, &out_len, enc)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        }
+        if (!emit_bounds_trailer(out, out_cap, &out_len, trap_enabled,
+                                 trap_off_on, (uint32_t)insn_off,
+                                 epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        break;
+      }
+      case ZOP_RET: {
+        int32_t imm26 = (int32_t)((epilogue_off - out_len) / 4);
+        enc = enc_b(imm26);
+        break;
+      }
+      case ZOP_PRIM_IN: {
+        if (!emit_prim_in(out, out_cap, &out_len,
+                          trap_enabled,
+                          trap_off_on, (uint32_t)insn_off,
+                          epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      case ZOP_PRIM_OUT: {
+        if (!emit_prim_out(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_on, (uint32_t)insn_off,
+                           epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      case ZOP_PRIM_LOG: {
+        if (!emit_prim_log(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_on, (uint32_t)insn_off,
+                           epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      case ZOP_PRIM_ALLOC: {
+        if (!emit_prim_alloc(out, out_cap, &out_len,
+                             trap_enabled,
+                             trap_off_on, (uint32_t)insn_off,
+                             epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      case ZOP_PRIM_FREE: {
+        if (!emit_prim_free(out, out_cap, &out_len,
+                            trap_enabled,
+                            trap_off_on, (uint32_t)insn_off,
+                            epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      case ZOP_PRIM_CTL: {
+        if (!emit_prim_ctl(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_on, (uint32_t)insn_off,
+                           epilogue_off)) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = 0;
+        break;
+      }
+      default:
+        res.err = ZXC_ERR_UNIMPL;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+    }
+
+    if (enc != 0) {
+      if (!emit_u32(out, out_cap, &out_len, enc)) {
+        res.err = ZXC_ERR_OUTBUF;
+        res.in_off = insn_off;
+        res.out_len = out_len;
+        return res;
+      }
+    }
+
+    if (op != ZOP_LD || (imm12 != -2048 && imm12 != -2047)) {
+      off += 4;
+    }
+  }
+
+  res.err = ZXC_OK;
+  res.out_len = out_len;
+  return res;
 }
 
 zxc_result_t zxc_arm64_measure(const uint8_t* in, size_t in_len,
