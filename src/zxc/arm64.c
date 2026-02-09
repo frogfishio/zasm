@@ -83,6 +83,7 @@ enum {
   ZXC_TRAP_OOB = 2,
   ZXC_TRAP_DIV0 = 3,
   ZXC_TRAP_ABI = 6,
+  ZXC_TRAP_OOM = 7,
 };
 
 static uint8_t map_reg(unsigned reg) {

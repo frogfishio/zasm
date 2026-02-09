@@ -169,6 +169,11 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   zasm_rt_engine_t *engine = NULL;
   zasm_rt_err_t e = zasm_rt_engine_create(&engine);
   if (e != ZASM_RT_OK) {
+    if (e == ZASM_RT_ERR_OOM) {
+      fprintf(stderr, "zrt: trap: out of memory\n");
+      free(file);
+      return 1;
+    }
     fprintf(stderr, "zrt: error: engine_create: %s\n", zasm_rt_err_str(e));
     free(file);
     return 1;
@@ -179,6 +184,12 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   e = zasm_rt_module_load_v2(engine, file, file_len, &policy, &module, &diag);
   free(file);
   if (e != ZASM_RT_OK) {
+    if (e == ZASM_RT_ERR_OOM) {
+      fprintf(stderr, "zrt: trap: out of memory\n");
+      print_diag(&diag);
+      zasm_rt_engine_destroy(engine);
+      return 1;
+    }
     if (e == ZASM_RT_ERR_VERIFY_FAIL && diag.trap != ZASM_RT_TRAP_NONE) {
       switch (diag.trap) {
         case ZASM_RT_TRAP_UNSUPPORTED_OP:
@@ -208,6 +219,13 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
   zasm_rt_instance_t *inst = NULL;
   e = zasm_rt_instance_create(engine, module, &policy, host, &inst, &diag);
   if (e != ZASM_RT_OK) {
+    if (e == ZASM_RT_ERR_OOM) {
+      fprintf(stderr, "zrt: trap: out of memory\n");
+      print_diag(&diag);
+      zasm_rt_module_destroy(module);
+      zasm_rt_engine_destroy(engine);
+      return 1;
+    }
     if (e == ZASM_RT_ERR_TRANSLATE_FAIL && diag.trap != ZASM_RT_TRAP_NONE) {
       switch (diag.trap) {
         case ZASM_RT_TRAP_UNSUPPORTED_OP:

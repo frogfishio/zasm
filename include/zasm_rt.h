@@ -35,6 +35,8 @@ typedef enum zasm_rt_trap {
   ZASM_RT_TRAP_DECODE = 5,
   /* ABI misuse / host-call failure. */
   ZASM_RT_TRAP_ABI = 6,
+  /* Out-of-memory condition (host/runtime OOM). */
+  ZASM_RT_TRAP_OOM = 7,
 } zasm_rt_trap_t;
 
 /* Translation/execution target selection.

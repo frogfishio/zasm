@@ -1049,6 +1049,15 @@ test-zrt-duel: build
 
 .PHONY: test-zrt-duel
 
+test-zrt-smoke: build
+	bash test/jit_oom_trap_smoke.sh
+	bash test/jit_traps_smoke.sh
+	bash test/jit_translate_fail_smoke.sh
+	bash test/jit_verify_traps_smoke.sh
+	bash test/jit_duel_smoke.sh
+
+.PHONY: test-zrt-smoke
+
 # ---- zcc (IR -> C) ----
 
 zcc:

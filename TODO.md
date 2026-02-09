@@ -46,7 +46,7 @@
       - [x] Division/mod by zero (structured trap)
       - [x] Unsupported opcode (structured trap)
       - [x] ABI misuse / host-call failure (structured trap)
-      - [ ] OOM (structured trap)
+      - [x] OOM (structured trap)
     - [x] Extend runtime diagnostics to include trap category + best-effort PC/offset
       - [x] Translation failure diagnostics include err/off/opcode/insn
       - [x] Exec trap diagnostics include best-effort trap offset (arm64)
@@ -64,6 +64,7 @@
       - [x] Translate-fail smoke coverage (diag: translate: ...)
       - [x] Unsupported-op smoke coverage
       - [x] ABI misuse smoke coverage
+      - [x] OOM trap smoke coverage
   - [x] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr
     - [x] Add a tiny `zrt` CLI runner (executes `.zasm.bin` via `zasm_rt`) for test harness usage
     - [ ] Compare against a reference runner (choose one):

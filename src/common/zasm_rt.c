@@ -188,9 +188,36 @@ static zasm_rt_err_t diag_fail(zasm_rt_diag_t* diag, zasm_rt_err_t err) {
   return err;
 }
 
+static int zasm_rt_test_fail_alloc_enabled(void) {
+  static int cached = -1;
+  if (cached != -1) return cached;
+  cached = (getenv("ZASM_RT_TEST_FAIL_ALLOC") != NULL) ? 1 : 0;
+  return cached;
+}
+
+static void* zasm_rt_malloc(size_t n) {
+  if (n == 0) return NULL;
+  if (zasm_rt_test_fail_alloc_enabled()) return NULL;
+  return malloc(n);
+}
+
+static void* zasm_rt_calloc(size_t n, size_t sz) {
+  if (n == 0 || sz == 0) return NULL;
+  if (zasm_rt_test_fail_alloc_enabled()) return NULL;
+  return calloc(n, sz);
+}
+
+static zasm_rt_err_t diag_fail_oom(zasm_rt_diag_t* diag) {
+  if (diag) diag->trap = ZASM_RT_TRAP_OOM;
+  return diag_fail(diag, ZASM_RT_ERR_OOM);
+}
+
 static void diag_set_verify_trap(zasm_rt_diag_t* diag, zasm_verify_err_t verr) {
   if (!diag) return;
   switch (verr) {
+    case ZASM_VERIFY_ERR_OOM:
+      diag->trap = ZASM_RT_TRAP_OOM;
+      break;
     case ZASM_VERIFY_ERR_BAD_OPCODE:
       diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
       break;
@@ -240,7 +267,7 @@ zasm_rt_err_t zasm_rt_policy_validate(const zasm_rt_policy_t* policy_in, zasm_rt
 
 zasm_rt_err_t zasm_rt_engine_create(zasm_rt_engine_t** out_engine) {
   if (!out_engine) return ZASM_RT_ERR_NULL;
-  zasm_rt_engine_t* e = (zasm_rt_engine_t*)calloc(1, sizeof(zasm_rt_engine_t));
+  zasm_rt_engine_t* e = (zasm_rt_engine_t*)zasm_rt_calloc(1, sizeof(zasm_rt_engine_t));
   if (!e) return ZASM_RT_ERR_OOM;
   (void)zingcore25_init();
   *out_engine = e;
@@ -308,22 +335,22 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
     }
   }
 
-  zasm_rt_module_t* m = (zasm_rt_module_t*)calloc(1, sizeof(zasm_rt_module_t));
-  if (!m) return diag_fail(diag, ZASM_RT_ERR_OOM);
+  zasm_rt_module_t* m = (zasm_rt_module_t*)zasm_rt_calloc(1, sizeof(zasm_rt_module_t));
+  if (!m) return diag_fail_oom(diag);
 
-  m->code = (uint8_t*)malloc(parsed.code_len);
+  m->code = (uint8_t*)zasm_rt_malloc(parsed.code_len);
   if (!m->code) {
     free(m);
-    return diag_fail(diag, ZASM_RT_ERR_OOM);
+    return diag_fail_oom(diag);
   }
   memcpy(m->code, parsed.code, parsed.code_len);
   m->code_len = parsed.code_len;
 
   if (parsed.has_data && parsed.data && parsed.data_len) {
-    m->data = (uint8_t*)malloc(parsed.data_len);
+    m->data = (uint8_t*)zasm_rt_malloc(parsed.data_len);
     if (!m->data) {
       zasm_rt_module_destroy(m);
-      return diag_fail(diag, ZASM_RT_ERR_OOM);
+      return diag_fail_oom(diag);
     }
     memcpy(m->data, parsed.data, parsed.data_len);
     m->data_len = parsed.data_len;
@@ -366,10 +393,10 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     return pe;
   }
 
-  zasm_rt_instance_t* inst = (zasm_rt_instance_t*)calloc(1, sizeof(zasm_rt_instance_t));
+  zasm_rt_instance_t* inst = (zasm_rt_instance_t*)zasm_rt_calloc(1, sizeof(zasm_rt_instance_t));
   if (!inst) {
     *out_instance = NULL;
-    return diag_fail(diag, ZASM_RT_ERR_OOM);
+    return diag_fail_oom(diag);
   }
   inst->module = module;
   inst->host = host;
@@ -386,11 +413,11 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
         return diag_fail(diag, ZASM_RT_ERR_UNSUPPORTED);
       }
     inst->owned_mem_cap = (size_t)inst->policy.mem_size;
-    inst->owned_mem = (uint8_t*)calloc(1, inst->owned_mem_cap);
+    inst->owned_mem = (uint8_t*)zasm_rt_calloc(1, inst->owned_mem_cap);
     if (!inst->owned_mem) {
       zasm_rt_instance_destroy(inst);
       *out_instance = NULL;
-      return diag_fail(diag, ZASM_RT_ERR_OOM);
+      return diag_fail_oom(diag);
     }
     inst->policy.mem_base = (uint64_t)(uintptr_t)inst->owned_mem;
   }
@@ -420,14 +447,14 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
     uint32_t* seg_dst = NULL;
     uint32_t* seg_len = NULL;
     if (seg_count) {
-      seg_dst = (uint32_t*)calloc(seg_count, sizeof(uint32_t));
-      seg_len = (uint32_t*)calloc(seg_count, sizeof(uint32_t));
+      seg_dst = (uint32_t*)zasm_rt_calloc(seg_count, sizeof(uint32_t));
+      seg_len = (uint32_t*)zasm_rt_calloc(seg_count, sizeof(uint32_t));
       if (!seg_dst || !seg_len) {
         free(seg_dst);
         free(seg_len);
         zasm_rt_instance_destroy(inst);
         *out_instance = NULL;
-        return diag_fail(diag, ZASM_RT_ERR_OOM);
+        return diag_fail_oom(diag);
       }
     }
 
@@ -542,11 +569,11 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   }
 #else
   inst->jit_cap = out_cap;
-  inst->jit_mem = (uint8_t*)malloc(inst->jit_cap);
+  inst->jit_mem = (uint8_t*)zasm_rt_malloc(inst->jit_cap);
   if (!inst->jit_mem) {
     zasm_rt_instance_destroy(inst);
     *out_instance = NULL;
-    return diag_fail(diag, ZASM_RT_ERR_OOM);
+    return diag_fail_oom(diag);
   }
 #endif
 
