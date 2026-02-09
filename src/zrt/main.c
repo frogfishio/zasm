@@ -39,6 +39,18 @@ static void print_version(void) {
   fprintf(stdout, "zrt %s\n", ZASM_VERSION);
 }
 
+static const char* zxc_err_str_local(uint32_t err) {
+  switch (err) {
+    case 0: return "ok";
+    case 1: return "trunc";
+    case 2: return "align";
+    case 3: return "outbuf";
+    case 4: return "opcode";
+    case 5: return "unimpl";
+    default: return "unknown";
+  }
+}
+
 static int read_whole_file(const char *path, uint8_t **out_buf, size_t *out_len) {
   if (!path || !out_buf || !out_len) return 0;
   *out_buf = NULL;
@@ -105,6 +117,13 @@ static void print_diag(const zasm_rt_diag_t *d) {
   if (d->err == ZASM_RT_ERR_VERIFY_FAIL) {
     fprintf(stderr, "diag: verify: err=%d off=%zu opcode=0x%02x\n",
             (int)d->verify_err, d->verify_off, (unsigned)d->verify_opcode);
+  }
+
+  if (d->err == ZASM_RT_ERR_TRANSLATE_FAIL) {
+    fprintf(stderr, "diag: translate: err=%u(%s) off=%zu opcode=0x%02x insn=0x%08x\n",
+            (unsigned)d->translate_err, zxc_err_str_local(d->translate_err),
+            d->translate_off, (unsigned)d->translate_opcode,
+            (unsigned)d->translate_insn);
   }
 }
 
@@ -173,12 +192,33 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
 
   e = zasm_rt_instance_run(inst, &diag);
   if (e != ZASM_RT_OK) {
-    if (e == ZASM_RT_ERR_EXEC_FAIL && diag.trap == ZASM_RT_TRAP_FUEL) {
-      fprintf(stderr, "zrt: trap: fuel exhausted\n");
-      zasm_rt_instance_destroy(inst);
-      zasm_rt_module_destroy(module);
-      zasm_rt_engine_destroy(engine);
-      return 1;
+    if (e == ZASM_RT_ERR_EXEC_FAIL) {
+      switch (diag.trap) {
+        case ZASM_RT_TRAP_FUEL:
+          fprintf(stderr, "zrt: trap: fuel exhausted\n");
+          zasm_rt_instance_destroy(inst);
+          zasm_rt_module_destroy(module);
+          zasm_rt_engine_destroy(engine);
+          return 1;
+        case ZASM_RT_TRAP_OOB:
+          fprintf(stderr, "zrt: trap: out of bounds memory access\n");
+          zasm_rt_instance_destroy(inst);
+          zasm_rt_module_destroy(module);
+          zasm_rt_engine_destroy(engine);
+          return 1;
+        case ZASM_RT_TRAP_DIV0:
+          fprintf(stderr, "zrt: trap: division by zero\n");
+          zasm_rt_instance_destroy(inst);
+          zasm_rt_module_destroy(module);
+          zasm_rt_engine_destroy(engine);
+          return 1;
+        default:
+          fprintf(stderr, "zrt: trap\n");
+          zasm_rt_instance_destroy(inst);
+          zasm_rt_module_destroy(module);
+          zasm_rt_engine_destroy(engine);
+          return 1;
+      }
     }
     fprintf(stderr, "zrt: error: instance_run: %s\n", zasm_rt_err_str(e));
     print_diag(&diag);

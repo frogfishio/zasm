@@ -75,6 +75,15 @@ enum { ZXC_ENTRY_LR = 19 }; /* callee-saved to hold caller LR */
 enum { ZXC_LR_SAVE = 8 };   /* caller-saved scratch for host-call LR save */
 enum { ZXC_FUEL_PTR = 21, ZXC_TRAP_PTR = 22 };
 
+/* Trap codes written through ZXC_TRAP_PTR.
+ * Keep in sync with include/zasm_rt.h (zasm_rt_trap_t).
+ */
+enum {
+  ZXC_TRAP_FUEL = 1,
+  ZXC_TRAP_OOB = 2,
+  ZXC_TRAP_DIV0 = 3,
+};
+
 static uint8_t map_reg(unsigned reg) {
   switch (reg) {
     case 0: return 0;  /* HL -> x0 */
@@ -347,15 +356,34 @@ static int emit_bounds_check(uint8_t* out, size_t out_cap, size_t* out_len,
   uint64_t limit = mem_size - (uint64_t)access_size;
   if (!emit_mov_imm64(out, out_cap, out_len, ZXC_SCRATCH2, limit)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_cmp_reg(1, addr_reg, ZXC_SCRATCH2))) return 0;
-  int32_t imm19 = (int32_t)((payload_len + 4) / 4);
+  /* The bounds trailer starts with a skip-branch, followed by the trap sequence.
+   * On out-of-bounds, we must land on the *trap* (second instruction of the trailer),
+   * so the correct delta is: payload_len + 8 bytes.
+   */
+  int32_t imm19 = (int32_t)((payload_len + 8) / 4);
   if (!emit_u32(out, out_cap, out_len, enc_b_cond(8, imm19))) return 0; /* BHI */
   return 1;
 }
 
-static int emit_bounds_trailer(uint8_t* out, size_t out_cap, size_t* out_len) {
-  /* Skip over the following BRK (one instruction). */
-  if (!emit_u32(out, out_cap, out_len, enc_b(2))) return 0;
-  return emit_u32(out, out_cap, out_len, enc_brk());
+static int emit_trap_and_return(uint8_t* out, size_t out_cap, size_t* out_len,
+                                size_t epilogue_off, uint16_t trap_code) {
+  if (!emit_u32(out, out_cap, out_len, enc_movz(ZXC_SCRATCH, trap_code, 0))) return 0;
+  if (!emit_u32(out, out_cap, out_len, enc_str_w(ZXC_SCRATCH, ZXC_TRAP_PTR))) return 0;
+  int32_t imm26 = (int32_t)((epilogue_off - *out_len) / 4);
+  return emit_u32(out, out_cap, out_len, enc_b(imm26));
+}
+
+static int emit_bounds_trailer(uint8_t* out, size_t out_cap, size_t* out_len,
+                               int trap_enabled, size_t epilogue_off) {
+  if (!trap_enabled) {
+    /* Skip over the following BRK (one instruction). */
+    if (!emit_u32(out, out_cap, out_len, enc_b(2))) return 0;
+    return emit_u32(out, out_cap, out_len, enc_brk());
+  }
+
+  /* Skip over the following trap sequence (three instructions). */
+  if (!emit_u32(out, out_cap, out_len, enc_b(4))) return 0;
+  return emit_trap_and_return(out, out_cap, out_len, epilogue_off, (uint16_t)ZXC_TRAP_OOB);
 }
 
 static uint32_t mem_access_size(uint8_t op) {
@@ -513,6 +541,8 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
   int32_t imm12 = (int32_t)(w & 0xFFFu);
   if (imm12 & 0x800) imm12 |= ~0xFFF;
 
+  const int trap_enabled = (trap_ptr != 0);
+
   size_t sz = 4;
   size_t n_off = off + 4;
 
@@ -546,13 +576,13 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
     case ZOP_DIVU:
     case ZOP_DIVS64:
     case ZOP_DIVU64:
-      sz = 16;
+      sz = trap_enabled ? 24 : 16;
       break;
     case ZOP_REMS:
     case ZOP_REMU:
     case ZOP_REMS64:
     case ZOP_REMU64:
-      sz = 20;
+      sz = trap_enabled ? 28 : 20;
       break;
     case ZOP_SLA:
     case ZOP_SRA:
@@ -605,7 +635,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
         if (op == 0x72 || op == 0x74 || op == 0x78 || op == 0x7A || op == 0x7C) {
           ls_sz = 8;
         }
-        sz = addr_sz + limit_sz + base_sz + 4 + ls_sz + 16;
+        sz = addr_sz + limit_sz + base_sz + 4 + ls_sz + (trap_enabled ? 24 : 16);
       }
       break;
     case 0x80: case 0x82: case 0x84: case 0x86:
@@ -617,7 +647,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
         uint64_t limit = mem_size > asz ? (mem_size - asz) : 0;
         size_t limit_sz = mov_imm64_size(limit);
         size_t ls_sz = 4;
-        sz = addr_sz + limit_sz + base_sz + 4 + ls_sz + 16;
+        sz = addr_sz + limit_sz + base_sz + 4 + ls_sz + (trap_enabled ? 24 : 16);
       }
       break;
     case ZOP_CP:
@@ -644,7 +674,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
         size_t base_sz = mov_imm64_size(mem_base);
         uint64_t limit = mem_size > 0 ? (mem_size - 1) : 0;
         size_t limit_sz = mov_imm64_size(limit);
-        sz = base_sz + limit_sz + 15 * 4;
+        sz = base_sz + limit_sz + 15 * 4 + (trap_enabled ? 8 : 0);
       }
       break;
     case 0x91: /* FILL */
@@ -652,7 +682,7 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
         size_t base_sz = mov_imm64_size(mem_base);
         uint64_t limit = mem_size > 0 ? (mem_size - 1) : 0;
         size_t limit_sz = mov_imm64_size(limit);
-        sz = base_sz + limit_sz + 10 * 4;
+        sz = base_sz + limit_sz + 10 * 4 + (trap_enabled ? 8 : 0);
       }
       break;
     case ZOP_PRIM_IN: sz = (8 + 4) * 4; break;   /* +4 for stack save/restore of LR */
@@ -705,6 +735,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
   zxc_result_t res;
   memset(&res, 0, sizeof(res));
 
+  const int trap_enabled = (trap_ptr != 0);
   const int fuel_enabled = (fuel_ptr != 0 && trap_ptr != 0);
 
   if ((in_len % 4) != 0) {
@@ -772,12 +803,14 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
     return res;
   }
 
-  if (fuel_enabled) {
-    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_FUEL_PTR, fuel_ptr)) {
+  if (trap_enabled) {
+    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_TRAP_PTR, trap_ptr)) {
       res.err = ZXC_ERR_OUTBUF;
       return res;
     }
-    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_TRAP_PTR, trap_ptr)) {
+  }
+  if (fuel_enabled) {
+    if (!emit_mov_imm64(out, out_cap, &out_len, ZXC_FUEL_PTR, fuel_ptr)) {
       res.err = ZXC_ERR_OUTBUF;
       return res;
     }
@@ -881,7 +914,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         res.out_len = out_len;
         return res;
       }
-      if (!emit_u32(out, out_cap, &out_len, enc_movz(ZXC_SCRATCH, 1, 0))) {
+      if (!emit_u32(out, out_cap, &out_len, enc_movz(ZXC_SCRATCH, ZXC_TRAP_FUEL, 0))) {
         res.err = ZXC_ERR_OUTBUF;
         res.in_off = insn_off;
         res.out_len = out_len;
@@ -1146,13 +1179,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_DIVU: {
@@ -1168,13 +1211,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_REMS: {
@@ -1197,13 +1250,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_REMU: {
@@ -1226,13 +1289,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_AND:   is64 = 0; enc = enc_and_reg(is64, rd_m, rs1_m, rs2_m); break;
@@ -1254,13 +1327,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_DIVU64: {
@@ -1276,13 +1359,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_REMS64: {
@@ -1305,13 +1398,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_REMU64: {
@@ -1334,13 +1437,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_DIV0)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case ZOP_AND64: is64 = 1; enc = enc_and_reg(is64, rd_m, rs1_m, rs2_m); break;
@@ -1757,13 +1870,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_OOB)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case 0x91: { /* FILL */
@@ -1833,13 +1956,23 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           res.out_len = out_len;
           return res;
         }
-        if (!emit_u32(out, out_cap, &out_len, enc_b(2))) {
+        if (!emit_u32(out, out_cap, &out_len, enc_b(trap_enabled ? 4 : 2))) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
           return res;
         }
-        enc = enc_brk();
+        if (trap_enabled) {
+          if (!emit_trap_and_return(out, out_cap, &out_len, epilogue_off, (uint16_t)ZXC_TRAP_OOB)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          enc = 0;
+        } else {
+          enc = enc_brk();
+        }
         break;
       }
       case 0x71: /* LD8U */
@@ -1958,7 +2091,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           }
           enc = 0;
         }
-        if (!emit_bounds_trailer(out, out_cap, &out_len)) {
+        if (!emit_bounds_trailer(out, out_cap, &out_len, trap_enabled, epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2026,7 +2159,7 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
           }
           enc = 0;
         }
-        if (!emit_bounds_trailer(out, out_cap, &out_len)) {
+        if (!emit_bounds_trailer(out, out_cap, &out_len, trap_enabled, epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;

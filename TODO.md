@@ -41,6 +41,12 @@
     - [ ] Add CI target to run benchmarks and record baselines (tolerant thresholds)
   - [ ] Diagnostics + trap model (structured, stable)
     - [ ] Define stable trap/error codes (decode/verify, OOB, div0, unsupported-op, ABI failure, OOM/fuel)
+      - [x] Fuel exhaustion (structured trap)
+      - [x] Out-of-bounds memory access (structured trap)
+      - [x] Division/mod by zero (structured trap)
+      - [ ] Unsupported opcode (structured trap)
+      - [ ] ABI misuse / host-call failure (structured trap)
+      - [ ] OOM (structured trap)
     - [ ] Extend runtime diagnostics to include trap category + best-effort PC/offset
     - [ ] Ensure all failures are fail-closed (no host crashes, no UB)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
@@ -50,6 +56,11 @@
   - [ ] Define and implement trap/abort behavior (decode error, OOB, div0, unsupported op)
     - [ ] Plumb trap reporting from translated code back to runtime API (no printf-only failures)
     - [ ] Add negative tests for each trap category (including edge-case pointer/len ABI misuse)
+      - [x] Fuel trap smoke coverage
+      - [x] OOB trap smoke coverage (JIT-only)
+      - [x] DIV0 trap smoke coverage (JIT-only)
+      - [ ] Unsupported-op smoke coverage
+      - [ ] ABI misuse smoke coverage
   - [x] Add differential test harness: run the same module under a reference runner and under the JIT; compare rc/stdout/stderr
     - [x] Add a tiny `zrt` CLI runner (executes `.zasm.bin` via `zasm_rt`) for test harness usage
     - [ ] Compare against a reference runner (choose one):

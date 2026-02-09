@@ -28,6 +28,8 @@ typedef enum zasm_rt_err {
 typedef enum zasm_rt_trap {
   ZASM_RT_TRAP_NONE = 0,
   ZASM_RT_TRAP_FUEL = 1,
+  ZASM_RT_TRAP_OOB = 2,
+  ZASM_RT_TRAP_DIV0 = 3,
 } zasm_rt_trap_t;
 
 /* Translation/execution target selection.
@@ -95,6 +97,14 @@ typedef struct zasm_rt_diag {
   zasm_verify_err_t verify_err;
   size_t verify_off;
   uint8_t verify_opcode;
+
+  /* Optional translate detail (when err==TRANSLATE_FAIL).
+   * translate_err uses zxc_err_t numeric values.
+   */
+  uint32_t translate_err;
+  size_t translate_off;
+  uint8_t translate_opcode;
+  uint32_t translate_insn;
 } zasm_rt_diag_t;
 
 typedef struct zasm_rt_engine zasm_rt_engine_t;

@@ -176,6 +176,11 @@ static void diag_reset(zasm_rt_diag_t* diag) {
   diag->bin_tag[0] = '\0';
 }
 
+static uint32_t u32_le(const uint8_t* p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
 static zasm_rt_err_t diag_fail(zasm_rt_diag_t* diag, zasm_rt_err_t err) {
   if (diag) diag->err = err;
   return err;
@@ -524,10 +529,9 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 #if defined(__aarch64__) || defined(__arm64__)
   {
     uint64_t fuel_ptr = 0;
-    uint64_t trap_ptr = 0;
+    uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
     if (inst->policy.fuel != 0) {
       fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
-      trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
     }
     tr = zxc_arm64_translate(code, code_len,
                              inst->jit_mem, inst->jit_cap,
@@ -537,10 +541,9 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
 #elif defined(__x86_64__) || defined(_M_X64)
   {
     uint64_t fuel_ptr = 0;
-    uint64_t trap_ptr = 0;
+    uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
     if (inst->policy.fuel != 0) {
       fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
-      trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
     }
     tr = zxc_x86_64_translate(code, code_len,
                               inst->jit_mem, inst->jit_cap,
@@ -554,6 +557,17 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   return diag_fail(diag, ZASM_RT_ERR_UNSUPPORTED);
 #endif
   if (tr.err != ZXC_OK) {
+    if (diag) {
+      diag->translate_err = (uint32_t)tr.err;
+      diag->translate_off = tr.in_off;
+      diag->translate_opcode = 0;
+      diag->translate_insn = 0;
+      if (tr.in_off + 4u <= code_len) {
+        uint32_t w = u32_le(code + tr.in_off);
+        diag->translate_insn = w;
+        diag->translate_opcode = (uint8_t)(w >> 24);
+      }
+    }
     zasm_rt_instance_destroy(inst);
     *out_instance = NULL;
     return diag_fail(diag, ZASM_RT_ERR_TRANSLATE_FAIL);
