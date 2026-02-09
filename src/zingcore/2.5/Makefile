@@ -33,6 +33,7 @@ SRC := \
 	$(SRCDIR)/zi_net_tcp25.c \
 	$(SRCDIR)/zi_net_http25.c \
 	$(SRCDIR)/zi_sys_info25.c \
+	$(SRCDIR)/zi_sys_loop25.c \
 	$(SRCDIR)/vendor/hopper/hopper.c \
 	$(SRCDIR)/vendor/hopper/pic.c \
 	$(SRCDIR)/zi_caps.c \
@@ -59,6 +60,7 @@ OBJ := \
 	$(BUILD)/zi_net_tcp25.o \
 	$(BUILD)/zi_net_http25.o \
 	$(BUILD)/zi_sys_info25.o \
+	$(BUILD)/zi_sys_loop25.o \
 	$(BUILD)/vendor/hopper/hopper.o \
 	$(BUILD)/vendor/hopper/pic.o \
 	$(BUILD)/zi_caps.o \
@@ -67,7 +69,7 @@ OBJ := \
 	$(BUILD)/zi_hopabi25.o \
 	$(BUILD)/zi_telemetry.o
 
-TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_tcp_cap test_sysabi25_http_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_sysabi25_async_default_cap test_sysabi25_event_bus_cap test_sysabi25_sys_info_cap test_bus_rpc_v1 test_hopabi25_basic
+TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_cap test_sysabi25_tcp_cap test_sysabi25_http_cap test_sysabi25_http_loop_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_sysabi25_event_bus_cap test_sysabi25_sys_info_cap test_sysabi25_sys_loop_cap test_bus_rpc_v1 test_hopabi25_basic
 
 EXAMPLES := stdio_caps_demo all_caps_demo hopabi_guest_demo
 
@@ -116,7 +118,6 @@ itest: examples
 	out="$$(ZI_FS_ROOT="$$root" "$$bin" arg1 arg2 2>&1)"; \
 	echo "$$out" | grep -q "^ok$$"; \
 	echo "$$out" | grep -q -- "- file/fs"; \
-	echo "$$out" | grep -q -- "- async/default"; \
 	echo "$$out" | grep -q -- "- event/bus"; \
 	echo "$$out" | grep -q -- "- net/tcp"; \
 	echo "$$out" | grep -q -- "- proc/argv"; \

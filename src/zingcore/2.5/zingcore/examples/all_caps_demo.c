@@ -1,7 +1,6 @@
 #include "zingcore25.h"
 
 #include "zi_caps.h"
-#include "zi_async_default25.h"
 #include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
 #include "zi_handles25.h"
@@ -579,11 +578,6 @@ static int dump_env_via_cap(const char *const *envp) {
   return 1;
 }
 
-static void zcl1_write_u64(uint8_t *p, uint64_t v) {
-  zcl1_write_u32(p + 0, (uint32_t)(v & 0xFFFFFFFFu));
-  zcl1_write_u32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFu));
-}
-
 static uint64_t zcl1_read_u64(const uint8_t *p) {
   uint64_t lo = (uint64_t)zcl1_read_u32(p + 0);
   uint64_t hi = (uint64_t)zcl1_read_u32(p + 4);
@@ -1118,109 +1112,6 @@ static int event_bus_smoke(void) {
   return 1;
 }
 
-static int async_smoke(void) {
-  // Open async/default (no params).
-  uint8_t req[40];
-  build_open_req(req, ZI_CAP_KIND_ASYNC, ZI_CAP_NAME_DEFAULT, NULL, 0);
-
-  zi_handle_t h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
-  if (h < 3) {
-    fprintf(stderr, "async/default open failed: %d\n", h);
-    return 0;
-  }
-
-  // INVOKE ping.v1 (future_id=1, no params)
-  uint8_t payload[128];
-  uint32_t off = 0;
-  const char *kind = ZI_CAP_KIND_ASYNC;
-  const char *name = ZI_CAP_NAME_DEFAULT;
-  const char *sel = "ping.v1";
-  uint32_t klen = (uint32_t)strlen(kind);
-  uint32_t nlen = (uint32_t)strlen(name);
-  uint32_t slen = (uint32_t)strlen(sel);
-
-  zcl1_write_u32(payload + off, klen);
-  off += 4;
-  memcpy(payload + off, kind, klen);
-  off += klen;
-  zcl1_write_u32(payload + off, nlen);
-  off += 4;
-  memcpy(payload + off, name, nlen);
-  off += nlen;
-  zcl1_write_u32(payload + off, slen);
-  off += 4;
-  memcpy(payload + off, sel, slen);
-  off += slen;
-  zcl1_write_u64(payload + off, 1u);
-  off += 8;
-  zcl1_write_u32(payload + off, 0u);
-  off += 4;
-
-  uint8_t fr[24 + sizeof(payload)];
-  build_zcl1_req(fr, (uint16_t)ZI_ASYNC_OP_INVOKE, 10, payload, off);
-  if (zi_write(h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)(24u + off)) != (int32_t)(24u + off)) {
-    fprintf(stderr, "async/default invoke write failed\n");
-    (void)zi_end(h);
-    return 0;
-  }
-
-  uint8_t buf[4096];
-  uint32_t got = 0;
-  for (;;) {
-    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(sizeof(buf) - got));
-    if (n == ZI_E_AGAIN) continue;
-    if (n < 0) {
-      fprintf(stderr, "async/default invoke read failed: %d\n", n);
-      (void)zi_end(h);
-      return 0;
-    }
-    if (n == 0) break;
-    got += (uint32_t)n;
-    if (got == sizeof(buf)) break;
-    // Likely got everything; the handle returns E_AGAIN once drained.
-    break;
-  }
-
-  int saw_future_ok = 0;
-  uint32_t pos = 0;
-  while (pos + 24 <= got) {
-    uint32_t plen = zcl1_read_u32(buf + pos + 20);
-    uint32_t flen = 24u + plen;
-    if (pos + flen > got) break;
-    uint16_t op = (uint16_t)buf[pos + 6] | (uint16_t)((uint16_t)buf[pos + 7] << 8);
-    uint32_t status = zcl1_read_u32(buf + pos + 12);
-    if (status != 1) {
-      fprintf(stderr, "async/default frame error status\n");
-      (void)zi_end(h);
-      return 0;
-    }
-    if (op == (uint16_t)ZI_ASYNC_EV_FUTURE_OK) {
-      if (plen < 12) {
-        fprintf(stderr, "async/default future_ok payload too small\n");
-        (void)zi_end(h);
-        return 0;
-      }
-      uint64_t fid = (uint64_t)zcl1_read_u32(buf + pos + 24 + 0) | ((uint64_t)zcl1_read_u32(buf + pos + 24 + 4) << 32);
-      uint32_t vlen = zcl1_read_u32(buf + pos + 24 + 8);
-      if (fid != 1u || 12u + vlen != plen) {
-        fprintf(stderr, "async/default future_ok payload mismatch\n");
-        (void)zi_end(h);
-        return 0;
-      }
-      if (vlen != 4 || memcmp(buf + pos + 24 + 12, "pong", 4) != 0) {
-        fprintf(stderr, "async/default future_ok value mismatch\n");
-        (void)zi_end(h);
-        return 0;
-      }
-      saw_future_ok = 1;
-    }
-    pos += flen;
-  }
-
-  (void)zi_end(h);
-  return saw_future_ok;
-}
-
 static int fs_smoke(void) {
   const char *root = getenv("ZI_FS_ROOT");
   const char *guest_path = "/all_caps_demo.txt";
@@ -1326,7 +1217,6 @@ int main(int argc, char **argv) {
   (void)zi_cap_register(&cap_stdio_v1);
   (void)zi_cap_register(&cap_demo_echo_v1);
   (void)zi_cap_register(&cap_demo_version_v1);
-  (void)zi_async_default25_register();
   (void)zi_event_bus25_register();
   (void)zi_file_fs25_register();
   (void)zi_net_tcp25_register();
@@ -1334,11 +1224,6 @@ int main(int argc, char **argv) {
   (void)zi_proc_env25_register();
   (void)zi_proc_hopper25_register();
   (void)zi_sys_info25_register();
-
-  if (!zi_async_default25_register_selectors()) {
-    fprintf(stderr, "async/default selector registration failed\n");
-    return 1;
-  }
 
   // Wire stdio handles.
   (void)zi_handles25_init();
@@ -1367,11 +1252,6 @@ int main(int argc, char **argv) {
 
   if (!dump_env_via_cap((const char *const *)environ)) {
     fprintf(stderr, "env cap failed\n");
-    return 1;
-  }
-
-  if (!async_smoke()) {
-    fprintf(stderr, "async/default smoke failed\n");
     return 1;
   }
 

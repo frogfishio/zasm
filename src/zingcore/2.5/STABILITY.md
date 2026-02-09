@@ -44,7 +44,7 @@ The following capabilities are **production-ready** and **stable** within zABI 2
 | Process Env | `proc/env@v1` | read-only | Golden |
 | Hopper Arena | `proc/hopper@v1` | isolated instance | Golden |
 | TCP Client | `net/tcp@v1` | `ZI_NET_ALLOW` | Golden |
-| Async Invocation | `async/default@v1` | selector registry | Golden |
+| Async Invocation | `async/default@v1` | selector registry | Optional (not registered by default) |
 | Event Bus | `event/bus@v1` | in-process | Golden |
 | System Info | `sys/info@v1` | best-effort, may redact | Golden |
 

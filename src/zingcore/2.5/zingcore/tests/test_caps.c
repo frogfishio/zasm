@@ -12,9 +12,9 @@ static zi_cap_v1 cap_exec_run_v1 = {
     .meta_len = 0,
 };
 
-static zi_cap_v1 cap_async_default_v1 = {
-    .kind = "async",
-    .name = "default",
+static zi_cap_v1 cap_event_bus_v1 = {
+  .kind = "event",
+  .name = "bus",
     .version = 1,
     .cap_flags = 0,
     .meta = NULL,
@@ -29,8 +29,8 @@ int main(void) {
 
   zi_caps_reset_for_test();
 
-  if (!zi_cap_register(&cap_async_default_v1)) {
-    fprintf(stderr, "register async/default failed\n");
+  if (!zi_cap_register(&cap_event_bus_v1)) {
+    fprintf(stderr, "register event/bus failed\n");
     return 1;
   }
   if (!zi_cap_register(&cap_exec_run_v1)) {
@@ -65,7 +65,7 @@ int main(void) {
     return 1;
   }
 
-  if (strcmp(reg->caps[0]->kind, "async") != 0 || strcmp(reg->caps[0]->name, "default") != 0) {
+  if (strcmp(reg->caps[0]->kind, "event") != 0 || strcmp(reg->caps[0]->name, "bus") != 0) {
     fprintf(stderr, "unexpected cap[0] identity\n");
     return 1;
   }

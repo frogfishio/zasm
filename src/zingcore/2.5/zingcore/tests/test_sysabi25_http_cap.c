@@ -3,6 +3,7 @@
 #include "zi_net_http25.h"
 #include "zi_runtime25.h"
 #include "zi_sysabi25.h"
+#include "zi_sys_loop25.h"
 #include "zi_zcl1.h"
 
 #include <arpa/inet.h>
@@ -47,20 +48,68 @@ static void build_open_req(uint8_t req[40], const char *kind, const char *name, 
   write_u32le(req + 36, params_len);
 }
 
-static int read_full_frame(zi_handle_t h, uint8_t *buf, uint32_t cap) {
+static int sys_loop_poll_once(zi_handle_t loop_h, uint32_t timeout_ms) {
+  uint8_t pl[8];
+  write_u32le(pl + 0, 8); // max_events
+  write_u32le(pl + 4, timeout_ms);
+  uint8_t fr[64];
+  int fn = zi_zcl1_write_ok(fr, (uint32_t)sizeof(fr), (uint16_t)ZI_SYS_LOOP_OP_POLL, 1, pl, (uint32_t)sizeof(pl));
+  if (fn <= 0) return ZI_E_INTERNAL;
+  int32_t wn = zi_write(loop_h, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)fn);
+  if (wn != fn) return (wn < 0) ? wn : ZI_E_IO;
+
+  uint8_t buf[512];
+  int rn = 0;
+  // Read a full frame (small and synchronous).
   uint32_t got = 0;
   while (got < 24u) {
-    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(cap - got));
+    int32_t n = zi_read(loop_h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(sizeof(buf) - got));
     if (n < 0) return n;
     if (n == 0) return ZI_E_CLOSED;
     got += (uint32_t)n;
   }
   if (!(buf[0] == 'Z' && buf[1] == 'C' && buf[2] == 'L' && buf[3] == '1')) return ZI_E_INVALID;
-  uint32_t pl = zi_zcl1_read_u32(buf + 20);
+  uint32_t payload_len = zi_zcl1_read_u32(buf + 20);
+  uint32_t need = 24u + payload_len;
+  if (need > (uint32_t)sizeof(buf)) return ZI_E_BOUNDS;
+  while (got < need) {
+    int32_t n = zi_read(loop_h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(need - got));
+    if (n < 0) return n;
+    if (n == 0) return ZI_E_CLOSED;
+    got += (uint32_t)n;
+  }
+  rn = (int)got;
+  zi_zcl1_frame z;
+  if (!zi_zcl1_parse(buf, (uint32_t)rn, &z)) return ZI_E_INVALID;
+  uint32_t st = zi_zcl1_read_u32(buf + 12);
+  if (st != 1 || z.op != (uint16_t)ZI_SYS_LOOP_OP_POLL) return ZI_E_INVALID;
+  return 0;
+}
+
+static int read_full_frame(zi_handle_t h, zi_handle_t loop_h, uint8_t *buf, uint32_t cap) {
+  uint32_t got = 0;
+    while (got < 24u) {
+    int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(cap - got));
+    if (n == ZI_E_AGAIN && loop_h >= 3) {
+      int pr = sys_loop_poll_once(loop_h, 1000u);
+      if (pr < 0) return pr;
+      continue;
+    }
+    if (n < 0) return n;
+    if (n == 0) return ZI_E_CLOSED;
+    got += (uint32_t)n;
+  }
+  if (!(buf[0] == 'Z' && buf[1] == 'C' && buf[2] == 'L' && buf[3] == '1')) return ZI_E_INVALID;
+    uint32_t pl = zi_zcl1_read_u32(buf + 20);
   uint32_t need = 24u + pl;
   if (need > cap) return ZI_E_BOUNDS;
   while (got < need) {
     int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(buf + got), (zi_size32_t)(need - got));
+    if (n == ZI_E_AGAIN && loop_h >= 3) {
+      int pr = sys_loop_poll_once(loop_h, 1000u);
+      if (pr < 0) return pr;
+      continue;
+    }
     if (n < 0) return n;
     if (n == 0) return ZI_E_CLOSED;
     got += (uint32_t)n;
@@ -130,6 +179,10 @@ int main(void) {
     fprintf(stderr, "zi_net_http25_register failed\n");
     return 1;
   }
+  if (!zi_sys_loop25_register()) {
+    fprintf(stderr, "zi_sys_loop25_register failed\n");
+    return 1;
+  }
 
   if (setenv("ZI_NET_LISTEN_ALLOW", "loopback", 1) != 0) {
     perror("setenv");
@@ -146,6 +199,44 @@ int main(void) {
   if (h < 3) {
     fprintf(stderr, "expected handle, got %d\n", h);
     return 1;
+  }
+
+  // Open sys/loop and WATCH the http handle for readability.
+  build_open_req(req, ZI_CAP_KIND_SYS, ZI_CAP_NAME_LOOP, NULL, 0);
+  zi_handle_t loop_h = zi_cap_open((zi_ptr_t)(uintptr_t)req);
+  if (loop_h < 3) {
+    fprintf(stderr, "expected loop handle, got %d\n", loop_h);
+    return 1;
+  }
+  {
+    uint8_t wpl[20];
+    write_u32le(wpl + 0, (uint32_t)h);
+    write_u32le(wpl + 4, 0x1u); // readable
+    write_u64le(wpl + 8, 1u);
+    write_u32le(wpl + 16, 0u);
+
+    uint8_t wfr[128];
+    int wfn = zi_zcl1_write_ok(wfr, (uint32_t)sizeof(wfr), (uint16_t)ZI_SYS_LOOP_OP_WATCH, 1, wpl, (uint32_t)sizeof(wpl));
+    if (wfn <= 0) {
+      fprintf(stderr, "failed to build WATCH frame\n");
+      return 1;
+    }
+    if (zi_write(loop_h, (zi_ptr_t)(uintptr_t)wfr, (zi_size32_t)wfn) != wfn) {
+      fprintf(stderr, "WATCH write failed\n");
+      return 1;
+    }
+    uint8_t wbuf[256];
+    int wrn = read_full_frame(loop_h, 0, wbuf, (uint32_t)sizeof(wbuf));
+    if (wrn < 0) {
+      fprintf(stderr, "WATCH read failed: %d\n", wrn);
+      return 1;
+    }
+    zi_zcl1_frame wz;
+    uint32_t wst = zi_zcl1_read_u32(wbuf + 12);
+    if (!zi_zcl1_parse(wbuf, (uint32_t)wrn, &wz) || wz.op != (uint16_t)ZI_SYS_LOOP_OP_WATCH || wst != 1) {
+      fprintf(stderr, "unexpected WATCH response\n");
+      return 1;
+    }
   }
 
   // LISTEN
@@ -166,7 +257,7 @@ int main(void) {
   }
 
   uint8_t buf[4096];
-  int rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  int rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "LISTEN read failed: %d\n", rn);
     return 1;
@@ -211,7 +302,7 @@ int main(void) {
   }
 
   // Read EV_REQUEST.
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "EV_REQUEST read failed: %d\n", rn);
     close(s);
@@ -261,7 +352,7 @@ int main(void) {
     close(s);
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "RESPOND_START ack read failed: %d\n", rn);
     close(s);
@@ -309,7 +400,7 @@ int main(void) {
     return 1;
   }
 
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "RESPOND_INLINE ack read failed: %d\n", rn);
     close(s);
@@ -418,7 +509,7 @@ int main(void) {
     return 1;
   }
 
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "FETCH read failed: %d\n", rn);
     close(srv);
@@ -613,7 +704,7 @@ int main(void) {
     close(srv2);
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "FETCH(stream) read failed: %d\n", rn);
     (void)zi_end(post_body_h);
@@ -679,7 +770,7 @@ int main(void) {
     return 1;
   }
 
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "EV_REQUEST read failed: %d\n", rn);
     close(s);
@@ -720,7 +811,7 @@ int main(void) {
     return 1;
   }
 
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "RESPOND_STREAM resp read failed: %d\n", rn);
     close(s);
@@ -805,13 +896,14 @@ int main(void) {
     close(s);
     return 1;
   }
+
   if (send(s, mp_req, (size_t)mp_len, 0) != (ssize_t)mp_len) {
     perror("send");
     close(s);
     return 1;
   }
 
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "EV_REQUEST(multipart) read failed: %d\n", rn);
     close(s);
@@ -868,6 +960,7 @@ int main(void) {
       close(s);
       return 1;
     }
+
     poff += nlen;
     uint32_t vlen = zi_zcl1_read_u32(z.payload + poff);
     poff += 4;
@@ -876,6 +969,7 @@ int main(void) {
       close(s);
       return 1;
     }
+
     poff += vlen;
   }
   if (poff + 4u > z.payload_len) {
@@ -904,7 +998,7 @@ int main(void) {
     close(s);
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0 || !zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 20) {
     fprintf(stderr, "MULTIPART_BEGIN read failed\n");
     close(s);
@@ -924,7 +1018,7 @@ int main(void) {
       close(s);
       return 1;
     }
-    rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+    rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
     if (rn < 0 || !zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 21) {
       fprintf(stderr, "MULTIPART_NEXT read failed\n");
       close(s);
@@ -1054,7 +1148,7 @@ int main(void) {
     close(s);
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0 || !zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 22) {
     fprintf(stderr, "MULTIPART_END read failed\n");
     close(s);
@@ -1099,7 +1193,7 @@ int main(void) {
     close(s);
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0 || !zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 11) {
     fprintf(stderr, "RESPOND_INLINE(multipart) response failed\n");
     close(s);
@@ -1134,7 +1228,7 @@ int main(void) {
     fprintf(stderr, "CLOSE_LISTENER write failed\n");
     return 1;
   }
-  rn = read_full_frame(h, buf, (uint32_t)sizeof(buf));
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
   if (rn < 0) {
     fprintf(stderr, "CLOSE_LISTENER read failed\n");
     return 1;

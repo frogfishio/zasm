@@ -2,7 +2,6 @@
 
 #include "zingcore25.h"
 
-#include "zi_async_default25.h"
 #include "zi_caps.h"
 #include "zi_event_bus25.h"
 #include "zi_file_fs25.h"
@@ -13,6 +12,7 @@
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
 #include "zi_sys_info25.h"
+#include "zi_sys_loop25.h"
 #include "zi_telemetry.h"
 
 #include <stddef.h>
@@ -122,7 +122,6 @@ static int32_t host_telemetry(void *ctx, zi_ptr_t topic_ptr, zi_size32_t topic_l
 }
 
 static int register_all_caps(void) {
-  if (!zi_async_default25_register()) return 0;
   if (!zi_event_bus25_register()) return 0;
   if (!zi_file_fs25_register()) return 0;
   if (!zi_net_tcp25_register()) return 0;
@@ -131,6 +130,7 @@ static int register_all_caps(void) {
   if (!zi_proc_env25_register()) return 0;
   if (!zi_proc_hopper25_register()) return 0;
   if (!zi_sys_info25_register()) return 0;
+  if (!zi_sys_loop25_register()) return 0;
   return 1;
 }
 

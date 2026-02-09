@@ -7,7 +7,10 @@
 #include <arpa/inet.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
+#include <poll.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -221,6 +224,25 @@ static int32_t map_errno_to_zi(int e) {
   }
 }
 
+static void set_nonblocking_best_effort(int fd) {
+  if (fd < 0) return;
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) return;
+  (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static void drain_fd_best_effort(int fd) {
+  if (fd < 0) return;
+  uint8_t tmp[64];
+  for (;;) {
+    ssize_t n = read(fd, tmp, sizeof(tmp));
+    if (n > 0) continue;
+    if (n == 0) return;
+    if (errno == EINTR) continue;
+    return;
+  }
+}
+
 // ---- state ----
 
 #ifndef ZI_HTTP_MAX_LISTENERS
@@ -243,6 +265,18 @@ typedef struct {
   uint32_t pre_off;
   int close_on_end;
 } zi_http_body_stream;
+
+static int body_poll_get_fd(void *ctx, int *out_fd) {
+  zi_http_body_stream *s = (zi_http_body_stream *)ctx;
+  if (!s) return 0;
+  if (s->fd < 0) return 0;
+  if (out_fd) *out_fd = s->fd;
+  return 1;
+}
+
+static const zi_handle_poll_ops_v1 BODY_POLL_OPS = {
+    .get_fd = body_poll_get_fd,
+};
 
 typedef struct zi_http_cap_ctx zi_http_cap_ctx;
 typedef struct zi_http_multipart_iter zi_http_multipart_iter;
@@ -360,7 +394,7 @@ static int body_stream_read_host(zi_http_body_stream *s, uint8_t *dst, uint32_t 
   uint32_t want = cap;
   if ((uint64_t)want > s->remaining) want = (uint32_t)s->remaining;
 
-  ssize_t n = recv(s->fd, dst, (size_t)want, 0);
+    ssize_t n = recv(s->fd, dst, (size_t)want, 0);
   if (n < 0) return -1;
   if (n == 0) {
     s->remaining = 0;
@@ -413,6 +447,18 @@ typedef struct {
   zi_http_multipart_iter *it;
   int closed;
 } zi_http_mp_part;
+
+static int mp_part_poll_get_fd(void *ctx, int *out_fd) {
+  zi_http_mp_part *p = (zi_http_mp_part *)ctx;
+  if (!p || !p->it || !p->it->bs) return 0;
+  if (p->it->bs->fd < 0) return 0;
+  if (out_fd) *out_fd = p->it->bs->fd;
+  return 1;
+}
+
+static const zi_handle_poll_ops_v1 MP_PART_POLL_OPS = {
+    .get_fd = mp_part_poll_get_fd,
+};
 
 static void mp_free(zi_http_multipart_iter *it) {
   if (!it) return;
@@ -554,7 +600,9 @@ static int mp_parse_headers(zi_http_multipart_iter *it, zi_http_mp_hdr **out_hdr
   uint32_t hdr_end = 0;
   if (!mp_find_dcrlf(it, &hdr_end)) return 0;
   uint32_t start = it->buf_off;
-  uint32_t end = hdr_end;
+  // hdr_end points at the CR of the final header line's CRLF within the "\r\n\r\n" terminator.
+  // Include that CRLF so we can parse the last header line.
+  uint32_t end = hdr_end + 2u;
   if (end < start) return 0;
   uint32_t total = end - start;
   if (it->max_header_bytes && total > it->max_header_bytes) return 0;
@@ -631,7 +679,9 @@ static int mp_parse_headers(zi_http_multipart_iter *it, zi_http_mp_hdr **out_hdr
       const char *v = hdrs[hcnt].val;
       uint32_t vn = hdrs[hcnt].val_len;
       for (uint32_t k = 0; k + 5u < vn; k++) {
-        if (k + 5u < vn && strncasecmp(v + k, "name=", 5) == 0) {
+        int at_param = (k == 0) || (v[k - 1] == ';') || (v[k - 1] == ' ') || (v[k - 1] == '\t');
+        if (at_param && (k + 5u <= vn) && strncasecmp(v + k, "name=", 5) == 0) {
+          if (*out_name != NULL) continue;
           const char *q = v + k + 5;
           char quote = 0;
           if (*q == '"' || *q == '\'') { quote = *q; q++; }
@@ -662,7 +712,8 @@ static int mp_parse_headers(zi_http_multipart_iter *it, zi_http_mp_hdr **out_hdr
             }
           }
         }
-        if (k + 9u < vn && strncasecmp(v + k, "filename=", 9) == 0) {
+        if (at_param && (k + 9u <= vn) && strncasecmp(v + k, "filename=", 9) == 0) {
+          if (*out_filename != NULL) continue;
           const char *q = v + k + 9;
           char quote = 0;
           if (*q == '"' || *q == '\'') { quote = *q; q++; }
@@ -845,6 +896,17 @@ typedef struct {
 typedef struct zi_http_cap_ctx {
   int closed;
 
+  pthread_mutex_t mu;
+  pthread_cond_t cv;
+
+  // Wakeup pipe for sys/loop readiness (readable when c->out has data).
+  int notify_r;
+  int notify_w;
+  int notify_pending;
+
+  pthread_t srv_thr;
+  int srv_thr_started;
+
   uint8_t *in;
   uint32_t in_len;
   uint32_t in_cap;
@@ -863,12 +925,38 @@ typedef struct zi_http_cap_ctx {
   uint32_t next_rid;
 } zi_http_cap_ctx;
 
-static void free_out(zi_http_cap_ctx *c) {
+static int http_poll_get_fd(void *ctx, int *out_fd) {
+  zi_http_cap_ctx *c = (zi_http_cap_ctx *)ctx;
+  if (!c) return 0;
+  if (c->notify_r < 0) return 0;
+  if (out_fd) *out_fd = c->notify_r;
+  return 1;
+}
+
+static const zi_handle_poll_ops_v1 HTTP_POLL_OPS = {
+    .get_fd = http_poll_get_fd,
+};
+
+static void free_out_locked(zi_http_cap_ctx *c) {
   if (!c) return;
   free(c->out);
   c->out = NULL;
   c->out_len = 0;
   c->out_off = 0;
+
+  // If there's no more readable data, clear the notify pipe.
+  if (c->notify_r >= 0) {
+    drain_fd_best_effort(c->notify_r);
+  }
+  c->notify_pending = 0;
+  pthread_cond_broadcast(&c->cv);
+}
+
+static void free_out(zi_http_cap_ctx *c) {
+  if (!c) return;
+  pthread_mutex_lock(&c->mu);
+  free_out_locked(c);
+  pthread_mutex_unlock(&c->mu);
 }
 
 static void free_in(zi_http_cap_ctx *c) {
@@ -898,37 +986,141 @@ static int ensure_in_cap(zi_http_cap_ctx *c, uint32_t need) {
   return 1;
 }
 
-static int set_out_frame_ok(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const uint8_t *payload, uint32_t payload_len) {
+static int try_set_out_frame_ok(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const uint8_t *payload, uint32_t payload_len) {
   if (!c) return 0;
-  free_out(c);
+  pthread_mutex_lock(&c->mu);
+  if (c->out && c->out_len && c->out_off < c->out_len) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  free_out_locked(c);
   uint32_t cap = 24u + payload_len;
   c->out = (uint8_t *)malloc((size_t)cap);
-  if (!c->out) return 0;
+  if (!c->out) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
   int n = zi_zcl1_write_ok(c->out, cap, op, rid, payload, payload_len);
   if (n <= 0) {
-    free_out(c);
+    free_out_locked(c);
+    pthread_mutex_unlock(&c->mu);
     return 0;
   }
   c->out_len = (uint32_t)n;
   c->out_off = 0;
+
+  if (c->notify_w >= 0 && !c->notify_pending) {
+    uint8_t b = 1;
+    (void)write(c->notify_w, &b, 1);
+    c->notify_pending = 1;
+  }
+  pthread_mutex_unlock(&c->mu);
   return 1;
 }
 
-static int set_out_frame_err(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const char *trace, const char *msg) {
+static int wait_set_out_frame_ok(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const uint8_t *payload, uint32_t payload_len) {
   if (!c) return 0;
-  free_out(c);
-  uint32_t cap = 4096u;
+  pthread_mutex_lock(&c->mu);
+  while (!c->closed && c->out && c->out_len && c->out_off < c->out_len) {
+    pthread_cond_wait(&c->cv, &c->mu);
+  }
+  if (c->closed) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  free_out_locked(c);
+  uint32_t cap = 24u + payload_len;
   c->out = (uint8_t *)malloc((size_t)cap);
-  if (!c->out) return 0;
-  int n = zi_zcl1_write_error(c->out, cap, op, rid, trace, msg);
+  if (!c->out) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  int n = zi_zcl1_write_ok(c->out, cap, op, rid, payload, payload_len);
   if (n <= 0) {
-    free_out(c);
+    free_out_locked(c);
+    pthread_mutex_unlock(&c->mu);
     return 0;
   }
   c->out_len = (uint32_t)n;
   c->out_off = 0;
+  if (c->notify_w >= 0 && !c->notify_pending) {
+    uint8_t b = 1;
+    (void)write(c->notify_w, &b, 1);
+    c->notify_pending = 1;
+  }
+  pthread_mutex_unlock(&c->mu);
   return 1;
 }
+
+static int try_set_out_frame_err(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const char *trace, const char *msg) {
+  if (!c) return 0;
+  pthread_mutex_lock(&c->mu);
+  if (c->out && c->out_len && c->out_off < c->out_len) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  free_out_locked(c);
+  uint32_t cap = 4096u;
+  c->out = (uint8_t *)malloc((size_t)cap);
+  if (!c->out) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  int n = zi_zcl1_write_error(c->out, cap, op, rid, trace, msg);
+  if (n <= 0) {
+    free_out_locked(c);
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  c->out_len = (uint32_t)n;
+  c->out_off = 0;
+  if (c->notify_w >= 0 && !c->notify_pending) {
+    uint8_t b = 1;
+    (void)write(c->notify_w, &b, 1);
+    c->notify_pending = 1;
+  }
+  pthread_mutex_unlock(&c->mu);
+  return 1;
+}
+
+static int wait_set_out_frame_err(zi_http_cap_ctx *c, uint16_t op, uint32_t rid, const char *trace, const char *msg) {
+  if (!c) return 0;
+  pthread_mutex_lock(&c->mu);
+  while (!c->closed && c->out && c->out_len && c->out_off < c->out_len) {
+    pthread_cond_wait(&c->cv, &c->mu);
+  }
+  if (c->closed) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  free_out_locked(c);
+  uint32_t cap = 4096u;
+  c->out = (uint8_t *)malloc((size_t)cap);
+  if (!c->out) {
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  int n = zi_zcl1_write_error(c->out, cap, op, rid, trace, msg);
+  if (n <= 0) {
+    free_out_locked(c);
+    pthread_mutex_unlock(&c->mu);
+    return 0;
+  }
+  c->out_len = (uint32_t)n;
+  c->out_off = 0;
+  if (c->notify_w >= 0 && !c->notify_pending) {
+    uint8_t b = 1;
+    (void)write(c->notify_w, &b, 1);
+    c->notify_pending = 1;
+  }
+  pthread_mutex_unlock(&c->mu);
+  return 1;
+}
+
+// Most dispatch paths are synchronous and must not block waiting for a reader;
+// they rely on http_write returning ZI_E_AGAIN if an unread frame exists.
+#define set_out_frame_ok  try_set_out_frame_ok
+#define set_out_frame_err try_set_out_frame_err
 
 static zi_http_listener *listener_by_id(zi_http_cap_ctx *c, uint32_t id) {
   if (!c) return NULL;
@@ -1311,7 +1503,9 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
 
   uint32_t hcount = 0;
   uint8_t *p = buf + (uint32_t)req_line_end + 2u;
-  uint8_t *pend = buf + (uint32_t)hdr_end_off;
+  // Parse up to (and including) the "\r\n\r\n" terminator; the loop already
+  // treats the empty line as a stop marker.
+  uint8_t *pend = buf + (uint32_t)header_bytes;
   uint8_t *authority = NULL;
   uint32_t authority_len = 0;
   uint64_t content_len = 0;
@@ -1549,7 +1743,7 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
       close_req(r);
       return 0;
     }
-    body_handle = zi_handle25_alloc(&BODY_OPS, r->body_stream, ZI_H_READABLE | ZI_H_ENDABLE);
+    body_handle = zi_handle25_alloc_with_poll(&BODY_OPS, &BODY_POLL_OPS, r->body_stream, ZI_H_READABLE | ZI_H_ENDABLE);
     if (body_handle < 3) {
       free(headers);
       free(buf);
@@ -1586,7 +1780,8 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
   }
 
   uint64_t payload_len = 0;
-  payload_len += 4;
+  payload_len += 4; // listener_id
+  payload_len += 4; // flags (reserved; 0)
   payload_len += 4 + method_len;
   payload_len += 4 + path_len;
   payload_len += 4 + scheme_len;
@@ -1623,6 +1818,8 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
 
   uint32_t off = 0;
   zi_zcl1_write_u32(pl + off, listener_id);
+  off += 4;
+  zi_zcl1_write_u32(pl + off, 0u);
   off += 4;
   zi_zcl1_write_u32(pl + off, method_len);
   off += 4;
@@ -1668,7 +1865,11 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
     off += 4;
   }
 
-  int ok = set_out_frame_ok(c, (uint16_t)ZI_HTTP_EV_REQUEST, rid, pl, (uint32_t)payload_len);
+  int ok = wait_set_out_frame_ok(c, (uint16_t)ZI_HTTP_EV_REQUEST, rid, pl, (uint32_t)payload_len);
+
+  // After we've fully parsed the request headers (and any inline body), switch
+  // the connection to nonblocking so stream handles can return ZI_E_AGAIN.
+  set_nonblocking_best_effort(conn_fd);
 
   free(pl);
   free(body_inline);
@@ -1717,6 +1918,67 @@ static int pump_one_request_event(zi_http_cap_ctx *c) {
     return 1;
   }
   return 0;
+}
+
+static void *http_server_thread_main(void *arg) {
+  zi_http_cap_ctx *c = (zi_http_cap_ctx *)arg;
+  if (!c) return NULL;
+
+  for (;;) {
+    pthread_mutex_lock(&c->mu);
+    while (!c->closed) {
+      int have = 0;
+      for (uint32_t i = 0; i < ZI_HTTP_MAX_LISTENERS; i++) {
+        if (c->listeners[i].in_use && c->listeners[i].fd >= 0) {
+          have = 1;
+          break;
+        }
+      }
+      if (have) break;
+      pthread_cond_wait(&c->cv, &c->mu);
+    }
+    if (c->closed) {
+      pthread_mutex_unlock(&c->mu);
+      break;
+    }
+
+    struct pollfd pfds[ZI_HTTP_MAX_LISTENERS];
+    uint32_t lids[ZI_HTTP_MAX_LISTENERS];
+    nfds_t nfds = 0;
+    for (uint32_t i = 0; i < ZI_HTTP_MAX_LISTENERS; i++) {
+      if (!c->listeners[i].in_use) continue;
+      if (c->listeners[i].fd < 0) continue;
+      pfds[nfds].fd = c->listeners[i].fd;
+      pfds[nfds].events = POLLIN;
+      pfds[nfds].revents = 0;
+      lids[nfds] = c->listeners[i].id;
+      nfds++;
+    }
+    pthread_mutex_unlock(&c->mu);
+
+    if (nfds == 0) continue;
+    int rc = poll(pfds, nfds, 250);
+    if (rc <= 0) continue;
+
+    for (nfds_t i = 0; i < nfds; i++) {
+      if (!(pfds[i].revents & POLLIN)) continue;
+
+      struct sockaddr_storage peer;
+      socklen_t peer_len = (socklen_t)sizeof(peer);
+      int conn = accept(pfds[i].fd, (struct sockaddr *)&peer, &peer_len);
+      if (conn < 0) continue;
+
+      // build_ev_request emits EV_REQUEST and blocks only as needed to read the
+      // request and/or wait for the guest to drain the previous frame.
+      int ok = build_ev_request(c, lids[i], conn, &peer, peer_len);
+      if (!ok) {
+        send_http_error_best_effort(conn, 400u, "Bad Request", "bad request\n");
+        (void)close(conn);
+      }
+    }
+  }
+
+  return NULL;
 }
 
 static int parse_listen_req(const uint8_t *p, uint32_t n, uint32_t *port, uint32_t *flags, const uint8_t **host,
@@ -1832,6 +2094,7 @@ static int dispatch_listen(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, u
     bound_port = (uint32_t)ntohs(sa6->sin6_port);
   }
 
+  pthread_mutex_lock(&c->mu);
   uint32_t lid = ++c->next_listener_id;
   if (lid == 0) lid = ++c->next_listener_id;
   slot->in_use = 1;
@@ -1839,6 +2102,8 @@ static int dispatch_listen(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, u
   slot->fd = fd;
   slot->bound_port = (uint16_t)bound_port;
   memcpy(slot->bound_addr, bound_addr, 16);
+  pthread_cond_broadcast(&c->cv);
+  pthread_mutex_unlock(&c->mu);
 
   uint8_t payload[24];
   zi_zcl1_write_u32(payload + 0, lid);
@@ -1853,8 +2118,11 @@ static int dispatch_close_listener(zi_http_cap_ctx *c, uint32_t rid, const uint8
     return set_out_frame_err(c, ZI_HTTP_OP_CLOSE_LISTENER, rid, "t_http_invalid", "malformed CLOSE_LISTENER payload");
   }
   uint32_t lid = zi_zcl1_read_u32(p + 0);
+
+  pthread_mutex_lock(&c->mu);
   zi_http_listener *l = listener_by_id(c, lid);
   if (!l) {
+    pthread_mutex_unlock(&c->mu);
     return set_out_frame_err(c, ZI_HTTP_OP_CLOSE_LISTENER, rid, "t_http_noent", "unknown listener_id");
   }
   if (l->fd >= 0) {
@@ -1862,6 +2130,9 @@ static int dispatch_close_listener(zi_http_cap_ctx *c, uint32_t rid, const uint8
     l->fd = -1;
   }
   memset(l, 0, sizeof(*l));
+
+  pthread_cond_broadcast(&c->cv);
+  pthread_mutex_unlock(&c->mu);
   return set_out_frame_ok(c, ZI_HTTP_OP_CLOSE_LISTENER, rid, NULL, 0);
 }
 
@@ -2052,6 +2323,18 @@ typedef struct {
   int closed;
 } zi_http_resp_stream;
 
+static int resp_stream_poll_get_fd(void *ctx, int *out_fd) {
+  zi_http_resp_stream *s = (zi_http_resp_stream *)ctx;
+  if (!s) return 0;
+  if (s->fd < 0) return 0;
+  if (out_fd) *out_fd = s->fd;
+  return 1;
+}
+
+static const zi_handle_poll_ops_v1 RESP_STREAM_POLL_OPS = {
+    .get_fd = resp_stream_poll_get_fd,
+};
+
 static int32_t resp_stream_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
   (void)ctx;
   (void)dst_ptr;
@@ -2236,7 +2519,10 @@ static int dispatch_respond_stream(zi_http_cap_ctx *c, uint32_t rid, const uint8
   s->rid = rid;
   s->fd = r->fd;
 
-  zi_handle_t body_h = zi_handle25_alloc(&RESP_STREAM_OPS, s, ZI_H_WRITABLE | ZI_H_ENDABLE);
+  // Ensure writes don't block; caller can wait via sys/loop readiness.
+  set_nonblocking_best_effort(s->fd);
+
+  zi_handle_t body_h = zi_handle25_alloc_with_poll(&RESP_STREAM_OPS, &RESP_STREAM_POLL_OPS, s, ZI_H_WRITABLE | ZI_H_ENDABLE);
   if (body_h < 3) {
     free(s);
     close_req(r);
@@ -2367,7 +2653,7 @@ static int dispatch_multipart_next(zi_http_cap_ctx *c, uint32_t rid, const uint8
   part->closed = 0;
   it->part_open = 1;
 
-  zi_handle_t part_h = zi_handle25_alloc(&MP_PART_OPS, part, ZI_H_READABLE | ZI_H_ENDABLE);
+  zi_handle_t part_h = zi_handle25_alloc_with_poll(&MP_PART_OPS, &MP_PART_POLL_OPS, part, ZI_H_READABLE | ZI_H_ENDABLE);
   if (part_h < 3) {
     it->part_open = 0;
     free(part);
@@ -3051,7 +3337,9 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
   }
   uint32_t rhcount = 0;
   uint8_t *hp = rbuf + (uint32_t)line_end + 2u;
-  uint8_t *hend = rbuf + (uint32_t)hdr_end_off;
+  // Parse up to (and including) the "\r\n\r\n" terminator; the loop already
+  // treats the empty line as a stop marker.
+  uint8_t *hend = rbuf + (uint32_t)header_bytes;
   uint64_t content_len = 0;
   int has_content_len = 0;
   int has_chunked = 0;
@@ -3183,6 +3471,9 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
     uint64_t rem = content_len;
     if ((uint64_t)pre_len > rem) pre_len = (uint32_t)rem;
     rem -= (uint64_t)pre_len;
+    // Header parsing above uses blocking recv; once the response is framed, make
+    // the socket nonblocking for streamed body reads.
+    set_nonblocking_best_effort(fd);
     zi_http_body_stream *bs = body_stream_new(fd, rem, rbuf + header_bytes, pre_len, 1);
     if (!bs) {
       free(headers);
@@ -3190,7 +3481,7 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
       (void)close(fd);
       return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_oom", "oom stream");
     }
-    resp_body_handle = zi_handle25_alloc(&BODY_OPS, bs, ZI_H_READABLE | ZI_H_ENDABLE);
+    resp_body_handle = zi_handle25_alloc_with_poll(&BODY_OPS, &BODY_POLL_OPS, bs, ZI_H_READABLE | ZI_H_ENDABLE);
     if (resp_body_handle < 3) {
       body_end(bs);
       free(headers);
@@ -3280,25 +3571,25 @@ static int32_t http_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
   if (!mem || !mem->map_rw) return ZI_E_NOSYS;
   if (dst_ptr == 0) return ZI_E_BOUNDS;
 
-  if (c->out_off >= c->out_len) {
-    free_out(c);
-    if (!pump_one_request_event(c)) {
-      return ZI_E_AGAIN;
-    }
-  }
+  pthread_mutex_lock(&c->mu);
   if (!c->out || c->out_len == 0 || c->out_off >= c->out_len) {
+    pthread_mutex_unlock(&c->mu);
     return ZI_E_AGAIN;
   }
 
   uint8_t *dst = NULL;
-  if (!mem->map_rw(mem->ctx, dst_ptr, cap, &dst) || !dst) return ZI_E_BOUNDS;
+  if (!mem->map_rw(mem->ctx, dst_ptr, cap, &dst) || !dst) {
+    pthread_mutex_unlock(&c->mu);
+    return ZI_E_BOUNDS;
+  }
   uint32_t avail = c->out_len - c->out_off;
   uint32_t n = cap < avail ? cap : avail;
   memcpy(dst, c->out + c->out_off, n);
   c->out_off += n;
   if (c->out_off == c->out_len) {
-    free_out(c);
+    free_out_locked(c);
   }
+  pthread_mutex_unlock(&c->mu);
   return (int32_t)n;
 }
 
@@ -3308,9 +3599,12 @@ static int32_t http_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
   if (c->closed) return ZI_E_CLOSED;
   if (len == 0) return 0;
 
-  if (c->out && c->out_len != 0) {
+  pthread_mutex_lock(&c->mu);
+  if (c->out && c->out_len != 0 && c->out_off < c->out_len) {
+    pthread_mutex_unlock(&c->mu);
     return ZI_E_AGAIN;
   }
+  pthread_mutex_unlock(&c->mu);
 
   const zi_mem_v1 *mem = zi_runtime25_mem();
   if (!mem || !mem->map_ro) return ZI_E_NOSYS;
@@ -3367,13 +3661,22 @@ static int32_t http_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
 static int32_t http_end(void *ctx) {
   zi_http_cap_ctx *c = (zi_http_cap_ctx *)ctx;
   if (!c) return ZI_E_INTERNAL;
-  c->closed = 1;
 
+  pthread_mutex_lock(&c->mu);
+  c->closed = 1;
   for (uint32_t i = 0; i < ZI_HTTP_MAX_LISTENERS; i++) {
     if (c->listeners[i].in_use && c->listeners[i].fd >= 0) {
       (void)close(c->listeners[i].fd);
+      c->listeners[i].fd = -1;
     }
     memset(&c->listeners[i], 0, sizeof(c->listeners[i]));
+  }
+  pthread_cond_broadcast(&c->cv);
+  pthread_mutex_unlock(&c->mu);
+
+  if (c->srv_thr_started) {
+    (void)pthread_join(c->srv_thr, NULL);
+    c->srv_thr_started = 0;
   }
 
   if (c->reqs) {
@@ -3393,6 +3696,14 @@ static int32_t http_end(void *ctx) {
   c->reqs_cap = 0;
   free_out(c);
   free_in(c);
+
+  if (c->notify_r >= 0) (void)close(c->notify_r);
+  if (c->notify_w >= 0) (void)close(c->notify_w);
+  c->notify_r = -1;
+  c->notify_w = -1;
+
+  pthread_cond_destroy(&c->cv);
+  pthread_mutex_destroy(&c->mu);
   memset(c, 0, sizeof(*c));
   free(c);
   return 0;
@@ -3425,6 +3736,32 @@ zi_handle_t zi_net_http25_open_from_params(zi_ptr_t params_ptr, zi_size32_t para
   zi_http_cap_ctx *c = (zi_http_cap_ctx *)calloc(1u, sizeof(*c));
   if (!c) return (zi_handle_t)ZI_E_OOM;
 
+  c->notify_r = -1;
+  c->notify_w = -1;
+  c->notify_pending = 0;
+  c->srv_thr_started = 0;
+
+  pthread_mutexattr_t attr;
+  pthread_mutexattr_init(&attr);
+  pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+  pthread_mutex_init(&c->mu, &attr);
+  pthread_mutexattr_destroy(&attr);
+  pthread_cond_init(&c->cv, NULL);
+
+  {
+    int fds[2];
+    if (pipe(fds) == 0) {
+      c->notify_r = fds[0];
+      c->notify_w = fds[1];
+      set_nonblocking_best_effort(c->notify_r);
+      set_nonblocking_best_effort(c->notify_w);
+    }
+  }
+
+  if (pthread_create(&c->srv_thr, NULL, http_server_thread_main, c) == 0) {
+    c->srv_thr_started = 1;
+  }
+
   c->lim = load_limits();
   c->next_listener_id = 0;
   c->next_rid = 1;
@@ -3441,7 +3778,7 @@ zi_handle_t zi_net_http25_open_from_params(zi_ptr_t params_ptr, zi_size32_t para
     c->reqs[i].fd = -1;
   }
 
-  zi_handle_t h = zi_handle25_alloc(&HTTP_OPS, c, ZI_H_READABLE | ZI_H_WRITABLE | ZI_H_ENDABLE);
+  zi_handle_t h = zi_handle25_alloc_with_poll(&HTTP_OPS, &HTTP_POLL_OPS, c, ZI_H_READABLE | ZI_H_WRITABLE | ZI_H_ENDABLE);
   if (h < 3) {
     http_end(c);
     return (zi_handle_t)ZI_E_INTERNAL;

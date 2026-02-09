@@ -68,10 +68,11 @@ int main() {
   zi_proc_argv25_register();
   zi_proc_env25_register();
   zi_proc_hopper25_register();
-  zi_async_default25_register();
+  // Optional: async/default is not registered by default.
+  // zi_async_default25_register();
   
-  // 3. Register selectors (if using async)
-  zi_async_default25_register_selectors();
+  // 3. Register selectors (if using async/default)
+  // zi_async_default25_register_selectors();
   
   // Now zi_cap_open, zi_ctl, etc. work
 }
@@ -85,7 +86,7 @@ int main() {
 
 **2.5**:
 ```c
-// After registering async/default cap:
+// After registering async/default cap (optional):
 const zi_async_selector my_selector = {
   .cap_kind = "exec",
   .cap_name = "run",
@@ -379,9 +380,10 @@ int main(int argc, char **argv) {
 
 **Error**: `zi_async_register` fails.
 
-**Fix**: Register the cap first, then its selectors:
+**Fix**: If using async/default, register the cap first, then its selectors:
 
 ```c
+// Optional: async/default is not registered by default.
 zi_async_default25_register();  // Register cap
 zi_async_default25_register_selectors();  // Then selectors
 ```

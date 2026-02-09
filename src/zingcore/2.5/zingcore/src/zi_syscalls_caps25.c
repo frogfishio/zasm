@@ -11,6 +11,7 @@
 #include "zi_proc_env25.h"
 #include "zi_proc_hopper25.h"
 #include "zi_sys_info25.h"
+#include "zi_sys_loop25.h"
 
 #include <string.h>
 
@@ -180,6 +181,11 @@ zi_handle_t zi_cap_open(zi_ptr_t req_ptr) {
   // sys/info v1 (no params)
   if (strcmp(found->kind, ZI_CAP_KIND_SYS) == 0 && strcmp(found->name, ZI_CAP_NAME_INFO) == 0 && found->version == 1) {
     return zi_sys_info25_open_from_params(params_ptr, (zi_size32_t)params_len);
+  }
+
+  // sys/loop v1 (no params)
+  if (strcmp(found->kind, ZI_CAP_KIND_SYS) == 0 && strcmp(found->name, ZI_CAP_NAME_LOOP) == 0 && found->version == 1) {
+    return zi_sys_loop25_open_from_params(params_ptr, (zi_size32_t)params_len);
   }
 
   return (zi_handle_t)ZI_E_DENIED;

@@ -10,6 +10,7 @@ typedef struct {
   int in_use;
   uint32_t hflags;
   const zi_handle_ops_v1 *ops;
+  const zi_handle_poll_ops_v1 *poll_ops;
   void *ctx;
 } zi_handle_entry;
 
@@ -34,6 +35,7 @@ int zi_handles25_init(void) {
     g_h.entries[i].in_use = 0;
     g_h.entries[i].hflags = 0;
     g_h.entries[i].ops = NULL;
+    g_h.entries[i].poll_ops = NULL;
     g_h.entries[i].ctx = NULL;
   }
   return 1;
@@ -45,6 +47,10 @@ void zi_handles25_reset_for_test(void) {
 }
 
 zi_handle_t zi_handle25_alloc(const zi_handle_ops_v1 *ops, void *ctx, uint32_t hflags) {
+  return zi_handle25_alloc_with_poll(ops, NULL, ctx, hflags);
+}
+
+zi_handle_t zi_handle25_alloc_with_poll(const zi_handle_ops_v1 *ops, const zi_handle_poll_ops_v1 *poll_ops, void *ctx, uint32_t hflags) {
   if (!g_h.initialized && !zi_handles25_init()) return 0;
 
   // Simple linear probe starting from next.
@@ -58,6 +64,7 @@ zi_handle_t zi_handle25_alloc(const zi_handle_ops_v1 *ops, void *ctx, uint32_t h
     g_h.entries[idx].in_use = 1;
     g_h.entries[idx].hflags = hflags;
     g_h.entries[idx].ops = ops;
+    g_h.entries[idx].poll_ops = poll_ops;
     g_h.entries[idx].ctx = ctx;
 
     g_h.next = h + 1;
@@ -88,6 +95,7 @@ int zi_handle25_release(zi_handle_t h) {
   e->in_use = 0;
   e->hflags = 0;
   e->ops = NULL;
+  e->poll_ops = NULL;
   e->ctx = NULL;
   return 1;
 }
@@ -96,4 +104,18 @@ uint32_t zi_handle25_hflags(zi_handle_t h) {
   uint32_t flags = 0;
   (void)zi_handle25_lookup(h, NULL, NULL, &flags);
   return flags;
+}
+
+int zi_handle25_poll_fd(zi_handle_t h, int *out_fd) {
+  if (!g_h.initialized) return 0;
+  uint32_t idx = idx_from_handle(h);
+  if (idx >= ZI_HANDLES25_MAX) return 0;
+  const zi_handle_entry *e = &g_h.entries[idx];
+  if (!e->in_use) return 0;
+  if (!e->poll_ops || !e->poll_ops->get_fd) return 0;
+  int fd = -1;
+  if (!e->poll_ops->get_fd(e->ctx, &fd)) return 0;
+  if (fd < 0) return 0;
+  if (out_fd) *out_fd = fd;
+  return 1;
 }

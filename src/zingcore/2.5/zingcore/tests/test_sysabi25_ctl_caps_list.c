@@ -60,9 +60,9 @@ static zi_cap_v1 cap_exec_run_v1 = {
     .meta_len = 4,
 };
 
-static zi_cap_v1 cap_async_default_v1 = {
-    .kind = "async",
-    .name = "default",
+static zi_cap_v1 cap_event_bus_v1 = {
+  .kind = "event",
+  .name = "bus",
     .version = 1,
     .cap_flags = ZI_CAP_PURE,
     .meta = NULL,
@@ -81,7 +81,7 @@ int main(void) {
   zi_caps_reset_for_test();
 
   // Register out-of-order; registry should sort deterministically.
-  if (!zi_cap_register(&cap_exec_run_v1) || !zi_cap_register(&cap_async_default_v1)) {
+  if (!zi_cap_register(&cap_exec_run_v1) || !zi_cap_register(&cap_event_bus_v1)) {
     fprintf(stderr, "zi_cap_register failed\n");
     return 1;
   }
@@ -138,7 +138,7 @@ int main(void) {
     return 1;
   }
 
-  // Verify first entry is async/default (sorted) and second is exec/run.
+  // Verify first entry is event/bus (sorted) and second is exec/run.
   uint32_t off = 8;
   for (uint32_t i = 0; i < count; i++) {
     if (off + 4 > plen) return 1;
@@ -164,7 +164,7 @@ int main(void) {
     off += mlen;
 
     if (i == 0) {
-      if (!(klen == 5 && memcmp(k, "async", 5) == 0 && nlen == 7 && memcmp(nm, "default", 7) == 0)) {
+      if (!(klen == 5 && memcmp(k, "event", 5) == 0 && nlen == 3 && memcmp(nm, "bus", 3) == 0)) {
         fprintf(stderr, "unexpected first cap identity\n");
         return 1;
       }

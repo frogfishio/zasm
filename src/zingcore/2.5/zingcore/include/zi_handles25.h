@@ -14,6 +14,16 @@ typedef struct zi_handle_ops_v1 {
   int32_t (*end)(void *ctx);
 } zi_handle_ops_v1;
 
+// Optional internal poll interface for integrating handles with sys/loop.
+//
+// This is NOT a guest-visible ABI. It allows the runtime to watch readiness for
+// handles that are backed by OS waitables (typically file descriptors).
+typedef struct zi_handle_poll_ops_v1 {
+  // Returns 1 and writes a non-negative fd to out_fd if the handle is pollable.
+  // Returns 0 if the handle is not pollable or has no associated fd.
+  int (*get_fd)(void *ctx, int *out_fd);
+} zi_handle_poll_ops_v1;
+
 // Initializes the handle table (safe to call multiple times).
 int zi_handles25_init(void);
 
@@ -21,9 +31,17 @@ int zi_handles25_init(void);
 // Returns 0 on failure.
 zi_handle_t zi_handle25_alloc(const zi_handle_ops_v1 *ops, void *ctx, uint32_t hflags);
 
+// Allocates a new handle (>=3) with associated ops/ctx and optional poll ops.
+// Returns 0 on failure.
+zi_handle_t zi_handle25_alloc_with_poll(const zi_handle_ops_v1 *ops, const zi_handle_poll_ops_v1 *poll_ops, void *ctx, uint32_t hflags);
+
 // Looks up an existing handle.
 // Returns 1 on success.
 int zi_handle25_lookup(zi_handle_t h, const zi_handle_ops_v1 **out_ops, void **out_ctx, uint32_t *out_hflags);
+
+// If the handle is pollable, returns 1 and stores its fd in out_fd.
+// Otherwise returns 0.
+int zi_handle25_poll_fd(zi_handle_t h, int *out_fd);
 
 // Releases (invalidates) an existing handle.
 // Returns 1 if the handle existed and was released.

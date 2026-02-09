@@ -172,7 +172,15 @@ int main(void) {
   }
 
   memset(buf, 0, sizeof(buf));
-  int32_t gn = zi_read(h, (zi_ptr_t)(uintptr_t)buf, (zi_size32_t)sizeof(buf));
+  int32_t gn = ZI_E_AGAIN;
+  for (int i = 0; i < 1000; i++) {
+    gn = zi_read(h, (zi_ptr_t)(uintptr_t)buf, (zi_size32_t)sizeof(buf));
+    if (gn == ZI_E_AGAIN) {
+      usleep(1000);
+      continue;
+    }
+    break;
+  }
   if (gn != (int32_t)(sizeof(pong) - 1) || memcmp(buf, pong, (size_t)gn) != 0) {
     fprintf(stderr, "zi_read mismatch (n=%d)\n", gn);
     close(conn);

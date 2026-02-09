@@ -5,6 +5,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,6 +20,21 @@
 typedef struct {
   int fd;
 } zi_tcp_stream;
+
+static void set_nonblocking_best_effort(int fd) {
+  if (fd < 0) return;
+  int flags = fcntl(fd, F_GETFL, 0);
+  if (flags < 0) return;
+  (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+static int tcp_get_fd(void *ctx, int *out_fd) {
+  zi_tcp_stream *s = (zi_tcp_stream *)ctx;
+  if (!s) return 0;
+  if (s->fd < 0) return 0;
+  if (out_fd) *out_fd = s->fd;
+  return 1;
+}
 
 static int32_t map_errno_to_zi(int e) {
   switch (e) {
@@ -96,6 +112,10 @@ static const zi_handle_ops_v1 tcp_ops = {
     .read = tcp_read,
     .write = tcp_write,
     .end = tcp_end,
+};
+
+static const zi_handle_poll_ops_v1 tcp_poll_ops = {
+  .get_fd = tcp_get_fd,
 };
 
 static uint32_t u32le(const uint8_t *p) {
@@ -334,6 +354,9 @@ zi_handle_t zi_net_tcp25_open_from_params(zi_ptr_t params_ptr, zi_size32_t param
     return (zi_handle_t)last_zi;
   }
 
+  // Make subsequent I/O nonblocking so callers can rely on ZI_E_AGAIN.
+  set_nonblocking_best_effort(fd);
+
   zi_tcp_stream *s = (zi_tcp_stream *)calloc(1, sizeof(*s));
   if (!s) {
     (void)close(fd);
@@ -341,7 +364,7 @@ zi_handle_t zi_net_tcp25_open_from_params(zi_ptr_t params_ptr, zi_size32_t param
   }
   s->fd = fd;
 
-  zi_handle_t h = zi_handle25_alloc(&tcp_ops, s, ZI_H_READABLE | ZI_H_WRITABLE | ZI_H_ENDABLE);
+  zi_handle_t h = zi_handle25_alloc_with_poll(&tcp_ops, &tcp_poll_ops, s, ZI_H_READABLE | ZI_H_WRITABLE | ZI_H_ENDABLE);
   if (h == 0) {
     (void)close(fd);
     free(s);
