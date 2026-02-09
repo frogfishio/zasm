@@ -188,6 +188,27 @@ static zasm_rt_err_t diag_fail(zasm_rt_diag_t* diag, zasm_rt_err_t err) {
   return err;
 }
 
+static void diag_set_verify_trap(zasm_rt_diag_t* diag, zasm_verify_err_t verr) {
+  if (!diag) return;
+  switch (verr) {
+    case ZASM_VERIFY_ERR_BAD_OPCODE:
+      diag->trap = ZASM_RT_TRAP_UNSUPPORTED_OP;
+      break;
+    case ZASM_VERIFY_ERR_IMPT_MISMATCH:
+      diag->trap = ZASM_RT_TRAP_ABI;
+      break;
+    case ZASM_VERIFY_ERR_ALIGN:
+    case ZASM_VERIFY_ERR_TRUNC:
+    case ZASM_VERIFY_ERR_BAD_REG:
+    case ZASM_VERIFY_ERR_BAD_FIELDS:
+    case ZASM_VERIFY_ERR_BAD_IMM:
+    case ZASM_VERIFY_ERR_BAD_TARGET:
+      diag->trap = ZASM_RT_TRAP_DECODE;
+      break;
+    default:
+      break;
+  }
+}
 int zasm_rt_policy_is_deterministic(const zasm_rt_policy_t* policy_in) {
   const zasm_rt_policy_t p = policy_in ? *policy_in : zasm_rt_policy_default;
   return p.allow_time == 0 && p.allow_env == 0;
@@ -269,6 +290,7 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
       diag->verify_err = vr.err;
       diag->verify_off = vr.off;
       diag->verify_opcode = vr.opcode;
+      diag_set_verify_trap(diag, vr.err);
     }
     return diag_fail(diag, ZASM_RT_ERR_VERIFY_FAIL);
   }
@@ -280,6 +302,7 @@ zasm_rt_err_t zasm_rt_module_load_v2(zasm_rt_engine_t* engine,
         diag->verify_err = pr.err;
         diag->verify_off = pr.off;
         diag->verify_opcode = pr.opcode;
+        diag_set_verify_trap(diag, pr.err);
       }
       return diag_fail(diag, ZASM_RT_ERR_VERIFY_FAIL);
     }

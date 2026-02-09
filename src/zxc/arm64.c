@@ -82,6 +82,7 @@ enum {
   ZXC_TRAP_FUEL = 1,
   ZXC_TRAP_OOB = 2,
   ZXC_TRAP_DIV0 = 3,
+  ZXC_TRAP_ABI = 6,
 };
 
 static uint8_t map_reg(unsigned reg) {
@@ -455,43 +456,84 @@ static int emit_primitive_prologue(uint8_t* out, size_t out_cap, size_t* out_len
   return 1;
 }
 
-static int emit_syscall_call(uint8_t* out, size_t out_cap, size_t* out_len, uint16_t slot) {
+static int emit_syscall_call(uint8_t* out, size_t out_cap, size_t* out_len,
+                             uint16_t slot,
+                             int trap_enabled,
+                             int trap_off_enabled, uint32_t trap_off,
+                             size_t epilogue_off) {
+  if (trap_enabled) {
+    /* Fail closed if the embedder didn't provide the syscalls table.
+     * Avoid NULL deref / host crash; return through the shared epilogue.
+     */
+    size_t trap_seq_insns = 3;
+    if (trap_off_enabled) trap_seq_insns += (mov_imm64_size((uint64_t)trap_off) / 4u) + 1u;
+    if (!emit_u32(out, out_cap, out_len,
+                  enc_cbnz(1, ZXC_SYS_PTR, (int32_t)(trap_seq_insns + 1u)))) return 0;
+    if (!emit_trap_and_return(out, out_cap, out_len, epilogue_off,
+                              trap_off_enabled, trap_off,
+                              (uint16_t)ZXC_TRAP_ABI)) return 0;
+
+    /* Load function pointer and fail closed if missing. */
+    if (!emit_u32(out, out_cap, out_len, enc_ldr_x_off(ZXC_CMP, ZXC_SYS_PTR, slot))) return 0;
+    if (!emit_u32(out, out_cap, out_len,
+                  enc_cbnz(1, ZXC_CMP, (int32_t)(trap_seq_insns + 1u)))) return 0;
+    if (!emit_trap_and_return(out, out_cap, out_len, epilogue_off,
+                              trap_off_enabled, trap_off,
+                              (uint16_t)ZXC_TRAP_ABI)) return 0;
+  } else {
+    if (!emit_u32(out, out_cap, out_len, enc_ldr_x_off(ZXC_CMP, ZXC_SYS_PTR, slot))) return 0;
+  }
+
   /* save return address for this call on stack to survive clobbers */
   if (!emit_u32(out, out_cap, out_len, enc_sub_imm(1, 31, 31, 16))) return 0; /* sub sp,sp,#16 */
   if (!emit_u32(out, out_cap, out_len, enc_str_x_unsigned(30, 31, 0))) return 0; /* str x30,[sp] */
-  if (!emit_u32(out, out_cap, out_len, enc_ldr_x_off(ZXC_CMP, ZXC_SYS_PTR, slot))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_blr(ZXC_CMP))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_ldr_x(30, 31))) return 0; /* ldr x30,[sp] */
   if (!emit_u32(out, out_cap, out_len, enc_add_imm(1, 31, 31, 16))) return 0; /* add sp,sp,#16 */
   return 1;
 }
 
-static int emit_prim_in(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_in(uint8_t* out, size_t out_cap, size_t* out_len,
+                        int trap_enabled,
+                        int trap_off_enabled, uint32_t trap_off,
+                        size_t epilogue_off) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_REQ_HANDLE))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, read) / 8);
-  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
+  if (!emit_syscall_call(out, out_cap, out_len, slot,
+                         trap_enabled,
+                         trap_off_enabled, trap_off,
+                         epilogue_off)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   return 1;
 }
 
-static int emit_prim_out(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_out(uint8_t* out, size_t out_cap, size_t* out_len,
+                         int trap_enabled,
+                         int trap_off_enabled, uint32_t trap_off,
+                         size_t epilogue_off) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_RES_HANDLE))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH2))) return 0;
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, write) / 8);
-  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
+  if (!emit_syscall_call(out, out_cap, out_len, slot,
+                         trap_enabled,
+                         trap_off_enabled, trap_off,
+                         epilogue_off)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   return 1;
 }
 
-static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len,
+                         int trap_enabled,
+                         int trap_off_enabled, uint32_t trap_off,
+                         size_t epilogue_off) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH3, 3))) return 0;
@@ -501,7 +543,10 @@ static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH4))) return 0;
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, telemetry) / 8);
-  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
+  if (!emit_syscall_call(out, out_cap, out_len, slot,
+                         trap_enabled,
+                         trap_off_enabled, trap_off,
+                         epilogue_off)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH3))) return 0;
@@ -509,20 +554,35 @@ static int emit_prim_log(uint8_t* out, size_t out_cap, size_t* out_len) {
   return 1;
 }
 
-static int emit_prim_alloc(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_alloc(uint8_t* out, size_t out_cap, size_t* out_len,
+                           int trap_enabled,
+                           int trap_off_enabled, uint32_t trap_off,
+                           size_t epilogue_off) {
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, alloc) / 8);
-  return emit_syscall_call(out, out_cap, out_len, slot);
+  return emit_syscall_call(out, out_cap, out_len, slot,
+                           trap_enabled,
+                           trap_off_enabled, trap_off,
+                           epilogue_off);
 }
 
-static int emit_prim_free(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_free(uint8_t* out, size_t out_cap, size_t* out_len,
+                          int trap_enabled,
+                          int trap_off_enabled, uint32_t trap_off,
+                          size_t epilogue_off) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, free) / 8);
-  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
+  if (!emit_syscall_call(out, out_cap, out_len, slot,
+                         trap_enabled,
+                         trap_off_enabled, trap_off,
+                         epilogue_off)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(0, ZXC_SCRATCH))) return 0;
   return 1;
 }
 
-static int emit_prim_ctl(uint8_t* out, size_t out_cap, size_t* out_len) {
+static int emit_prim_ctl(uint8_t* out, size_t out_cap, size_t* out_len,
+                         int trap_enabled,
+                         int trap_off_enabled, uint32_t trap_off,
+                         size_t epilogue_off) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH, 0))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH2, 1))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(ZXC_SCRATCH3, 3))) return 0;
@@ -532,7 +592,10 @@ static int emit_prim_ctl(uint8_t* out, size_t out_cap, size_t* out_len) {
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(2, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH4))) return 0;
   const uint16_t slot = (uint16_t)(offsetof(zxc_zi_syscalls_v1_t, ctl) / 8);
-  if (!emit_syscall_call(out, out_cap, out_len, slot)) return 0;
+  if (!emit_syscall_call(out, out_cap, out_len, slot,
+                         trap_enabled,
+                         trap_off_enabled, trap_off,
+                         epilogue_off)) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(1, ZXC_SCRATCH2))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(3, ZXC_SCRATCH3))) return 0;
   if (!emit_u32(out, out_cap, out_len, enc_mov_reg(4, ZXC_SCRATCH4))) return 0;
@@ -556,6 +619,14 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
 
   const int trap_enabled = (trap_ptr != 0);
   const int trap_off_enabled = (trap_ptr != 0 && trap_off_ptr != 0);
+
+  size_t prim_abi_check_sz = 0;
+  if (trap_enabled) {
+    size_t trap_seq_insns = 3;
+    if (trap_off_enabled) trap_seq_insns += (mov_imm64_size((uint64_t)off) / 4u) + 1u;
+    /* cbnz(sys_ptr)+trap + cbnz(fn_ptr)+trap */
+    prim_abi_check_sz = 4u * (2u + 2u * trap_seq_insns);
+  }
 
   size_t sz = 4;
   size_t n_off = off + 4;
@@ -705,12 +776,12 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
         if (trap_enabled && trap_off_enabled) sz += mov_imm64_size((uint64_t)off) + 4;
       }
       break;
-    case ZOP_PRIM_IN: sz = (8 + 4) * 4; break;   /* +4 for stack save/restore of LR */
-    case ZOP_PRIM_OUT: sz = (9 + 4) * 4; break;
-    case ZOP_PRIM_LOG: sz = (14 + 4) * 4; break;
-    case ZOP_PRIM_ALLOC: sz = (2 + 4) * 4; break;
-    case ZOP_PRIM_FREE: sz = (4 + 4) * 4; break;
-    case ZOP_PRIM_CTL: sz = (13 + 4) * 4; break;
+    case ZOP_PRIM_IN: sz = (size_t)((8 + 4) * 4) + prim_abi_check_sz; break;   /* +4 for stack save/restore of LR */
+    case ZOP_PRIM_OUT: sz = (size_t)((9 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_LOG: sz = (size_t)((14 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_ALLOC: sz = (size_t)((2 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_FREE: sz = (size_t)((4 + 4) * 4) + prim_abi_check_sz; break;
+    case ZOP_PRIM_CTL: sz = (size_t)((13 + 4) * 4) + prim_abi_check_sz; break;
     default:
       sz = 4;
       break;
@@ -2277,7 +2348,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_IN: {
-        if (!emit_prim_in(out, out_cap, &out_len)) {
+        if (!emit_prim_in(out, out_cap, &out_len,
+                          trap_enabled,
+                          trap_off_enabled, (uint32_t)insn_off,
+                          epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2287,7 +2361,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_OUT: {
-        if (!emit_prim_out(out, out_cap, &out_len)) {
+        if (!emit_prim_out(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_enabled, (uint32_t)insn_off,
+                           epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2297,7 +2374,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_LOG: {
-        if (!emit_prim_log(out, out_cap, &out_len)) {
+        if (!emit_prim_log(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_enabled, (uint32_t)insn_off,
+                           epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2307,7 +2387,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_ALLOC: {
-        if (!emit_prim_alloc(out, out_cap, &out_len)) {
+        if (!emit_prim_alloc(out, out_cap, &out_len,
+                             trap_enabled,
+                             trap_off_enabled, (uint32_t)insn_off,
+                             epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2317,7 +2400,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_FREE: {
-        if (!emit_prim_free(out, out_cap, &out_len)) {
+        if (!emit_prim_free(out, out_cap, &out_len,
+                            trap_enabled,
+                            trap_off_enabled, (uint32_t)insn_off,
+                            epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;
@@ -2327,7 +2413,10 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         break;
       }
       case ZOP_PRIM_CTL: {
-        if (!emit_prim_ctl(out, out_cap, &out_len)) {
+        if (!emit_prim_ctl(out, out_cap, &out_len,
+                           trap_enabled,
+                           trap_off_enabled, (uint32_t)insn_off,
+                           epilogue_off)) {
           res.err = ZXC_ERR_OUTBUF;
           res.in_off = insn_off;
           res.out_len = out_len;

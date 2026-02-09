@@ -33,6 +33,8 @@ typedef enum zasm_rt_trap {
   /* Translation-time traps (reported when translation fails). */
   ZASM_RT_TRAP_UNSUPPORTED_OP = 4,
   ZASM_RT_TRAP_DECODE = 5,
+  /* ABI misuse / host-call failure. */
+  ZASM_RT_TRAP_ABI = 6,
 } zasm_rt_trap_t;
 
 /* Translation/execution target selection.
