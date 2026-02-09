@@ -64,6 +64,15 @@ typedef struct {
   uint32_t max_header_count;
   uint32_t max_inline_body_bytes;
   uint32_t max_inflight_requests;
+
+  uint32_t max_fetch_url_bytes;
+
+  // Multipart (Option A) bounds.
+  uint32_t mp_max_parts;
+  uint32_t mp_max_header_bytes;
+  uint32_t mp_max_header_count;
+  uint32_t mp_max_name_bytes;
+  uint32_t mp_max_filename_bytes;
 } zi_http_limits;
 
 static zi_http_limits load_limits(void) {
@@ -73,6 +82,14 @@ static zi_http_limits load_limits(void) {
   lim.max_header_count = env_u32("ZI_HTTP_MAX_HEADER_COUNT", 128u, 1u, 4096u);
   lim.max_inline_body_bytes = env_u32("ZI_HTTP_MAX_INLINE_BODY_BYTES", 1024u * 1024u, 0u, 64u * 1024u * 1024u);
   lim.max_inflight_requests = env_u32("ZI_HTTP_MAX_INFLIGHT_REQUESTS", 256u, 1u, 4096u);
+
+  lim.max_fetch_url_bytes = env_u32("ZI_HTTP_MAX_FETCH_URL_BYTES", 8192u, 256u, 1024u * 1024u);
+
+  lim.mp_max_parts = env_u32("ZI_HTTP_MAX_MULTIPART_PARTS", 128u, 1u, 65535u);
+  lim.mp_max_header_bytes = env_u32("ZI_HTTP_MAX_MULTIPART_HEADER_BYTES", 16384u, 256u, 1024u * 1024u);
+  lim.mp_max_header_count = env_u32("ZI_HTTP_MAX_MULTIPART_HEADER_COUNT", 64u, 1u, 4096u);
+  lim.mp_max_name_bytes = env_u32("ZI_HTTP_MAX_MULTIPART_NAME_BYTES", 256u, 1u, 65535u);
+  lim.mp_max_filename_bytes = env_u32("ZI_HTTP_MAX_MULTIPART_FILENAME_BYTES", 1024u, 1u, 1024u * 1024u);
   return lim;
 }
 
@@ -368,8 +385,12 @@ struct zi_http_multipart_iter {
   uint32_t rid;
   zi_http_body_stream *bs;
 
+  uint32_t max_parts;
   uint32_t max_header_bytes;
   uint32_t max_header_count;
+  uint32_t max_name_bytes;
+  uint32_t max_filename_bytes;
+  uint32_t parts_emitted;
 
   uint8_t *boundary;
   uint32_t boundary_len;
@@ -625,6 +646,14 @@ static int mp_parse_headers(zi_http_multipart_iter *it, zi_http_mp_hdr **out_hdr
           }
           uint32_t ln = (uint32_t)(q - s);
           if (ln) {
+            if (it->max_name_bytes && ln > it->max_name_bytes) {
+              for (uint32_t j = 0; j <= hcnt; j++) {
+                free(hdrs[j].name);
+                free(hdrs[j].val);
+              }
+              free(hdrs);
+              return 0;
+            }
             *out_name = (char *)malloc((size_t)ln + 1u);
             if (*out_name) {
               memcpy(*out_name, s, ln);
@@ -648,6 +677,14 @@ static int mp_parse_headers(zi_http_multipart_iter *it, zi_http_mp_hdr **out_hdr
           }
           uint32_t ln = (uint32_t)(q - s);
           if (ln) {
+            if (it->max_filename_bytes && ln > it->max_filename_bytes) {
+              for (uint32_t j = 0; j <= hcnt; j++) {
+                free(hdrs[j].name);
+                free(hdrs[j].val);
+              }
+              free(hdrs);
+              return 0;
+            }
             *out_filename = (char *)malloc((size_t)ln + 1u);
             if (*out_filename) {
               memcpy(*out_filename, s, ln);
@@ -944,7 +981,11 @@ static void close_req(zi_http_req *r) {
   r->is_multipart = 0;
   if (r->body_handle >= 3) {
     (void)zi_end(r->body_handle);
+    r->body_handle = 0;
+  } else if (r->body_stream) {
+    body_end(r->body_stream);
   }
+  r->body_stream = NULL;
   memset(r, 0, sizeof(*r));
   r->fd = -1;
 }
@@ -967,7 +1008,11 @@ static void close_req_no_resp_handle(zi_http_req *r) {
   r->is_multipart = 0;
   if (r->body_handle >= 3) {
     (void)zi_end(r->body_handle);
+    r->body_handle = 0;
+  } else if (r->body_stream) {
+    body_end(r->body_stream);
   }
+  r->body_stream = NULL;
   memset(r, 0, sizeof(*r));
   r->fd = -1;
   r->resp_body_handle = resp;
@@ -1415,13 +1460,6 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
       free(buf);
       return 0;
     }
-    body_handle = zi_handle25_alloc(&BODY_OPS, bs, ZI_H_READABLE | ZI_H_ENDABLE);
-    if (body_handle < 3) {
-      body_end(bs);
-      free(headers);
-      free(buf);
-      return 0;
-    }
     body_rem = rem;
   }
 
@@ -1441,16 +1479,14 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
   r->listener_id = listener_id;
   r->fd = conn_fd;
   r->body_remaining = body_rem;
-  r->body_handle = body_handle;
+  r->body_handle = 0;
   r->body_stream = NULL;
   r->is_multipart = 0;
   r->mp_boundary = NULL;
   r->mp_boundary_len = 0;
   r->mp = NULL;
 
-  if (body_kind == ZI_HTTP_BODY_STREAM) {
-    r->body_stream = bs;
-  }
+  if (body_kind == ZI_HTTP_BODY_STREAM) r->body_stream = bs;
 
   // If this is multipart/form-data, advertise MULTIPART and store boundary.
   if ((body_kind == ZI_HTTP_BODY_STREAM || body_kind == ZI_HTTP_BODY_INLINE) && content_type && content_type_len > 0) {
@@ -1484,23 +1520,15 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
               r->is_multipart = 1;
 
               if (body_kind == ZI_HTTP_BODY_INLINE) {
-                // Convert inline body to a readable handle backed by a prebuffer-only body stream.
+                // Convert inline body to a prebuffer-only body stream for the multipart iterator.
                 zi_http_body_stream *mbs = body_stream_new(-1, 0, body_inline, body_inline_len, 0);
                 if (mbs) {
-                  zi_handle_t mh = zi_handle25_alloc(&BODY_OPS, mbs, ZI_H_READABLE | ZI_H_ENDABLE);
-                  if (mh >= 3) {
-                    // Replace inline payload with handle-based body.
-                    if (body_inline) free(body_inline);
-                    body_inline = NULL;
-                    body_inline_len = 0;
-                    r->body_handle = mh;
-                    r->body_stream = mbs;
-                    body_handle = mh;
-                    bs = mbs;
-                    body_kind = ZI_HTTP_BODY_MULTIPART;
-                  } else {
-                    body_end(mbs);
-                  }
+                  if (body_inline) free(body_inline);
+                  body_inline = NULL;
+                  body_inline_len = 0;
+                  r->body_stream = mbs;
+                  bs = mbs;
+                  body_kind = ZI_HTTP_BODY_MULTIPART;
                 }
               } else {
                 body_kind = ZI_HTTP_BODY_MULTIPART;
@@ -1510,6 +1538,31 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
         }
       }
     }
+  }
+
+  // If this is a normal streamed body, expose it as a readable handle.
+  // For MULTIPART we intentionally do not expose a raw body handle (guests must use MULTIPART_*).
+  if (body_kind == ZI_HTTP_BODY_STREAM) {
+    if (!r->body_stream) {
+      free(headers);
+      free(buf);
+      close_req(r);
+      return 0;
+    }
+    body_handle = zi_handle25_alloc(&BODY_OPS, r->body_stream, ZI_H_READABLE | ZI_H_ENDABLE);
+    if (body_handle < 3) {
+      free(headers);
+      free(buf);
+      close_req(r);
+      return 0;
+    }
+    r->body_handle = body_handle;
+  } else if (body_kind == ZI_HTTP_BODY_MULTIPART) {
+    // No raw body handle.
+    body_handle = 0;
+    r->body_handle = 0;
+  } else {
+    r->body_handle = body_handle;
   }
 
   const uint8_t scheme[] = {'h', 't', 't', 'p'};
@@ -2216,8 +2269,12 @@ static int dispatch_multipart_begin(zi_http_cap_ctx *c, uint32_t rid, const uint
   if (!it) return set_out_frame_err(c, ZI_HTTP_OP_MULTIPART_BEGIN, rid, "t_http_oom", "oom");
   it->rid = rid;
   it->bs = r->body_stream;
-  it->max_header_bytes = c->lim.max_header_bytes;
-  it->max_header_count = c->lim.max_header_count;
+  it->max_parts = c->lim.mp_max_parts;
+  it->max_header_bytes = c->lim.mp_max_header_bytes;
+  it->max_header_count = c->lim.mp_max_header_count;
+  it->max_name_bytes = c->lim.mp_max_name_bytes;
+  it->max_filename_bytes = c->lim.mp_max_filename_bytes;
+  it->parts_emitted = 0;
 
   it->boundary_len = r->mp_boundary_len;
   it->boundary = (uint8_t *)malloc((size_t)it->boundary_len);
@@ -2265,6 +2322,9 @@ static int dispatch_multipart_next(zi_http_cap_ctx *c, uint32_t rid, const uint8
     return set_out_frame_ok(c, ZI_HTTP_OP_MULTIPART_NEXT, rid, payload, 4);
   }
   if (it->part_open) return set_out_frame_err(c, ZI_HTTP_OP_MULTIPART_NEXT, rid, "t_http_invalid", "previous part still open");
+  if (it->max_parts && it->parts_emitted >= it->max_parts) {
+    return set_out_frame_err(c, ZI_HTTP_OP_MULTIPART_NEXT, rid, "t_http_invalid", "too many multipart parts");
+  }
 
   if (it->need_boundary) {
     if (!mp_consume_boundary(it, 0)) return set_out_frame_err(c, ZI_HTTP_OP_MULTIPART_NEXT, rid, "t_http_invalid", "bad boundary");
@@ -2382,6 +2442,7 @@ static int dispatch_multipart_next(zi_http_cap_ctx *c, uint32_t rid, const uint8
   mp_free_hdrs(hdrs, hcnt);
 
   int ok = set_out_frame_ok(c, ZI_HTTP_OP_MULTIPART_NEXT, rid, payload, payload_len);
+  if (ok) it->parts_emitted++;
   free(payload);
   return ok;
 }
@@ -2653,7 +2714,7 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
 
   uint32_t url_len = zi_zcl1_read_u32(p + off);
   off += 4;
-  if (url_len == 0 || url_len > 8192u) {
+  if (url_len == 0 || url_len > c->lim.max_fetch_url_bytes) {
     return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_invalid", "bad url_len");
   }
   if (off + url_len + 4u > n) return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_invalid", "bad url");

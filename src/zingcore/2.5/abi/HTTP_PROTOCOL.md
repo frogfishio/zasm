@@ -263,7 +263,9 @@ Body descriptor:
 - If `body_kind==2` (STREAM):
   - `i32 body_handle` (readable). Read yields body bytes; EOF indicates end-of-body.
 - If `body_kind==3` (MULTIPART):
-  - `i32 body_handle` (readable). The guest SHOULD use MULTIPART_* ops; raw reads are allowed but will return the original multipart bytes.
+  - `i32 body_handle` MUST be `0`.
+  - The guest MUST use MULTIPART_* ops to consume the request body.
+  - Rationale: allowing both raw reads and multipart iteration would permit double-consumption / ambiguous ownership of the underlying stream.
 
 ### Request Limits (recommended)
 
