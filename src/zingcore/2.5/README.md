@@ -226,6 +226,14 @@ Open semantics:
   - `u32 port` (1..65535)
   - `u32 flags` (reserved; must be 0)
 
+I/O semantics:
+
+- TCP handles use nonblocking sockets.
+- While the connection is still being established, `zi_read`/`zi_write` MAY return `ZI_E_AGAIN`.
+  Guests SHOULD wait via `sys/loop` watching the TCP handle for `writable` readiness, then retry.
+- For data transfer, `zi_read`/`zi_write` return `ZI_E_AGAIN` on would-block; guests SHOULD wait via
+  `sys/loop` watching `readable`/`writable` readiness, then retry.
+
 Sandboxing via `ZI_NET_ALLOW`:
 
 - If `ZI_NET_ALLOW` is unset/empty: only loopback hosts are allowed (`localhost`, `127.0.0.1`, `::1`).

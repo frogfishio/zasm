@@ -19,6 +19,7 @@
 
 typedef struct {
   int fd;
+  int connecting;
 } zi_tcp_stream;
 
 static void set_nonblocking_best_effort(int fd) {
@@ -34,6 +35,43 @@ static int tcp_get_fd(void *ctx, int *out_fd) {
   if (s->fd < 0) return 0;
   if (out_fd) *out_fd = s->fd;
   return 1;
+}
+
+static int32_t map_errno_to_zi(int e);
+
+static int32_t tcp_ensure_connected(zi_tcp_stream *s) {
+  if (!s) return ZI_E_INTERNAL;
+  if (!s->connecting) return 0;
+  if (s->fd < 0) return ZI_E_CLOSED;
+
+  int so_err = 0;
+  socklen_t len = (socklen_t)sizeof(so_err);
+  if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &so_err, &len) != 0) {
+    return map_errno_to_zi(errno);
+  }
+  if (so_err == 0) {
+    // Some platforms may report SO_ERROR=0 before the connection is fully established.
+    // Confirm connectivity via getpeername.
+    struct sockaddr_storage ss;
+    socklen_t slen = (socklen_t)sizeof(ss);
+    if (getpeername(s->fd, (struct sockaddr *)&ss, &slen) == 0) {
+      s->connecting = 0;
+      return 0;
+    }
+    if (errno == ENOTCONN) return ZI_E_AGAIN;
+    return map_errno_to_zi(errno);
+  }
+
+  // Still in progress.
+  if (so_err == EINPROGRESS
+#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EINPROGRESS)
+      || so_err == EWOULDBLOCK
+#endif
+  ) {
+    return ZI_E_AGAIN;
+  }
+
+  return map_errno_to_zi(so_err);
 }
 
 static int32_t map_errno_to_zi(int e) {
@@ -64,6 +102,9 @@ static int32_t tcp_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
   if (!s) return ZI_E_INTERNAL;
   if (cap == 0) return 0;
 
+  int32_t cr = tcp_ensure_connected(s);
+  if (cr != 0) return cr;
+
   const zi_mem_v1 *mem = zi_runtime25_mem();
   if (!mem || !mem->map_rw) return ZI_E_NOSYS;
   if (dst_ptr == 0) return ZI_E_BOUNDS;
@@ -80,6 +121,9 @@ static int32_t tcp_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
   zi_tcp_stream *s = (zi_tcp_stream *)ctx;
   if (!s) return ZI_E_INTERNAL;
   if (len == 0) return 0;
+
+  int32_t cr = tcp_ensure_connected(s);
+  if (cr != 0) return cr;
 
   const zi_mem_v1 *mem = zi_runtime25_mem();
   if (!mem || !mem->map_ro) return ZI_E_NOSYS;
@@ -331,6 +375,9 @@ zi_handle_t zi_net_tcp25_open_from_params(zi_ptr_t params_ptr, zi_size32_t param
       continue;
     }
 
+    // Make connect + subsequent I/O nonblocking so callers can rely on ZI_E_AGAIN.
+    set_nonblocking_best_effort(fd);
+
 #if defined(__APPLE__) && defined(SO_NOSIGPIPE)
     {
       int one = 1;
@@ -338,24 +385,34 @@ zi_handle_t zi_net_tcp25_open_from_params(zi_ptr_t params_ptr, zi_size32_t param
     }
 #endif
 
-    if (connect(fd, cur->ai_addr, cur->ai_addrlen) == 0) {
-      last_zi = 0;
+    for (;;) {
+      if (connect(fd, cur->ai_addr, cur->ai_addrlen) == 0) {
+        last_zi = 0;
+        break;
+      }
+
+      if (errno == EINTR) continue;
+      if (errno == EINPROGRESS
+#if defined(EWOULDBLOCK) && (EWOULDBLOCK != EINPROGRESS)
+          || errno == EWOULDBLOCK
+#endif
+      ) {
+        last_zi = ZI_E_AGAIN;
+        break;
+      }
+
+      last_zi = map_errno_to_zi(errno);
+      (void)close(fd);
+      fd = -1;
       break;
     }
 
-    last_zi = map_errno_to_zi(errno);
-    (void)close(fd);
-    fd = -1;
+    if (fd >= 0) break;
   }
 
   freeaddrinfo(ai);
 
-  if (fd < 0) {
-    return (zi_handle_t)last_zi;
-  }
-
-  // Make subsequent I/O nonblocking so callers can rely on ZI_E_AGAIN.
-  set_nonblocking_best_effort(fd);
+  if (fd < 0) return (zi_handle_t)last_zi;
 
   zi_tcp_stream *s = (zi_tcp_stream *)calloc(1, sizeof(*s));
   if (!s) {
@@ -363,6 +420,7 @@ zi_handle_t zi_net_tcp25_open_from_params(zi_ptr_t params_ptr, zi_size32_t param
     return (zi_handle_t)ZI_E_OOM;
   }
   s->fd = fd;
+  s->connecting = (last_zi == ZI_E_AGAIN) ? 1 : 0;
 
   zi_handle_t h = zi_handle25_alloc_with_poll(&tcp_ops, &tcp_poll_ops, s, ZI_H_READABLE | ZI_H_WRITABLE | ZI_H_ENDABLE);
   if (h == 0) {

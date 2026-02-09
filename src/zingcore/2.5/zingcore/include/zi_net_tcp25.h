@@ -17,6 +17,11 @@ extern "C" {
 // This cap is opened via zi_cap_open() and yields a stream handle usable with:
 //   zi_read / zi_write / zi_end
 //
+// Sockets are nonblocking:
+// - zi_read/zi_write return ZI_E_AGAIN on would-block.
+// - While connect is still in progress, zi_read/zi_write MAY return ZI_E_AGAIN;
+//   guests should wait for writability via sys/loop and retry.
+//
 // Open params are a packed little-endian struct (20 bytes):
 //   u64 host_ptr  (UTF-8 host bytes, not NUL-terminated)
 //   u32 host_len
