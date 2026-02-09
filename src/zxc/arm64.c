@@ -222,6 +222,14 @@ static uint32_t enc_cmp_reg(int is64, uint8_t rn, uint8_t rm) {
          ((uint32_t)rm << 16) | ((uint32_t)rn << 5);
 }
 
+static uint32_t enc_clz(int is64, uint8_t rd, uint8_t rn) {
+  return (is64 ? 0xDAC01000u : 0x5AC01000u) | ((uint32_t)rn << 5) | rd;
+}
+
+static uint32_t enc_rbit(int is64, uint8_t rd, uint8_t rn) {
+  return (is64 ? 0xDAC00000u : 0x5AC00000u) | ((uint32_t)rn << 5) | rd;
+}
+
 static uint32_t enc_cset(int is64, uint8_t rd, uint8_t cond) {
   uint32_t base = is64 ? 0x9A9F07E0u : 0x1A9F07E0u;
   uint8_t inv = (uint8_t)(cond ^ 1u);
@@ -507,6 +515,31 @@ static int zxc_arm64_size_at(const uint8_t* in, size_t in_len, size_t off,
   size_t n_off = off + 4;
 
   switch (op) {
+    case 0x35: /* CLZ */
+    case 0x45: /* CLZ64 */
+      sz = 4;
+      break;
+    case 0x36: /* CTZ */
+    case 0x46: /* CTZ64 */
+      sz = 8;
+      break;
+    case 0x37: /* POPC */
+    case 0x47: /* POPC64 */
+      {
+        int is64p = (op == 0x47);
+        uint64_t mask1 = is64p ? 0x5555555555555555ull : 0x55555555ull;
+        uint64_t mask2 = is64p ? 0x3333333333333333ull : 0x33333333ull;
+        uint64_t mask3 = is64p ? 0x0F0F0F0F0F0F0F0Full : 0x0F0F0F0Full;
+        uint64_t maskf = is64p ? 0x7Full : 0x3Full;
+
+        /* POPC emission uses 4 constant materializations (mask1, mask2, mask3, final mask)
+           plus a fixed number of ALU/shift instructions. Keep in sync with translate(). */
+        size_t mov_sz = mov_imm64_size(mask1) + mov_imm64_size(mask2) +
+                        mov_imm64_size(mask3) + mov_imm64_size(maskf);
+        size_t fixed_insn = is64p ? 23u : 20u;
+        sz = mov_sz + fixed_insn * 4u;
+      }
+      break;
     case ZOP_DIVS:
     case ZOP_DIVU:
     case ZOP_DIVS64:
@@ -751,6 +784,225 @@ zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
         /* Read the dropped register but discard the value (matches WASM local.get + drop). */
         enc = enc_orr_reg(1, 31, rd_m, 31);
         break;
+      case 0x35: /* CLZ */
+        enc = enc_clz(0, rd_m, rd_m);
+        break;
+      case 0x45: /* CLZ64 */
+        enc = enc_clz(1, rd_m, rd_m);
+        break;
+      case 0x36: /* CTZ */
+        if (!emit_u32(out, out_cap, &out_len, enc_rbit(0, ZXC_SCRATCH, rd_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_clz(0, rd_m, ZXC_SCRATCH);
+        break;
+      case 0x46: /* CTZ64 */
+        if (!emit_u32(out, out_cap, &out_len, enc_rbit(1, ZXC_SCRATCH, rd_m))) {
+          res.err = ZXC_ERR_OUTBUF;
+          res.in_off = insn_off;
+          res.out_len = out_len;
+          return res;
+        }
+        enc = enc_clz(1, rd_m, ZXC_SCRATCH);
+        break;
+      case 0x37: /* POPC */
+      case 0x47: /* POPC64 */
+        {
+          int is64p = (op == 0x47);
+          uint8_t x = rd_m;
+          uint8_t t = ZXC_SCRATCH;
+          uint8_t sh = ZXC_SCRATCH2;
+          uint8_t m1 = ZXC_SCRATCH3;
+          uint8_t m2 = ZXC_SCRATCH4;
+
+          uint64_t mask1 = is64p ? 0x5555555555555555ull : 0x55555555ull;
+          uint64_t mask2 = is64p ? 0x3333333333333333ull : 0x33333333ull;
+          uint64_t mask3 = is64p ? 0x0F0F0F0F0F0F0F0Full : 0x0F0F0F0Full;
+          uint64_t maskf = is64p ? 0x7Full : 0x3Full;
+
+          if (!emit_mov_imm64(out, out_cap, &out_len, m1, mask1)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_mov_imm64(out, out_cap, &out_len, m2, mask2)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = x - ((x >> 1) & mask1) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, t, t, m1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_sub_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = (x & mask2) + ((x >> 2) & mask2) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, t, t, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, sh, x, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, sh, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x = (x + (x >> 4)) & mask3 */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 4))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_mov_imm64(out, out_cap, &out_len, m1, mask3)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, x, x, m1))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          /* x += x>>8; x += x>>16; (x += x>>32 for 64-bit) */
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 8))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 16))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          if (is64p) {
+            if (!emit_u32(out, out_cap, &out_len, enc_add_imm(is64p, sh, 31, 32))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_lsrv(is64p, t, x, sh))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+            if (!emit_u32(out, out_cap, &out_len, enc_add_reg(is64p, x, x, t))) {
+              res.err = ZXC_ERR_OUTBUF;
+              res.in_off = insn_off;
+              res.out_len = out_len;
+              return res;
+            }
+          }
+
+          if (!emit_mov_imm64(out, out_cap, &out_len, m2, maskf)) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+          if (!emit_u32(out, out_cap, &out_len, enc_and_reg(is64p, x, x, m2))) {
+            res.err = ZXC_ERR_OUTBUF;
+            res.in_off = insn_off;
+            res.out_len = out_len;
+            return res;
+          }
+
+          enc = 0;
+          off += 4;
+          continue;
+        }
       case ZOP_ADD:   is64 = 0; enc = enc_add_reg(is64, rd_m, rs1_m, rs2_m); break;
       case ZOP_SUB:   is64 = 0; enc = enc_sub_reg(is64, rd_m, rs1_m, rs2_m); break;
       case ZOP_MUL:   is64 = 0; enc = enc_madd(is64, rd_m, rs1_m, rs2_m, 31); break;

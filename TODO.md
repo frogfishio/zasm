@@ -55,7 +55,7 @@
     - [ ] Compare against a reference runner (choose one):
       - [x] WASM path: `zrun` (behavioral oracle for ABI-visible semantics)
       - [ ] Interpreter path: `zem` (only where it matches runtime semantics; do not treat as VM design source)
-      - [x] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log) + selected fixtures (currently: ret_only + hello + cat + upper + alloc + isa_smoke + log)
+      - [x] Run over example corpus (hello/cat/upper/alloc/isa_smoke/log/bytes/loop/arithmetic) + selected fixtures (currently: ret_only + hello + cat + upper + alloc + isa_smoke + log + bytes + loop + arithmetic)
     - [ ] Add minimization hook (optional) for shrinking divergent cases
 
   - [x] Fix arm64 bounds-check trailer (was trapping unconditionally due to `b +1; brk` sequence)
