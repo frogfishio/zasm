@@ -34,14 +34,17 @@ run_case() {
   fi
 
   if [[ -n "$expect_err" ]]; then
-    if ! grep -Fxq "$expect_err" "$err"; then
-      echo "jit_traps_smoke: $name: stderr mismatch" >&2
-      echo "want:" >&2
-      printf '%s\n' "$expect_err" >&2
-      echo "got:" >&2
-      cat "$err" >&2
-      exit 1
-    fi
+    while IFS= read -r want_line; do
+      [[ -z "$want_line" ]] && continue
+      if ! grep -Fxq "$want_line" "$err"; then
+        echo "jit_traps_smoke: $name: stderr mismatch" >&2
+        echo "missing line:" >&2
+        printf '%s\n' "$want_line" >&2
+        echo "got:" >&2
+        cat "$err" >&2
+        exit 1
+      fi
+    done <<< "$expect_err"
   fi
 
   if [[ -s "$out" ]]; then
@@ -62,7 +65,7 @@ cat > build/jit_traps/div0.opcodes.jsonl <<'EOF'
 EOF
 
 "$BIN_DIR/zop" --container build/jit_traps/div0.opcodes.jsonl > build/jit_traps/div0.zasm.bin
-run_case "div0" 1 "zrt: trap: division by zero"
+run_case "div0" 1 $'zrt: trap: division by zero\ndiag: exec: off=16'
 
 # Case: out-of-bounds memory access
 cat > build/jit_traps/oob.opcodes.jsonl <<'EOF'
@@ -72,6 +75,6 @@ cat > build/jit_traps/oob.opcodes.jsonl <<'EOF'
 EOF
 
 "$BIN_DIR/zop" --container build/jit_traps/oob.opcodes.jsonl > build/jit_traps/oob.zasm.bin
-run_case "oob" 1 "zrt: trap: out of bounds memory access"
+run_case "oob" 1 $'zrt: trap: out of bounds memory access\ndiag: exec: off=8'
 
 echo "jit_traps_smoke: all cases passed"

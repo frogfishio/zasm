@@ -47,8 +47,9 @@
       - [ ] Unsupported opcode (structured trap)
       - [ ] ABI misuse / host-call failure (structured trap)
       - [ ] OOM (structured trap)
-    - [ ] Extend runtime diagnostics to include trap category + best-effort PC/offset
+    - [x] Extend runtime diagnostics to include trap category + best-effort PC/offset
       - [x] Translation failure diagnostics include err/off/opcode/insn
+      - [x] Exec trap diagnostics include best-effort trap offset (arm64)
     - [ ] Ensure all failures are fail-closed (no host crashes, no UB)
   - [ ] Implement code cache keyed by (module hash, mem_base, mem_size, policy flags)
     - [ ] Define cache key precisely (target arch + any codegen-affecting policy bits)

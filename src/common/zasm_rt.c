@@ -52,6 +52,7 @@ struct zasm_rt_instance {
 
   uint64_t fuel_remaining;
   zasm_rt_trap_t trap;
+  uint32_t trap_off;
 
   uint8_t* jit_mem;
   size_t jit_cap;
@@ -173,6 +174,7 @@ static void diag_reset(zasm_rt_diag_t* diag) {
   diag->err = ZASM_RT_OK;
   diag->bin_err = ZASM_BIN_OK;
   diag->verify_err = ZASM_VERIFY_OK;
+  diag->trap_off = UINT32_MAX;
   diag->bin_tag[0] = '\0';
 }
 
@@ -530,25 +532,27 @@ zasm_rt_err_t zasm_rt_instance_create(zasm_rt_engine_t* engine,
   {
     uint64_t fuel_ptr = 0;
     uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+    uint64_t trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
     if (inst->policy.fuel != 0) {
       fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
     }
     tr = zxc_arm64_translate(code, code_len,
                              inst->jit_mem, inst->jit_cap,
                              inst->policy.mem_base, inst->policy.mem_size,
-                             fuel_ptr, trap_ptr);
+                             fuel_ptr, trap_ptr, trap_off_ptr);
   }
 #elif defined(__x86_64__) || defined(_M_X64)
   {
     uint64_t fuel_ptr = 0;
     uint64_t trap_ptr = (uint64_t)(uintptr_t)&inst->trap;
+    uint64_t trap_off_ptr = (uint64_t)(uintptr_t)&inst->trap_off;
     if (inst->policy.fuel != 0) {
       fuel_ptr = (uint64_t)(uintptr_t)&inst->fuel_remaining;
     }
     tr = zxc_x86_64_translate(code, code_len,
                               inst->jit_mem, inst->jit_cap,
                               inst->policy.mem_base, inst->policy.mem_size,
-                              fuel_ptr, trap_ptr);
+                              fuel_ptr, trap_ptr, trap_off_ptr);
   }
 #else
   (void)tr;
@@ -600,6 +604,7 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   if (!instance->jit_mem || instance->jit_len == 0) return diag_fail(diag, ZASM_RT_ERR_NULL);
 
   instance->trap = ZASM_RT_TRAP_NONE;
+  instance->trap_off = UINT32_MAX;
   instance->fuel_remaining = instance->policy.fuel;
 
   uint8_t* mem = (uint8_t*)(uintptr_t)instance->policy.mem_base;
@@ -636,7 +641,10 @@ zasm_rt_err_t zasm_rt_instance_run(zasm_rt_instance_t* instance, zasm_rt_diag_t*
   entry((int32_t)instance->policy.req_handle, (int32_t)instance->policy.res_handle, &g_sys);
 
   if (instance->trap != ZASM_RT_TRAP_NONE) {
-    if (diag) diag->trap = instance->trap;
+    if (diag) {
+      diag->trap = instance->trap;
+      diag->trap_off = instance->trap_off;
+    }
     return diag_fail(diag, ZASM_RT_ERR_EXEC_FAIL);
   }
 

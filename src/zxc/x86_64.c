@@ -61,11 +61,13 @@ static int emit_op_rr(uint8_t* out, size_t out_cap, size_t* out_len,
 zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
                                   uint8_t* out, size_t out_cap,
                                   uint64_t mem_base, uint64_t mem_size,
-                                  uint64_t fuel_ptr, uint64_t trap_ptr) {
+                                  uint64_t fuel_ptr, uint64_t trap_ptr,
+                                  uint64_t trap_off_ptr) {
   (void)mem_base;
   (void)mem_size;
   (void)fuel_ptr;
   (void)trap_ptr;
+  (void)trap_off_ptr;
   zxc_result_t res;
   memset(&res, 0, sizeof(res));
 

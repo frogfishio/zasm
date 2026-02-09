@@ -90,6 +90,7 @@ typedef struct zasm_rt_diag {
 
   /* Optional exec detail (when err==EXEC_FAIL). */
   zasm_rt_trap_t trap;
+  uint32_t trap_off;
 
   /* Optional container-parse detail (when err==BAD_CONTAINER). */
   zasm_bin_err_t bin_err;

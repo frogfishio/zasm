@@ -49,11 +49,13 @@ typedef struct zxc_zi_syscalls_v1 {
 zxc_result_t zxc_arm64_translate(const uint8_t* in, size_t in_len,
                                  uint8_t* out, size_t out_cap,
                                  uint64_t mem_base, uint64_t mem_size,
-                                 uint64_t fuel_ptr, uint64_t trap_ptr);
+                                 uint64_t fuel_ptr, uint64_t trap_ptr,
+                                 uint64_t trap_off_ptr);
 zxc_result_t zxc_x86_64_translate(const uint8_t* in, size_t in_len,
                                   uint8_t* out, size_t out_cap,
                                   uint64_t mem_base, uint64_t mem_size,
-                                  uint64_t fuel_ptr, uint64_t trap_ptr);
+                                  uint64_t fuel_ptr, uint64_t trap_ptr,
+                                  uint64_t trap_off_ptr);
 
 #ifdef __cplusplus
 }

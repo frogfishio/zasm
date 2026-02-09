@@ -125,6 +125,12 @@ static void print_diag(const zasm_rt_diag_t *d) {
             d->translate_off, (unsigned)d->translate_opcode,
             (unsigned)d->translate_insn);
   }
+
+  if (d->err == ZASM_RT_ERR_EXEC_FAIL && d->trap != ZASM_RT_TRAP_NONE) {
+    if (d->trap_off != UINT32_MAX) {
+      fprintf(stderr, "diag: exec: off=%u\n", (unsigned)d->trap_off);
+    }
+  }
 }
 
 static uint64_t monotonic_ms(void) {
@@ -214,24 +220,28 @@ static int run_guest(const char *path, int safe_mode, int allow_primitives, uint
       switch (diag.trap) {
         case ZASM_RT_TRAP_FUEL:
           fprintf(stderr, "zrt: trap: fuel exhausted\n");
+          print_diag(&diag);
           zasm_rt_instance_destroy(inst);
           zasm_rt_module_destroy(module);
           zasm_rt_engine_destroy(engine);
           return 1;
         case ZASM_RT_TRAP_OOB:
           fprintf(stderr, "zrt: trap: out of bounds memory access\n");
+          print_diag(&diag);
           zasm_rt_instance_destroy(inst);
           zasm_rt_module_destroy(module);
           zasm_rt_engine_destroy(engine);
           return 1;
         case ZASM_RT_TRAP_DIV0:
           fprintf(stderr, "zrt: trap: division by zero\n");
+          print_diag(&diag);
           zasm_rt_instance_destroy(inst);
           zasm_rt_module_destroy(module);
           zasm_rt_engine_destroy(engine);
           return 1;
         default:
           fprintf(stderr, "zrt: trap\n");
+          print_diag(&diag);
           zasm_rt_instance_destroy(inst);
           zasm_rt_module_destroy(module);
           zasm_rt_engine_destroy(engine);

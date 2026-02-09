@@ -414,9 +414,9 @@ int main(int argc, char** argv) {
   zxc_result_t res;
   if (arch) {
     if (strcmp(arch, "arm64") == 0) {
-      res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0);
+      res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0, 0);
     } else if (strcmp(arch, "x86_64") == 0) {
-      res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0);
+      res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0, 0);
     } else {
       diag_emit("error", NULL, 0, "unknown arch: %s", arch);
       free(out);
@@ -425,9 +425,9 @@ int main(int argc, char** argv) {
     }
   } else {
 #if defined(__aarch64__) || defined(__arm64__)
-  res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0);
+  res = zxc_arm64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0, 0);
 #elif defined(__x86_64__) || defined(_M_X64)
-    res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0);
+    res = zxc_x86_64_translate(code_in, code_in_len, out, out_cap, mem_base, mem_size, 0, 0, 0);
 #else
     diag_emit("error", NULL, 0, "unsupported host architecture");
     free(out);
