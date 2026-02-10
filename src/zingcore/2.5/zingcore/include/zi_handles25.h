@@ -12,6 +12,8 @@ typedef struct zi_handle_ops_v1 {
   int32_t (*read)(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap);
   int32_t (*write)(void *ctx, zi_ptr_t src_ptr, zi_size32_t len);
   int32_t (*end)(void *ctx);
+  // Optional per-handle control operations (invoked via zi_ctl op ZI_CTL_OP_HANDLE_OP).
+  int32_t (*ctl)(void *ctx, uint32_t op, zi_ptr_t arg_ptr, zi_size32_t arg_len);
 } zi_handle_ops_v1;
 
 // Optional internal poll interface for integrating handles with sys/loop.

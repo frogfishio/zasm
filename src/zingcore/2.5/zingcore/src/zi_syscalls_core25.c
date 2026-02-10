@@ -7,6 +7,7 @@
 #include "zi_zcl1.h"
 
 #include <string.h>
+#include <stdio.h>
 
 uint32_t zi_abi_version(void) {
   const zi_host_v1 *host = zi_runtime25_host();
@@ -111,6 +112,37 @@ int32_t zi_ctl(zi_ptr_t req_ptr, zi_size32_t req_len, zi_ptr_t resp_ptr, zi_size
       return ZI_E_NOSYS;
     }
     return ctl_caps_list(resp, resp_cap, fr.op, fr.rid);
+  }
+
+  // Generic per-handle ops.
+  if (fr.op == (uint16_t)ZI_CTL_OP_HANDLE_OP) {
+    // payload: u32 version, u32 handle, u32 op, u32 reserved
+    if (!fr.payload || fr.payload_len < 16u) {
+      return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_bad_handle_op", "short payload");
+    }
+    uint32_t ver = zi_zcl1_read_u32(fr.payload + 0);
+    zi_handle_t h = (zi_handle_t)zi_zcl1_read_u32(fr.payload + 4);
+    uint32_t hop = zi_zcl1_read_u32(fr.payload + 8);
+    if (ver != 1u) {
+      return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_bad_handle_op", "bad version");
+    }
+
+    const zi_handle_ops_v1 *ops = NULL;
+    void *ctx = NULL;
+    if (!zi_handle25_lookup(h, &ops, &ctx, NULL) || !ops) {
+      return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_bad_handle", "unknown handle");
+    }
+    if (!ops->ctl) {
+      return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_nosys", "handle op not supported");
+    }
+
+    int32_t r = ops->ctl(ctx, hop, 0, 0);
+    if (r < 0) {
+      char msg[64];
+      snprintf(msg, sizeof(msg), "handle op failed: %d", r);
+      return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_handle_op_failed", msg);
+    }
+    return zi_zcl1_write_ok(resp, resp_cap, fr.op, fr.rid, NULL, 0);
   }
 
   return zi_zcl1_write_error(resp, resp_cap, fr.op, fr.rid, "t_ctl_unknown_op", "unknown operation");

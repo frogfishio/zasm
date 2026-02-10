@@ -6,292 +6,182 @@
 
 ## Overview
 
-The `net/tcp` capability provides sandboxed TCP networking to guest programs. It implements the standard handle stream protocol (`zi_read`, `zi_write`, `zi_end`) over TCP sockets opened via ZCL1 control operations.
+The `net/tcp` capability provides sandboxed TCP sockets to guest programs.
 
-**Key Design Principles:**
-- **Sandbox First:** All network access is restricted by the `ZI_NET_ALLOW` environment variable
-- **Stream Semantics:** Sockets are accessed via standard handle operations (read/write/end)
-- **ZCL1 Control Plane:** Socket open/connect operations use ZCL1 for structured requests
-- **Client-Only:** v1 supports outbound connections only (no listening/accept)
+- The cap is opened with `zi_cap_open()` and returns a pollable handle.
+- The returned handle implements the standard stream operations: `zi_read`, `zi_write`, `zi_end`.
+- All socket I/O is nonblocking; would-block returns `ZI_E_AGAIN`.
+- `sys/loop@v1` is used for readiness (WATCH/POLL), then the guest retries.
+
+This document describes the on-wire ABI for opening sockets and (in listener mode) accepting connections.
 
 ## Sandbox Model
 
-### ZI_NET_ALLOW Environment Variable
+Sandboxing is enforced at open time.
 
-The runtime **MUST** enforce network sandboxing via the `ZI_NET_ALLOW` environment variable:
+### Outbound connections: `ZI_NET_ALLOW`
 
-```bash
-# Allow specific domains
-ZI_NET_ALLOW="example.com,*.api.service.com" zrun program.wat
+Outbound connect attempts are checked against the `ZI_NET_ALLOW` allowlist.
 
-# Allow IP ranges (CIDR notation)
-ZI_NET_ALLOW="192.168.1.0/24,10.0.0.5" zrun program.wat
+### Listening sockets: `ZI_NET_LISTEN_ALLOW`
 
-# Wildcard (allow all - USE WITH CAUTION)
-ZI_NET_ALLOW="*" zrun program.wat
-```
+Listener (bind+listen) opens are checked against the `ZI_NET_LISTEN_ALLOW` allowlist.
 
-**Semantics:**
-- Comma-separated list of allowed connection targets
-- Each entry can be:
-  - Domain name (exact match): `example.com`
-  - Wildcard domain (prefix match): `*.example.com`
-  - IPv4 address: `192.0.2.1`
-  - IPv4 CIDR range: `192.0.2.0/24`
-  - IPv6 address: `2001:db8::1`
-  - IPv6 CIDR range: `2001:db8::/32`
-  - Wildcard `*` (allow all)
-- If `ZI_NET_ALLOW` is unset or empty, the capability **MUST NOT** be registered
-- Connection attempts to disallowed targets **MUST** fail with `EACCES`
+### Allowlist syntax
 
-### DNS Resolution
+Both `ZI_NET_ALLOW` and `ZI_NET_LISTEN_ALLOW` use the same syntax:
 
-- Implementations **MUST** resolve domain names to IP addresses before connection
-- Implementations **MUST** validate resolved IP addresses against `ZI_NET_ALLOW`
-- DNS resolution happens **within** the sandbox check (prevent DNS rebinding attacks)
-- Implementations **SHOULD** cache DNS results (but respect TTL)
+- If unset or empty: only loopback hosts are permitted (`localhost`, `127.0.0.1`, `::1`, `[::1]`).
+- If set to `any`: any host:port is permitted.
+- Otherwise: comma-separated tokens. Supported tokens:
+  - `loopback` (allows loopback hosts)
+  - `host:*` (allows all ports for a specific host)
+  - `host:port` (allows a specific port)
+  - `*:*` (allows any host and any port)
 
-### Port Restrictions
+Host comparisons are case-insensitive and accept IPv6 bracket form (e.g. `[::1]`).
 
-- Implementations **MAY** impose port restrictions (e.g., block privileged ports <1024)
-- Default policy: **allow all ports** unless restricted by platform policy
-- Port restrictions are **independent** of `ZI_NET_ALLOW` sandbox
+For IPv6 literals, the runtime strips a single pair of surrounding brackets (`[... ]`) before allowlist matching and before passing the host to `getaddrinfo`.
 
-## ZCL1 Operations
+### Important: what is (and is not) validated
 
-All operations use the standard ZCL1 frame format (see `ZCL1_PROTOCOL.md`).
+The allowlist is matched against the **host string provided in the open params** plus the port.
 
-### 1. CONNECT (op=1)
+- It does **not** currently support CIDR ranges or IP-class allow rules.
+- For DNS names, the runtime does **not** currently validate the resolved IPs against an IP-based allowlist (because the allowlist is not IP-based).
+- Name resolution is performed via the platform resolver (`getaddrinfo`) after the allowlist check.
 
-Opens a TCP connection and returns a handle for streaming I/O.
+Security implication: if you allow a DNS name in `ZI_NET_ALLOW`, you are trusting DNS for that name (no separate “DNS rebinding protection” is provided by this cap as specified/implemented here).
 
-**Request Payload:**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 2    | port        | Destination port (1-65535)
-2      | 2    | flags       | Connection flags (reserved, must be 0)
-4      | 4    | timeout_ms  | Connection timeout in milliseconds (0=default)
-8      | N    | host        | UTF-8 hostname or IP (NOT null-terminated)
-```
+If an open is not allowed, the runtime returns `ZI_E_DENIED`.
 
-**Response Payload (success, status=0):**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 4    | handle      | New socket handle (>=3)
-4      | 4    | local_port  | Local port number (ephemeral)
-8      | 16   | remote_addr | Remote IP address (16 bytes: IPv4-mapped-IPv6)
-```
+## Opening Sockets
 
-**Response Payload (error, status!=0):**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 4    | errno       | POSIX errno code
-4      | N    | message     | UTF-8 error description
-```
+The cap is opened via `zi_cap_open(kind="net", name="tcp", version=1, params_ptr, params_len)`.
 
-**Error Codes:**
-- `13` (EACCES) - Connection denied by `ZI_NET_ALLOW` sandbox
-- `22` (EINVAL) - Invalid hostname or port
-- `60` (ETIMEDOUT) - Connection timeout
-- `61` (ECONNREFUSED) - Connection refused by remote host
-- `65` (EHOSTUNREACH) - Host unreachable (no route)
-- `111` (ECONNRESET) - Connection reset by peer (during handshake)
+### Open params layout
 
-**Behavioral Requirements:**
-- Opened handles support `zi_read`, `zi_write`, `zi_end`
-- `zi_end` on a socket handle **MUST** close the connection and release the handle
-- Multiple concurrent connections are supported
-- Handle flags are `ZI_H_READABLE | ZI_H_WRITABLE` (sockets are bidirectional)
-
-**IPv4-Mapped IPv6 Format:**
-
-Remote addresses are returned in **IPv4-mapped IPv6** format (16 bytes):
+Open params are a packed little-endian struct:
 
 ```
-IPv4 address 192.0.2.1:
-[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
- 0x00, 0x00, 0xFF, 0xFF, 0xC0, 0x00, 0x02, 0x01]
- (::ffff:192.0.2.1)
-
-IPv6 address 2001:db8::1:
-[0x20, 0x01, 0x0D, 0xB8, 0x00, 0x00, 0x00, 0x00,
- 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01]
+Offset | Size | Field
+-------|------|-------------------------------
+0      | 8    | host_ptr   (u64)
+8      | 4    | host_len   (u32)
+12     | 4    | port       (u32)
+16     | 4    | flags      (u32)
+20     | 4    | backlog        (u32) [optional]
+24     | 8    | out_port_ptr   (u64) [optional]
 ```
 
-### 2. GETPEERNAME (op=2)
+- `host_ptr`/`host_len` point to UTF-8 bytes for the host (not NUL-terminated).
+- `host_len` must be 1..255 and must not contain embedded NUL.
+- `port` must be 1..65535 for connect mode.
+- For listener mode, `port` may be `0` to request an ephemeral port.
 
-Retrieves the remote address of a connected socket.
+### Flags
 
-**Request Payload:**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 4    | handle      | Socket handle to query
-```
+- `0`: outbound connect stream.
+- `ZI_TCP_OPEN_LISTEN`: create a listener socket (bind+listen).
 
-**Response Payload (success, status=0):**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 16   | remote_addr | Remote IP address (IPv4-mapped-IPv6)
-4      | 2    | remote_port | Remote port number
-```
+Socket option flags (best-effort):
 
-**Response Payload (error, status!=0):**
-```
-Offset | Size | Field       | Description
--------|------|-------------|------------------------------------------
-0      | 4    | errno       | Error code
-4      | N    | message     | UTF-8 error description
-```
+- `ZI_TCP_OPEN_REUSEADDR`: reserved (runtime may always set `SO_REUSEADDR` for listeners).
+- `ZI_TCP_OPEN_REUSEPORT`: set `SO_REUSEPORT` on the listener (if supported).
+- `ZI_TCP_OPEN_IPV6ONLY`: set `IPV6_V6ONLY` on IPv6 listeners (if supported).
+- `ZI_TCP_OPEN_NODELAY`: set `TCP_NODELAY` on stream sockets.
+- `ZI_TCP_OPEN_KEEPALIVE`: set `SO_KEEPALIVE` on stream sockets.
 
-**Error Codes:**
-- `9` (EBADF) - Invalid handle or handle not a socket
-- `107` (ENOTCONN) - Socket is not connected
+Unknown flags are rejected with `ZI_E_INVALID`.
 
-## Stream Operations
+### Listener host wildcard
 
-Opened socket handles support the standard handle protocol:
+In listener mode only, `host="*"` means wildcard bind (all interfaces). For non-wildcard binds, the host string is passed to name resolution.
 
-### zi_read(handle, dst_ptr, cap)
+### Backlog
 
-**Semantics:**
-- Reads up to `cap` bytes from the socket into guest memory at `dst_ptr`
-- Returns number of bytes read (0-cap), or negative errno on error
-- Returns `0` on graceful disconnect (EOF)
-- **Blocking:** Waits until data is available or connection closes
-- `ECONNRESET` if connection reset by peer
-- `ETIMEDOUT` if read timeout exceeded (if configured)
+In listener mode, if `params_len >= 24`, `backlog` is read:
 
-### zi_write(handle, src_ptr, len)
+- `0` means runtime default.
+- Values greater than 65535 may be clamped.
 
-**Semantics:**
-- Writes `len` bytes from guest memory at `src_ptr` to the socket
-- Returns number of bytes written (0-len), or negative errno on error
-- **Blocking:** Waits until all bytes are buffered or connection closes
-- `EPIPE` if connection closed by remote (write after close)
-- `ECONNRESET` if connection reset by peer
+### Discovering the bound port (listener + port=0)
 
-### zi_end(handle)
+In listener mode, if `params_len >= 32` and `out_port_ptr != 0`, the runtime writes the actual bound port (u32 little-endian) to guest memory at `out_port_ptr`.
 
-**Semantics:**
-- Closes the socket and releases the handle
-- Sends TCP FIN (graceful shutdown)
-- Returns `0` on success, negative errno on error
-- Handle becomes invalid after this call
-- Idempotent (calling twice is safe)
+## Handle Semantics
 
-## Protocol Example
+### Connect mode (stream handle)
 
-**Connecting to a remote server:**
+The returned handle supports:
 
-```
-// Guest calls zi_ctl with ZCL1 frame:
-Magic:       "ZCL1"
-Version:     1
-Op:          1 (CONNECT)
-RID:         3001
-Status:      0
-Reserved:    0
-PayloadLen:  19
-Payload:     [port=443, flags=0, timeout_ms=5000, host="example.com"]
+- `zi_read`: reads from the socket.
+- `zi_write`: writes to the socket.
+- `zi_end`: closes the socket.
 
-// Runtime responds:
-Magic:       "ZCL1"
-Version:     1
-Op:          1
-RID:         3001
-Status:      0 (success)
-Reserved:    0
-PayloadLen:  24
-Payload:     [handle=3, local_port=54321, remote_addr=[...]]
+The socket is nonblocking:
 
-// Guest can now use zi_write(3, ...) to send data, zi_read(3, ...) to receive
-```
+- If the connection is still in progress, `zi_read`/`zi_write` may return `ZI_E_AGAIN`.
+- On success, `zi_read` returns `0` at EOF (peer closed).
+- Would-block returns `ZI_E_AGAIN`.
 
-**Connection denied by sandbox:**
+### Listen mode (listener handle)
+
+The returned handle supports:
+
+- `zi_read`: performs a single accept and returns an accept record.
+- `zi_end`: closes the listener.
+
+`zi_write` is not supported on listeners and returns `ZI_E_NOSYS`.
+
+The listener handle is pollable with `sys/loop@v1`. Readability indicates an accept is likely to succeed; spurious readiness is allowed (guest must tolerate `ZI_E_AGAIN`).
+
+## Accept Record
+
+Listener `zi_read()` returns one or more fixed 32-byte records (little-endian). The caller must pass `cap >= 32`. If `cap > 32`, the runtime may return multiple records in a single call (return value is a multiple of 32).
 
 ```
-// Guest attempts to connect to disallowed host:
-Op:          1 (CONNECT)
-Payload:     [port=80, flags=0, timeout_ms=5000, host="forbidden.com"]
-
-// Runtime responds:
-Status:      13 (EACCES)
-Payload:     [errno=13, message="Connection denied by ZI_NET_ALLOW policy"]
+Offset | Size | Field
+-------|------|-------------------------------
+0      | 4    | conn_handle (u32)
+4      | 4    | peer_port   (u32)
+8      | 16   | peer_addr   (u8[16]) IPv4-mapped-IPv6
+24     | 4    | local_port  (u32)
+28     | 4    | reserved    (u32) = 0
 ```
 
-## TLS Support
+- `conn_handle` is a newly allocated stream handle for the accepted connection.
+- `peer_addr` is the remote address in IPv4-mapped-IPv6 form (`::ffff:a.b.c.d` for IPv4).
+- The record includes `local_port` only (no local address bytes).
 
-**v1 does NOT include built-in TLS support.** Applications requiring TLS must:
+## Nonblocking + `sys/loop` usage
 
-1. **Use application-layer TLS libraries** (e.g., BoringSSL, mbedTLS) compiled to WASM
-2. **Use proc/hopper TLS functions** (if provided by runtime)
-3. **Use async capabilities** for non-blocking TLS handshakes
+All I/O uses nonblocking semantics. Guests should:
 
-Future versions may add a `net/tls` capability with built-in TLS support.
+1. Attempt operation (`zi_read`/`zi_write`).
+2. If it returns `ZI_E_AGAIN`, use `sys/loop` WATCH for readability/writability.
+3. POLL, then retry the operation.
 
-## Non-Blocking I/O
+Spurious wakeups are permitted; the guest must tolerate re-trying and receiving `ZI_E_AGAIN` again.
 
-**v1 uses blocking I/O only.** Applications requiring non-blocking I/O should:
+## Notes / Limitations
 
-1. **Use async/default capability** for concurrent connections
-2. **Use multiple instances** of the guest program (one per connection)
-3. **Wait for v2** which may add non-blocking socket modes
+- There is no `GETPEERNAME`/metadata query operation in v1.
+- Connect mode does not support `port=0`.
+- Listener mode supports `port=0` for ephemeral bind (and can report the bound port via `out_port_ptr`).
 
-## Conformance Requirements
+### Half-close (shutdown write)
 
-Implementations **MUST**:
-1. Enforce `ZI_NET_ALLOW` sandbox strictly (no unapproved connections)
-2. Support CONNECT operation with DNS resolution
-3. Implement standard stream semantics (read/write/end)
-4. Return correct POSIX errno codes for all error conditions
-5. Support concurrent socket handles
-6. Use IPv4-mapped-IPv6 format for all IP addresses
-7. Perform DNS resolution within the sandbox check
+TCP stream handles support a write-side half-close via `zi_ctl`:
 
-Implementations **SHOULD**:
-- Support both IPv4 and IPv6 destinations
-- Cache DNS results (respecting TTL)
-- Provide TCP keepalive options (platform default)
-- Support graceful shutdown (TCP FIN on zi_end)
+- Send a `ZCL1` request to `zi_ctl` with `op = ZI_CTL_OP_HANDLE_OP`.
+- Payload (16 bytes, little-endian): `version=1`, `handle`, `op=ZI_HANDLE_OP_SHUT_WR`, `reserved=0`.
 
-Implementations **MAY**:
-- Impose limits on concurrent socket count
-- Impose timeout defaults (read/write/connect)
-- Restrict privileged ports (<1024)
-- Provide GETPEERNAME operation for connection metadata
+After shutdown-write:
 
-## Security Considerations
-
-- **Sandbox Enforcement:** Strictly validate all connections against `ZI_NET_ALLOW`
-- **DNS Rebinding:** Re-validate IP after DNS resolution (don't cache IPs across sandbox changes)
-- **Resource Limits:** Impose limits on socket count, buffer sizes, timeout durations
-- **SSRF Prevention:** Validate resolved IPs against private/loopback ranges if needed
-- **Error Disclosure:** Error messages MUST NOT leak network topology or host information
-- **Port Scanning:** Rate-limit connection attempts to prevent port scanning abuse
-
-## Performance Notes
-
-- **Connection Pooling:** Guest programs SHOULD reuse connections when possible
-- **Buffering:** Implementations SHOULD buffer socket I/O for efficiency
-- **Concurrent Connections:** Use async/default for high-concurrency scenarios
-- **DNS Caching:** DNS results SHOULD be cached to reduce latency
-
-## Future Extensions
-
-Planned for future versions (v2+):
-
-- **TCP server support** (listen/accept operations)
-- **UDP sockets** (datagram protocol)
-- **Non-blocking I/O modes** (O_NONBLOCK equivalent)
-- **Socket options** (keepalive, nodelay, buffer sizes)
-- **Unix domain sockets** (local IPC)
-- **Built-in TLS** (net/tls capability)
+- The peer will eventually observe EOF (`zi_read` returns 0) once all queued bytes are delivered.
+- Further `zi_write` calls on that handle fail (writes are disabled), but `zi_read` may continue to succeed.
 
 ## Version History
 
-- **v1 (2.5):** Initial stable specification (golden capability, client-only TCP)
+- **v1 (2.5):** Stable `zi_cap_open`-based TCP streams with nonblocking I/O; listener support via `ZI_TCP_OPEN_LISTEN` and accept records.
