@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 // This example is the "kitchen sink" embedding.
@@ -412,6 +413,12 @@ static void write_u64le(uint8_t *p, uint64_t v) {
   zcl1_write_u32(p + 4, (uint32_t)((v >> 32) & 0xFFFFFFFFu));
 }
 
+static uint64_t read_u64le(const uint8_t *p) {
+  uint64_t lo = (uint64_t)zcl1_read_u32(p + 0);
+  uint64_t hi = (uint64_t)zcl1_read_u32(p + 4);
+  return lo | (hi << 32);
+}
+
 static void build_open_req(uint8_t req[40], const char *kind, const char *name, const void *params, uint32_t params_len) {
   // Packed open request (see zi_syscalls_caps25.c):
   // u64 kind_ptr, u32 kind_len, u64 name_ptr, u32 name_len, u32 mode, u64 params_ptr, u32 params_len
@@ -437,6 +444,98 @@ static int read_frame_spin(zi_handle_t h, uint8_t *out, uint32_t cap) {
   for (;;) {
     int32_t n = zi_read(h, (zi_ptr_t)(uintptr_t)(out + off), (zi_size32_t)(cap - off));
     if (n == ZI_E_AGAIN) continue;
+    if (n <= 0) return 0;
+    off += (uint32_t)n;
+    if (off >= 24) {
+      uint32_t pl = zcl1_read_u32(out + 20);
+      if (off >= 24u + pl) return (int)(24u + pl);
+    }
+  }
+}
+
+// Wait for frames without busy-spinning:
+// - WATCH the target handle for readable
+// - If a read returns ZI_E_AGAIN, block in sys/loop.POLL, then retry
+//
+// This is the intended wait model for 2.5 guests.
+enum {
+  SYS_LOOP_E_READABLE = 0x1,
+  SYS_LOOP_EV_READY = 1,
+};
+
+static int sys_loop_watch(zi_handle_t loop, zi_handle_t target, uint32_t events, uint64_t watch_id) {
+  uint8_t payload[20];
+  zcl1_write_u32(payload + 0, (uint32_t)target);
+  zcl1_write_u32(payload + 4, events);
+  write_u64le(payload + 8, watch_id);
+  zcl1_write_u32(payload + 16, 0u);
+
+  uint8_t fr[24 + sizeof(payload)];
+  build_zcl1_req(fr, (uint16_t)ZI_SYS_LOOP_OP_WATCH, 1001u, payload, (uint32_t)sizeof(payload));
+
+  for (;;) {
+    int32_t w = zi_write(loop, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr));
+    if (w == ZI_E_AGAIN) continue;
+    if (w != (int32_t)sizeof(fr)) return 0;
+    break;
+  }
+
+  uint8_t resp[256];
+  int got = read_frame_spin(loop, resp, (uint32_t)sizeof(resp));
+  if (got < 24) return 0;
+  return zcl1_status(resp) == 1u;
+}
+
+static int sys_loop_poll_wait_ready(zi_handle_t loop, uint64_t watch_id, uint32_t want_events) {
+  uint8_t payload[8];
+  zcl1_write_u32(payload + 0, 16u);         // max_events
+  zcl1_write_u32(payload + 4, 0xFFFFFFFFu); // wait forever
+
+  uint8_t fr[24 + sizeof(payload)];
+  build_zcl1_req(fr, (uint16_t)ZI_SYS_LOOP_OP_POLL, 1002u, payload, (uint32_t)sizeof(payload));
+
+  for (;;) {
+    int32_t w = zi_write(loop, (zi_ptr_t)(uintptr_t)fr, (zi_size32_t)sizeof(fr));
+    if (w == ZI_E_AGAIN) continue;
+    if (w != (int32_t)sizeof(fr)) return 0;
+    break;
+  }
+
+  uint8_t resp[4096];
+  int got = read_frame_spin(loop, resp, (uint32_t)sizeof(resp));
+  if (got < 24 || zcl1_status(resp) != 1u) return 0;
+  if (zcl1_read_u32(resp + 8) != 1002u) return 0;
+
+  const uint8_t *pl = resp + 24;
+  if (got < 24 + 16) return 0;
+  uint32_t ver = zcl1_read_u32(pl + 0);
+  uint32_t n = zcl1_read_u32(pl + 8);
+  if (ver != 1u) return 0;
+
+  const uint8_t *ev = pl + 16;
+  uint32_t left = (uint32_t)got - 24u - 16u;
+  for (uint32_t i = 0; i < n; i++) {
+    if (left < 32u) break;
+    uint32_t kind = zcl1_read_u32(ev + 0);
+    uint32_t events = zcl1_read_u32(ev + 4);
+    uint64_t id = read_u64le(ev + 16);
+    if (kind == SYS_LOOP_EV_READY && id == watch_id && (events & want_events) != 0u) return 1;
+    ev += 32u;
+    left -= 32u;
+  }
+
+  // Spurious wakeup or non-matching event; caller will retry.
+  return 1;
+}
+
+static int read_frame_wait_loop(zi_handle_t loop, zi_handle_t target, uint64_t watch_id, uint8_t *out, uint32_t cap) {
+  uint32_t off = 0;
+  for (;;) {
+    int32_t n = zi_read(target, (zi_ptr_t)(uintptr_t)(out + off), (zi_size32_t)(cap - off));
+    if (n == ZI_E_AGAIN) {
+      if (!sys_loop_poll_wait_ready(loop, watch_id, SYS_LOOP_E_READABLE)) return 0;
+      continue;
+    }
     if (n <= 0) return 0;
     off += (uint32_t)n;
     if (off >= 24) {
@@ -1149,6 +1248,22 @@ static int aio_smoke(void) {
     return 0;
   }
 
+  uint8_t loop_req[40];
+  build_open_req(loop_req, ZI_CAP_KIND_SYS, ZI_CAP_NAME_LOOP, NULL, 0);
+  zi_handle_t loop = zi_cap_open((zi_ptr_t)(uintptr_t)loop_req);
+  if (loop < 3) {
+    fprintf(stderr, "sys/loop open failed: %d\n", loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  const uint64_t watch_id = 1u;
+  if (!sys_loop_watch(loop, aio, SYS_LOOP_E_READABLE, watch_id)) {
+    fprintf(stderr, "sys/loop WATCH(file/aio) failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
   uint8_t params[20];
   build_fs_params(params, guest_path, ZI_FILE_O_READ | ZI_FILE_O_WRITE | ZI_FILE_O_CREATE | ZI_FILE_O_TRUNC, 0644);
 
@@ -1163,28 +1278,32 @@ static int aio_smoke(void) {
     return 0;
   }
 
-  int got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr));
+  int got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr));
   if (got < 24 || zcl1_status(fr) != 1 || zcl1_read_u32(fr + 8) != 1u) {
     fprintf(stderr, "file/aio OPEN ack failed\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
 
-  got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr));
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr));
   if (got < 24 || zcl1_status(fr) != 1 || zcl1_read_u32(fr + 8) != 1u) {
     fprintf(stderr, "file/aio OPEN done failed\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
   const uint8_t *pl = fr + 24;
   if (zcl1_read_u32(pl + 4) != 0u) {
     fprintf(stderr, "file/aio OPEN result unexpected\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
   uint64_t file_id = (uint64_t)zcl1_read_u32(pl + 8) | ((uint64_t)zcl1_read_u32(pl + 12) << 32);
   if (file_id == 0) {
     fprintf(stderr, "file/aio OPEN file_id=0\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
@@ -1198,8 +1317,8 @@ static int aio_smoke(void) {
   zcl1_write_u32(wpl + 28, 0);
   build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_WRITE, 2, wpl, (uint32_t)sizeof(wpl));
   (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(wpl));
-  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
-  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
 
   // READ (rid=3)
   uint8_t rpl2[24];
@@ -1209,10 +1328,11 @@ static int aio_smoke(void) {
   zcl1_write_u32(rpl2 + 20, 0);
   build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_READ, 3, rpl2, (uint32_t)sizeof(rpl2));
   (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(rpl2));
-  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
-  got = read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
   if (got < 24 || zcl1_status(fr) != 1) {
     fprintf(stderr, "file/aio READ done failed\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
@@ -1220,6 +1340,7 @@ static int aio_smoke(void) {
   uint32_t nbytes = zcl1_read_u32(pl + 4);
   if (nbytes != (uint32_t)strlen(msg) || memcmp(pl + 8, msg, nbytes) != 0) {
     fprintf(stderr, "file/aio READ content mismatch\n");
+    (void)zi_end(loop);
     (void)zi_end(aio);
     return 0;
   }
@@ -1229,9 +1350,186 @@ static int aio_smoke(void) {
   write_u64le(cpl, file_id);
   build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_CLOSE, 4, cpl, (uint32_t)sizeof(cpl));
   (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(cpl));
-  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // ack
-  (void)read_frame_spin(aio, fr, (uint32_t)sizeof(fr)); // done
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
 
+  // ---- directory + stat smoke (new ops) ----
+  // Use absolute guest paths when sandboxed.
+  const char *dir_guest = "/aio_dir";
+  const char *inner_guest = "/aio_dir/inner.txt";
+  const char *inner_msg = "inner from file/aio\n";
+
+  // MKDIR (rid=5)
+  uint8_t mkdir_pl[20];
+  write_u64le(mkdir_pl + 0, (uint64_t)(uintptr_t)dir_guest);
+  zcl1_write_u32(mkdir_pl + 8, (uint32_t)strlen(dir_guest));
+  zcl1_write_u32(mkdir_pl + 12, 0755u);
+  zcl1_write_u32(mkdir_pl + 16, 0u);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_MKDIR, 5, mkdir_pl, (uint32_t)sizeof(mkdir_pl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(mkdir_pl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio MKDIR failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // OPEN inner file (rid=6)
+  build_fs_params(params, inner_guest, ZI_FILE_O_READ | ZI_FILE_O_WRITE | ZI_FILE_O_CREATE | ZI_FILE_O_TRUNC, 0644);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_OPEN, 6, params, (uint32_t)sizeof(params));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(params));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio OPEN(inner) failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  pl = fr + 24;
+  uint64_t inner_id = (uint64_t)zcl1_read_u32(pl + 8) | ((uint64_t)zcl1_read_u32(pl + 12) << 32);
+  if (inner_id == 0) {
+    fprintf(stderr, "file/aio OPEN(inner) file_id=0\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // WRITE inner (rid=7)
+  write_u64le(wpl + 0, inner_id);
+  write_u64le(wpl + 8, 0);
+  write_u64le(wpl + 16, (uint64_t)(uintptr_t)inner_msg);
+  zcl1_write_u32(wpl + 24, (uint32_t)strlen(inner_msg));
+  zcl1_write_u32(wpl + 28, 0);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_WRITE, 7, wpl, (uint32_t)sizeof(wpl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(wpl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+
+  // STAT inner (rid=8)
+  uint8_t stat_pl[16];
+  write_u64le(stat_pl + 0, (uint64_t)(uintptr_t)inner_guest);
+  zcl1_write_u32(stat_pl + 8, (uint32_t)strlen(inner_guest));
+  zcl1_write_u32(stat_pl + 12, 0u);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_STAT, 8, stat_pl, (uint32_t)sizeof(stat_pl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(stat_pl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio STAT failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  pl = fr + 24;
+  if (zcl1_read_u32(pl + 4) != 0u) {
+    fprintf(stderr, "file/aio STAT result unexpected\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  uint64_t st_size = (uint64_t)zcl1_read_u32(pl + 8) | ((uint64_t)zcl1_read_u32(pl + 12) << 32);
+  uint32_t st_mode = zcl1_read_u32(pl + 24);
+  if (st_size != (uint64_t)strlen(inner_msg) || (st_mode & S_IFMT) != S_IFREG) {
+    fprintf(stderr, "file/aio STAT mismatch\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // READDIR dir (rid=9)
+  uint8_t rd_pl[20];
+  write_u64le(rd_pl + 0, (uint64_t)(uintptr_t)dir_guest);
+  zcl1_write_u32(rd_pl + 8, (uint32_t)strlen(dir_guest));
+  zcl1_write_u32(rd_pl + 12, 4096u);
+  zcl1_write_u32(rd_pl + 16, 0u);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_READDIR, 9, rd_pl, (uint32_t)sizeof(rd_pl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(rd_pl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio READDIR failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  pl = fr + 24;
+  uint32_t entry_count = zcl1_read_u32(pl + 4);
+  const uint8_t *p = pl + 8;
+  uint32_t left = (uint32_t)got - 24u - 8u;
+  if (left < 4u) {
+    fprintf(stderr, "file/aio READDIR payload too small\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+  (void)zcl1_read_u32(p + 0); // flags
+  p += 4u;
+  left -= 4u;
+  int found = 0;
+  for (uint32_t i = 0; i < entry_count; i++) {
+    if (left < 8u) break;
+    uint32_t dtype = zcl1_read_u32(p + 0);
+    uint32_t name_len = zcl1_read_u32(p + 4);
+    p += 8u;
+    left -= 8u;
+    if (left < name_len) break;
+    if (name_len == strlen("inner.txt") && memcmp(p, "inner.txt", name_len) == 0) {
+      // dtype may be UNKNOWN on some filesystems.
+      found = (dtype == ZI_FILE_AIO_DTYPE_FILE || dtype == ZI_FILE_AIO_DTYPE_UNKNOWN);
+    }
+    p += name_len;
+    left -= name_len;
+  }
+  if (!found) {
+    fprintf(stderr, "file/aio READDIR missing inner.txt\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // CLOSE inner (rid=10)
+  write_u64le(cpl, inner_id);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_CLOSE, 10, cpl, (uint32_t)sizeof(cpl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(cpl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+
+  // UNLINK inner (rid=11)
+  uint8_t ul_pl[16];
+  write_u64le(ul_pl + 0, (uint64_t)(uintptr_t)inner_guest);
+  zcl1_write_u32(ul_pl + 8, (uint32_t)strlen(inner_guest));
+  zcl1_write_u32(ul_pl + 12, 0u);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_UNLINK, 11, ul_pl, (uint32_t)sizeof(ul_pl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(ul_pl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio UNLINK failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  // RMDIR dir (rid=12)
+  uint8_t rm_pl[16];
+  write_u64le(rm_pl + 0, (uint64_t)(uintptr_t)dir_guest);
+  zcl1_write_u32(rm_pl + 8, (uint32_t)strlen(dir_guest));
+  zcl1_write_u32(rm_pl + 12, 0u);
+  build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_RMDIR, 12, rm_pl, (uint32_t)sizeof(rm_pl));
+  (void)zi_write(aio, (zi_ptr_t)(uintptr_t)req, 24u + (zi_size32_t)sizeof(rm_pl));
+  (void)read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // ack
+  got = read_frame_wait_loop(loop, aio, watch_id, fr, (uint32_t)sizeof(fr)); // done
+  if (got < 24 || zcl1_status(fr) != 1) {
+    fprintf(stderr, "file/aio RMDIR failed\n");
+    (void)zi_end(loop);
+    (void)zi_end(aio);
+    return 0;
+  }
+
+  (void)zi_end(loop);
   (void)zi_end(aio);
   return 1;
 }

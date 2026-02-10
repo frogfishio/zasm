@@ -118,7 +118,7 @@ Payload:
     kind_len: 4
     kind: "file"
     name_len: 2
-    name: "fs"
+    name: "aio"
     flags: 0x03 (CAN_OPEN | MAY_BLOCK)
   
   cap[1]:

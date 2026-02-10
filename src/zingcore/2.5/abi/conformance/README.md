@@ -25,7 +25,7 @@ This directory contains wire-level conformance tests for zABI 2.5. These tests a
 - Invalid handle rejection
 
 ### 4. Golden Capabilities (`caps/`)
-- `file/fs` sandbox enforcement (`ZI_FS_ROOT`)
+- `file/aio` sandbox enforcement (`ZI_FS_ROOT`)
 - `proc/argv` stream encoding
 - `proc/env` stream encoding  
 - `proc/hopper` ZCL1 protocol
@@ -105,7 +105,7 @@ int main(void) {
 - `test_read_bounds.c` — Validate `zi_read` bounds checking.
 - `test_write_bounds.c` — Validate `zi_write` bounds checking.
 - `test_cap_open_invalid.c` — Validate `zi_cap_open` error paths.
-- `test_fs_sandbox.c` — Validate `file/fs` rejects paths outside `ZI_FS_ROOT`.
+- `test_file_aio_sandbox.c` — Validate `file/aio` rejects paths outside `ZI_FS_ROOT`.
 - `test_tcp_sandbox.c` — Validate `net/tcp` rejects non-allowed hosts.
 - `test_async_future_lifecycle.c` — Validate async future table behavior.
 

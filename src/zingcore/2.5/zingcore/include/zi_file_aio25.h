@@ -34,7 +34,7 @@ extern "C" {
 
 // file/aio operations (request opcodes)
 typedef enum zi_file_aio_op_v1 {
-  // payload is identical to file/fs open params:
+  // payload uses the standard 20-byte file open params:
   //   u64 path_ptr, u32 path_len, u32 oflags, u32 create_mode
   ZI_FILE_AIO_OP_OPEN = 1,
 
@@ -56,7 +56,48 @@ typedef enum zi_file_aio_op_v1 {
   //   u32 src_len
   //   u32 flags (must be 0)
   ZI_FILE_AIO_OP_WRITE = 4,
+
+  // payload (20 bytes):
+  //   u64 path_ptr
+  //   u32 path_len
+  //   u32 mode        (POSIX mode bits)
+  //   u32 flags       (must be 0)
+  ZI_FILE_AIO_OP_MKDIR = 5,
+
+  // payload (16 bytes):
+  //   u64 path_ptr
+  //   u32 path_len
+  //   u32 flags       (must be 0)
+  ZI_FILE_AIO_OP_RMDIR = 6,
+
+  // payload (16 bytes):
+  //   u64 path_ptr
+  //   u32 path_len
+  //   u32 flags       (must be 0)
+  ZI_FILE_AIO_OP_UNLINK = 7,
+
+  // payload (16 bytes):
+  //   u64 path_ptr
+  //   u32 path_len
+  //   u32 flags       (must be 0)
+  ZI_FILE_AIO_OP_STAT = 8,
+
+  // payload (20 bytes):
+  //   u64 path_ptr
+  //   u32 path_len
+  //   u32 max_bytes   (max extra bytes in completion; runtime clamps)
+  //   u32 flags       (must be 0)
+  ZI_FILE_AIO_OP_READDIR = 9,
 } zi_file_aio_op_v1;
+
+// Directory entry type codes used by READDIR completions.
+typedef enum zi_file_aio_dirent_type_v1 {
+  ZI_FILE_AIO_DTYPE_UNKNOWN = 0,
+  ZI_FILE_AIO_DTYPE_FILE = 1,
+  ZI_FILE_AIO_DTYPE_DIR = 2,
+  ZI_FILE_AIO_DTYPE_SYMLINK = 3,
+  ZI_FILE_AIO_DTYPE_OTHER = 4,
+} zi_file_aio_dirent_type_v1;
 
 // file/aio completion event opcode
 enum {
@@ -69,6 +110,24 @@ enum {
   //     READ:  bytes[result]
   //     WRITE: (no extra)
   //     CLOSE: (no extra)
+  //     MKDIR: (no extra)
+  //     RMDIR: (no extra)
+  //     UNLINK:(no extra)
+  //     STAT:  32-byte struct (all little-endian):
+  //              u64 size
+  //              u64 mtime_ns
+  //              u32 mode
+  //              u32 uid
+  //              u32 gid
+  //              u32 reserved
+  //     READDIR:
+  //              result = entry_count
+  //              extra:
+  //                u32 flags (bit0 = truncated)
+  //                repeated entry_count times:
+  //                  u32 dtype (ZI_FILE_AIO_DTYPE_*)
+  //                  u32 name_len
+  //                  bytes[name_len]
   //
   // error payload uses standard zi_zcl1_write_error encoding.
   ZI_FILE_AIO_EV_DONE = 100,

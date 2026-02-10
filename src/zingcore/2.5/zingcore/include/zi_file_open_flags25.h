@@ -2,9 +2,7 @@
 
 // Shared file open flags for zingcore 2.5 file capabilities.
 //
-// These flags are used by both:
-// - file/fs@v1 (synchronous file stream)
-// - file/aio@v1 (async completion-based file I/O)
+// These flags are used by file/aio@v1 (async completion-based file I/O).
 
 enum {
   ZI_FILE_O_READ = 1u << 0,

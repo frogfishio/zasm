@@ -75,7 +75,6 @@ deterministic list and per-cap flags/metadata.
 zingcore 2.5 provides an async-first filesystem surface built around `sys/loop`:
 
 - `file/aio@v1` (async, completion-based; pollable via `sys/loop`)
-- `file/fs@v1` (sync stream files; compiled but not registered by default)
 
 ### zi_cap_open request format
 
@@ -99,15 +98,6 @@ zingcore 2.5 provides an async-first filesystem surface built around `sys/loop`:
 - Guests block only in `sys/loop.POLL`: WATCH the `file/aio` handle for readability, POLL, then read completions.
 
 Normative spec: `abi/FILE_AIO_PROTOCOL.md`.
-
-### file/fs open params format (optional)
-
-When kind/name select file/fs, `params_ptr` points at a packed little-endian params blob (20 bytes):
-
-- `u64 path_ptr` (UTF-8 bytes, not NUL-terminated)
-- `u32 path_len`
-- `u32 oflags` (`ZI_FILE_O_*` in `zingcore/include/zi_file_fs25.h`)
-- `u32 create_mode` (used when `ZI_FILE_O_CREATE` is set; e.g. 0644)
 
 ### Sandboxing via ZI_FS_ROOT
 

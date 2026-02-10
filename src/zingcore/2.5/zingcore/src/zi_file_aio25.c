@@ -4,6 +4,7 @@
 #include "zi_runtime25.h"
 #include "zi_zcl1.h"
 
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pthread.h>
@@ -64,6 +65,38 @@ typedef struct {
       uint32_t len;
       uint32_t flags;
     } write;
+
+    struct {
+      uint8_t *path;
+      uint32_t path_len;
+      uint32_t mode;
+      uint32_t flags;
+    } mkdir;
+
+    struct {
+      uint8_t *path;
+      uint32_t path_len;
+      uint32_t flags;
+    } rmdir;
+
+    struct {
+      uint8_t *path;
+      uint32_t path_len;
+      uint32_t flags;
+    } unlink;
+
+    struct {
+      uint8_t *path;
+      uint32_t path_len;
+      uint32_t flags;
+    } stat;
+
+    struct {
+      uint8_t *path;
+      uint32_t path_len;
+      uint32_t max_bytes;
+      uint32_t flags;
+    } readdir;
   } u;
 } zi_aio_job;
 
@@ -107,6 +140,10 @@ static int32_t map_errno_to_zi(int e) {
     case EWOULDBLOCK:
 #endif
       return ZI_E_AGAIN;
+    case EEXIST:
+    case ENOTEMPTY:
+    case EINVAL:
+      return ZI_E_INVALID;
     case EBADF:
       return ZI_E_CLOSED;
     case EACCES:
@@ -140,6 +177,8 @@ static int has_embedded_nul(const uint8_t *p, uint32_t len) {
   }
   return 0;
 }
+
+static uint32_t dtype_from_dirent(unsigned char dt);
 
 static int open_under_root_fd(int rootfd, const uint8_t *guest_path, uint32_t guest_len, int flags, mode_t mode, int *out_fd) {
   if (rootfd < 0 || !guest_path || guest_len == 0 || !out_fd) return 0;
@@ -214,6 +253,85 @@ done:
   return r;
 }
 
+static int open_parent_under_root_fd(int rootfd, const uint8_t *guest_path, uint32_t guest_len,
+                                     int *out_dirfd, int *out_need_close, char *out_name,
+                                     size_t out_name_cap) {
+  if (rootfd < 0 || !guest_path || guest_len == 0) return 0;
+  if (!out_dirfd || !out_need_close || !out_name || out_name_cap < 2) return 0;
+  *out_dirfd = -1;
+  *out_need_close = 0;
+  out_name[0] = '\0';
+
+  // Must be an absolute guest path.
+  if (guest_path[0] != (uint8_t)'/') return 0;
+
+  int dirfd = rootfd;
+  int need_close = 0;
+  int r = 0;
+
+  uint32_t i = 1; // skip leading '/'
+  while (i < guest_len) {
+    while (i < guest_len && guest_path[i] == (uint8_t)'/') i++;
+    if (i >= guest_len) break;
+
+    uint32_t seg_start = i;
+    while (i < guest_len && guest_path[i] != (uint8_t)'/') i++;
+    uint32_t seg_len = i - seg_start;
+    if (seg_len == 0) continue;
+
+    if (seg_len >= 256u) {
+      r = ZI_E_INVALID;
+      goto done;
+    }
+    char seg[256];
+    memcpy(seg, guest_path + seg_start, seg_len);
+    seg[seg_len] = '\0';
+
+    if (seg_len == 1 && seg[0] == '.') {
+      continue;
+    }
+    if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') {
+      r = ZI_E_DENIED;
+      goto done;
+    }
+
+    // Determine whether this is the last segment.
+    uint32_t j = i;
+    while (j < guest_len && guest_path[j] == (uint8_t)'/') j++;
+    int is_last = (j >= guest_len);
+
+    if (!is_last) {
+      int nextfd = openat(dirfd, seg, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+      if (nextfd < 0) {
+        r = (int)map_errno_to_zi(errno);
+        goto done;
+      }
+      if (need_close) (void)close(dirfd);
+      dirfd = nextfd;
+      need_close = 1;
+      continue;
+    }
+
+    if (seg_len + 1 > out_name_cap) {
+      r = ZI_E_INVALID;
+      goto done;
+    }
+    memcpy(out_name, seg, seg_len + 1);
+    *out_dirfd = dirfd;
+    *out_need_close = need_close;
+    r = 1;
+    goto done;
+  }
+
+  r = ZI_E_INVALID;
+
+done:
+  if (r != 1) {
+    if (need_close) (void)close(dirfd);
+  }
+  return r;
+}
+
 static int append_out_locked(zi_file_aio_ctx *c, const uint8_t *data, uint32_t n) {
   if (!c) return 0;
   if (n == 0) return 1;
@@ -255,6 +373,26 @@ static void job_free_payload(zi_aio_job *j) {
     free(j->u.write.data);
     j->u.write.data = NULL;
     j->u.write.len = 0;
+  } else if (j->op == (uint16_t)ZI_FILE_AIO_OP_MKDIR) {
+    free(j->u.mkdir.path);
+    j->u.mkdir.path = NULL;
+    j->u.mkdir.path_len = 0;
+  } else if (j->op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) {
+    free(j->u.rmdir.path);
+    j->u.rmdir.path = NULL;
+    j->u.rmdir.path_len = 0;
+  } else if (j->op == (uint16_t)ZI_FILE_AIO_OP_UNLINK) {
+    free(j->u.unlink.path);
+    j->u.unlink.path = NULL;
+    j->u.unlink.path_len = 0;
+  } else if (j->op == (uint16_t)ZI_FILE_AIO_OP_STAT) {
+    free(j->u.stat.path);
+    j->u.stat.path = NULL;
+    j->u.stat.path_len = 0;
+  } else if (j->op == (uint16_t)ZI_FILE_AIO_OP_READDIR) {
+    free(j->u.readdir.path);
+    j->u.readdir.path = NULL;
+    j->u.readdir.path_len = 0;
   }
 }
 
@@ -550,6 +688,272 @@ static void *worker_main(void *arg) {
       continue;
     }
 
+    if (j.op == (uint16_t)ZI_FILE_AIO_OP_MKDIR) {
+      if (c->root_enabled && c->rootfd < 0) {
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "sandbox root unavailable");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      int ok = 0;
+      int32_t e = 0;
+      if (c->root_enabled) {
+        int dirfd = -1;
+        int need_close = 0;
+        char name[256];
+        int rr = open_parent_under_root_fd(c->rootfd, j.u.mkdir.path, j.u.mkdir.path_len, &dirfd, &need_close, name, sizeof(name));
+        if (rr != 1) {
+          e = (rr == 0) ? ZI_E_DENIED : rr;
+        } else {
+          mode_t mode = (mode_t)(j.u.mkdir.mode ? j.u.mkdir.mode : 0755);
+          if (mkdirat(dirfd, name, mode) == 0) ok = 1;
+          else e = map_errno_to_zi(errno);
+          if (need_close) (void)close(dirfd);
+        }
+      } else {
+        if (j.u.mkdir.path_len >= 4096u) e = ZI_E_INVALID;
+        else {
+          char host_path[4096];
+          memcpy(host_path, j.u.mkdir.path, j.u.mkdir.path_len);
+          host_path[j.u.mkdir.path_len] = '\0';
+          mode_t mode = (mode_t)(j.u.mkdir.mode ? j.u.mkdir.mode : 0755);
+          if (mkdir(host_path, mode) == 0) ok = 1;
+          else e = map_errno_to_zi(errno);
+        }
+      }
+
+      pthread_mutex_lock(&c->mu);
+      if (!ok) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "mkdir failed: %d", (int)e);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", msg);
+      } else {
+        (void)emit_done_ok_locked(c, j.rid, j.op, 0u, NULL, 0u);
+      }
+      pthread_mutex_unlock(&c->mu);
+
+      job_free_payload(&j);
+      continue;
+    }
+
+    if (j.op == (uint16_t)ZI_FILE_AIO_OP_UNLINK || j.op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) {
+      uint8_t *path = (j.op == (uint16_t)ZI_FILE_AIO_OP_UNLINK) ? j.u.unlink.path : j.u.rmdir.path;
+      uint32_t path_len = (j.op == (uint16_t)ZI_FILE_AIO_OP_UNLINK) ? j.u.unlink.path_len : j.u.rmdir.path_len;
+
+      if (c->root_enabled && c->rootfd < 0) {
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "sandbox root unavailable");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      int ok = 0;
+      int32_t e = 0;
+      if (c->root_enabled) {
+        int dirfd = -1;
+        int need_close = 0;
+        char name[256];
+        int rr = open_parent_under_root_fd(c->rootfd, path, path_len, &dirfd, &need_close, name, sizeof(name));
+        if (rr != 1) {
+          e = (rr == 0) ? ZI_E_DENIED : rr;
+        } else {
+          struct stat st;
+          if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0 && S_ISLNK(st.st_mode)) {
+            e = ZI_E_DENIED;
+          } else {
+            int flags = (j.op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) ? AT_REMOVEDIR : 0;
+            if (unlinkat(dirfd, name, flags) == 0) ok = 1;
+            else e = map_errno_to_zi(errno);
+          }
+          if (need_close) (void)close(dirfd);
+        }
+      } else {
+        if (path_len >= 4096u) e = ZI_E_INVALID;
+        else {
+          char host_path[4096];
+          memcpy(host_path, path, path_len);
+          host_path[path_len] = '\0';
+          int r = 0;
+          if (j.op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) r = rmdir(host_path);
+          else r = unlink(host_path);
+          if (r == 0) ok = 1;
+          else e = map_errno_to_zi(errno);
+        }
+      }
+
+      pthread_mutex_lock(&c->mu);
+      if (!ok) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "%s failed: %d", (j.op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) ? "rmdir" : "unlink", (int)e);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", msg);
+      } else {
+        (void)emit_done_ok_locked(c, j.rid, j.op, 0u, NULL, 0u);
+      }
+      pthread_mutex_unlock(&c->mu);
+
+      job_free_payload(&j);
+      continue;
+    }
+
+    if (j.op == (uint16_t)ZI_FILE_AIO_OP_STAT) {
+      if (c->root_enabled && c->rootfd < 0) {
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "sandbox root unavailable");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      int ok = 0;
+      int32_t e = 0;
+      struct stat st;
+      memset(&st, 0, sizeof(st));
+
+      if (c->root_enabled) {
+        int dirfd = -1;
+        int need_close = 0;
+        char name[256];
+        int rr = open_parent_under_root_fd(c->rootfd, j.u.stat.path, j.u.stat.path_len, &dirfd, &need_close, name, sizeof(name));
+        if (rr != 1) {
+          e = (rr == 0) ? ZI_E_DENIED : rr;
+        } else {
+          if (fstatat(dirfd, name, &st, AT_SYMLINK_NOFOLLOW) == 0) ok = 1;
+          else e = map_errno_to_zi(errno);
+          if (need_close) (void)close(dirfd);
+        }
+      } else {
+        if (j.u.stat.path_len >= 4096u) e = ZI_E_INVALID;
+        else {
+          char host_path[4096];
+          memcpy(host_path, j.u.stat.path, j.u.stat.path_len);
+          host_path[j.u.stat.path_len] = '\0';
+          if (lstat(host_path, &st) == 0) ok = 1;
+          else e = map_errno_to_zi(errno);
+        }
+      }
+
+      pthread_mutex_lock(&c->mu);
+      if (!ok) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "stat failed: %d", (int)e);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", msg);
+      } else {
+        uint64_t size = (uint64_t)st.st_size;
+#if defined(__APPLE__)
+        uint64_t mtime_ns = (uint64_t)st.st_mtimespec.tv_sec * 1000000000ull + (uint64_t)st.st_mtimespec.tv_nsec;
+#else
+        uint64_t mtime_ns = (uint64_t)st.st_mtim.tv_sec * 1000000000ull + (uint64_t)st.st_mtim.tv_nsec;
+#endif
+        uint32_t mode = (uint32_t)st.st_mode;
+        uint32_t uid = (uint32_t)st.st_uid;
+        uint32_t gid = (uint32_t)st.st_gid;
+        uint8_t extra[32];
+        zi_zcl1_write_u32(extra + 0, (uint32_t)(size & 0xFFFFFFFFu));
+        zi_zcl1_write_u32(extra + 4, (uint32_t)((size >> 32) & 0xFFFFFFFFu));
+        zi_zcl1_write_u32(extra + 8, (uint32_t)(mtime_ns & 0xFFFFFFFFu));
+        zi_zcl1_write_u32(extra + 12, (uint32_t)((mtime_ns >> 32) & 0xFFFFFFFFu));
+        zi_zcl1_write_u32(extra + 16, mode);
+        zi_zcl1_write_u32(extra + 20, uid);
+        zi_zcl1_write_u32(extra + 24, gid);
+        zi_zcl1_write_u32(extra + 28, 0u);
+        (void)emit_done_ok_locked(c, j.rid, j.op, 0u, extra, (uint32_t)sizeof(extra));
+      }
+      pthread_mutex_unlock(&c->mu);
+
+      job_free_payload(&j);
+      continue;
+    }
+
+    if (j.op == (uint16_t)ZI_FILE_AIO_OP_READDIR) {
+      if (c->root_enabled && c->rootfd < 0) {
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "sandbox root unavailable");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      uint32_t cap = j.u.readdir.max_bytes;
+      if (cap == 0 || cap > 60000u) cap = 60000u;
+      if (cap < 4u) cap = 4u;
+
+      uint8_t *extra = (uint8_t *)malloc(cap);
+      if (!extra) {
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "oom");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      uint32_t flags = 0u;
+      uint32_t used = 4u;
+      uint32_t count = 0u;
+
+      DIR *dir = NULL;
+      if (c->root_enabled) {
+        int fd = -1;
+        int rr = open_under_root_fd(c->rootfd, j.u.readdir.path, j.u.readdir.path_len, O_RDONLY | O_DIRECTORY, 0, &fd);
+        if (rr == 1) {
+          dir = fdopendir(fd);
+          if (!dir) (void)close(fd);
+        }
+      } else {
+        if (j.u.readdir.path_len < 4096u) {
+          char host_path[4096];
+          memcpy(host_path, j.u.readdir.path, j.u.readdir.path_len);
+          host_path[j.u.readdir.path_len] = '\0';
+          dir = opendir(host_path);
+        }
+      }
+
+      if (!dir) {
+        free(extra);
+        pthread_mutex_lock(&c->mu);
+        (void)emit_done_err_locked(c, j.rid, "file.aio", "readdir open failed");
+        pthread_mutex_unlock(&c->mu);
+        job_free_payload(&j);
+        continue;
+      }
+
+      for (;;) {
+        errno = 0;
+        struct dirent *ent = readdir(dir);
+        if (!ent) break;
+
+        const char *name = ent->d_name;
+        if (!name) continue;
+        if (name[0] == '.' && name[1] == '\0') continue;
+        if (name[0] == '.' && name[1] == '.' && name[2] == '\0') continue;
+
+        uint32_t name_len = (uint32_t)strlen(name);
+        uint32_t need = 8u + name_len;
+        if (used + need > cap) {
+          flags |= 0x1u;
+          break;
+        }
+        zi_zcl1_write_u32(extra + used + 0, dtype_from_dirent(ent->d_type));
+        zi_zcl1_write_u32(extra + used + 4, name_len);
+        memcpy(extra + used + 8, name, name_len);
+        used += need;
+        count++;
+      }
+
+      (void)closedir(dir);
+
+      zi_zcl1_write_u32(extra + 0, flags);
+      pthread_mutex_lock(&c->mu);
+      (void)emit_done_ok_locked(c, j.rid, j.op, count, extra, used);
+      pthread_mutex_unlock(&c->mu);
+
+      free(extra);
+      job_free_payload(&j);
+      continue;
+    }
+
     // Unknown op
     pthread_mutex_lock(&c->mu);
     (void)emit_done_err_locked(c, j.rid, "file.aio", "unknown job op");
@@ -631,6 +1035,46 @@ static uint64_t u64le(const uint8_t *p) {
   return lo | (hi << 32);
 }
 
+static int copy_guest_path_locked(zi_file_aio_ctx *c, const zi_zcl1_frame *z,
+                                 uint64_t path_ptr, uint32_t path_len,
+                                 uint8_t **out_path_copy) {
+  if (!c || !z || !out_path_copy) return 0;
+  *out_path_copy = NULL;
+  if (path_len == 0) return emit_error_locked(c, z, "file.aio", "empty path");
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_ro) return emit_error_locked(c, z, "file.aio", "no memory");
+
+  const uint8_t *path_bytes = NULL;
+  if (!mem->map_ro(mem->ctx, (zi_ptr_t)path_ptr, (zi_size32_t)path_len, &path_bytes) || !path_bytes) {
+    return emit_error_locked(c, z, "file.aio", "path out of bounds");
+  }
+  if (has_embedded_nul(path_bytes, path_len)) {
+    return emit_error_locked(c, z, "file.aio", "path contains NUL");
+  }
+
+  uint8_t *path_copy = (uint8_t *)malloc(path_len);
+  if (!path_copy) return emit_error_locked(c, z, "file.aio", "oom");
+  memcpy(path_copy, path_bytes, path_len);
+  *out_path_copy = path_copy;
+  return 1;
+}
+
+static uint32_t dtype_from_dirent(unsigned char dt) {
+  switch (dt) {
+    case DT_REG:
+      return (uint32_t)ZI_FILE_AIO_DTYPE_FILE;
+    case DT_DIR:
+      return (uint32_t)ZI_FILE_AIO_DTYPE_DIR;
+    case DT_LNK:
+      return (uint32_t)ZI_FILE_AIO_DTYPE_SYMLINK;
+    case DT_UNKNOWN:
+      return (uint32_t)ZI_FILE_AIO_DTYPE_UNKNOWN;
+    default:
+      return (uint32_t)ZI_FILE_AIO_DTYPE_OTHER;
+  }
+}
+
 static int handle_req_locked(zi_file_aio_ctx *c, const zi_zcl1_frame *z) {
   if (!c || !z) return 0;
 
@@ -641,22 +1085,8 @@ static int handle_req_locked(zi_file_aio_ctx *c, const zi_zcl1_frame *z) {
     uint32_t oflags = u32le(z->payload + 12);
     uint32_t create_mode = u32le(z->payload + 16);
 
-    if (path_len == 0) return emit_error_locked(c, z, "file.aio", "empty path");
-
-    const zi_mem_v1 *mem = zi_runtime25_mem();
-    if (!mem || !mem->map_ro) return emit_error_locked(c, z, "file.aio", "no memory");
-
-    const uint8_t *path_bytes = NULL;
-    if (!mem->map_ro(mem->ctx, (zi_ptr_t)path_ptr, (zi_size32_t)path_len, &path_bytes) || !path_bytes) {
-      return emit_error_locked(c, z, "file.aio", "path out of bounds");
-    }
-    if (has_embedded_nul(path_bytes, path_len)) {
-      return emit_error_locked(c, z, "file.aio", "path contains NUL");
-    }
-
-    uint8_t *path_copy = (uint8_t *)malloc(path_len);
-    if (!path_copy) return emit_error_locked(c, z, "file.aio", "oom");
-    memcpy(path_copy, path_bytes, path_len);
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
 
     zi_aio_job j;
     memset(&j, 0, sizeof(j));
@@ -741,6 +1171,135 @@ static int handle_req_locked(zi_file_aio_ctx *c, const zi_zcl1_frame *z) {
       return emit_error_locked(c, z, "file.aio", "queue full");
     }
 
+    return emit_ok_empty_locked(c, z);
+  }
+
+  if (z->op == (uint16_t)ZI_FILE_AIO_OP_MKDIR) {
+    if (z->payload_len != 20u) return emit_error_locked(c, z, "file.aio", "bad MKDIR payload");
+    uint64_t path_ptr = u64le(z->payload + 0);
+    uint32_t path_len = u32le(z->payload + 8);
+    uint32_t mode = u32le(z->payload + 12);
+    uint32_t flags = u32le(z->payload + 16);
+    if (flags != 0) return emit_error_locked(c, z, "file.aio", "flags must be 0");
+
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
+
+    zi_aio_job j;
+    memset(&j, 0, sizeof(j));
+    j.op = (uint16_t)ZI_FILE_AIO_OP_MKDIR;
+    j.rid = z->rid;
+    j.u.mkdir.path = path_copy;
+    j.u.mkdir.path_len = path_len;
+    j.u.mkdir.mode = mode;
+    j.u.mkdir.flags = flags;
+
+    if (!enqueue_job_locked(c, &j)) {
+      free(path_copy);
+      return emit_error_locked(c, z, "file.aio", "queue full");
+    }
+    return emit_ok_empty_locked(c, z);
+  }
+
+  if (z->op == (uint16_t)ZI_FILE_AIO_OP_RMDIR) {
+    if (z->payload_len != 16u) return emit_error_locked(c, z, "file.aio", "bad RMDIR payload");
+    uint64_t path_ptr = u64le(z->payload + 0);
+    uint32_t path_len = u32le(z->payload + 8);
+    uint32_t flags = u32le(z->payload + 12);
+    if (flags != 0) return emit_error_locked(c, z, "file.aio", "flags must be 0");
+
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
+
+    zi_aio_job j;
+    memset(&j, 0, sizeof(j));
+    j.op = (uint16_t)ZI_FILE_AIO_OP_RMDIR;
+    j.rid = z->rid;
+    j.u.rmdir.path = path_copy;
+    j.u.rmdir.path_len = path_len;
+    j.u.rmdir.flags = flags;
+
+    if (!enqueue_job_locked(c, &j)) {
+      free(path_copy);
+      return emit_error_locked(c, z, "file.aio", "queue full");
+    }
+    return emit_ok_empty_locked(c, z);
+  }
+
+  if (z->op == (uint16_t)ZI_FILE_AIO_OP_UNLINK) {
+    if (z->payload_len != 16u) return emit_error_locked(c, z, "file.aio", "bad UNLINK payload");
+    uint64_t path_ptr = u64le(z->payload + 0);
+    uint32_t path_len = u32le(z->payload + 8);
+    uint32_t flags = u32le(z->payload + 12);
+    if (flags != 0) return emit_error_locked(c, z, "file.aio", "flags must be 0");
+
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
+
+    zi_aio_job j;
+    memset(&j, 0, sizeof(j));
+    j.op = (uint16_t)ZI_FILE_AIO_OP_UNLINK;
+    j.rid = z->rid;
+    j.u.unlink.path = path_copy;
+    j.u.unlink.path_len = path_len;
+    j.u.unlink.flags = flags;
+
+    if (!enqueue_job_locked(c, &j)) {
+      free(path_copy);
+      return emit_error_locked(c, z, "file.aio", "queue full");
+    }
+    return emit_ok_empty_locked(c, z);
+  }
+
+  if (z->op == (uint16_t)ZI_FILE_AIO_OP_STAT) {
+    if (z->payload_len != 16u) return emit_error_locked(c, z, "file.aio", "bad STAT payload");
+    uint64_t path_ptr = u64le(z->payload + 0);
+    uint32_t path_len = u32le(z->payload + 8);
+    uint32_t flags = u32le(z->payload + 12);
+    if (flags != 0) return emit_error_locked(c, z, "file.aio", "flags must be 0");
+
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
+
+    zi_aio_job j;
+    memset(&j, 0, sizeof(j));
+    j.op = (uint16_t)ZI_FILE_AIO_OP_STAT;
+    j.rid = z->rid;
+    j.u.stat.path = path_copy;
+    j.u.stat.path_len = path_len;
+    j.u.stat.flags = flags;
+
+    if (!enqueue_job_locked(c, &j)) {
+      free(path_copy);
+      return emit_error_locked(c, z, "file.aio", "queue full");
+    }
+    return emit_ok_empty_locked(c, z);
+  }
+
+  if (z->op == (uint16_t)ZI_FILE_AIO_OP_READDIR) {
+    if (z->payload_len != 20u) return emit_error_locked(c, z, "file.aio", "bad READDIR payload");
+    uint64_t path_ptr = u64le(z->payload + 0);
+    uint32_t path_len = u32le(z->payload + 8);
+    uint32_t max_bytes = u32le(z->payload + 12);
+    uint32_t flags = u32le(z->payload + 16);
+    if (flags != 0) return emit_error_locked(c, z, "file.aio", "flags must be 0");
+
+    uint8_t *path_copy = NULL;
+    if (!copy_guest_path_locked(c, z, path_ptr, path_len, &path_copy) || !path_copy) return 1;
+
+    zi_aio_job j;
+    memset(&j, 0, sizeof(j));
+    j.op = (uint16_t)ZI_FILE_AIO_OP_READDIR;
+    j.rid = z->rid;
+    j.u.readdir.path = path_copy;
+    j.u.readdir.path_len = path_len;
+    j.u.readdir.max_bytes = max_bytes;
+    j.u.readdir.flags = flags;
+
+    if (!enqueue_job_locked(c, &j)) {
+      free(path_copy);
+      return emit_error_locked(c, z, "file.aio", "queue full");
+    }
     return emit_ok_empty_locked(c, z);
   }
 
@@ -844,7 +1403,7 @@ static const zi_handle_ops_v1 OPS = {
 
 static const uint8_t cap_meta[] =
     "{\"kind\":\"file\",\"name\":\"aio\",\"open\":{\"params\":\"(empty)\"},"
-    "\"ops\":[\"OPEN\",\"CLOSE\",\"READ\",\"WRITE\"],\"ev\":[\"DONE\"]}";
+  "\"ops\":[\"OPEN\",\"CLOSE\",\"READ\",\"WRITE\",\"MKDIR\",\"RMDIR\",\"UNLINK\",\"STAT\",\"READDIR\"],\"ev\":[\"DONE\"]}";
 
 static const zi_cap_v1 CAP = {
     .kind = ZI_CAP_KIND_FILE,

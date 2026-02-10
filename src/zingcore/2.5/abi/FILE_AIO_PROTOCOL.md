@@ -14,7 +14,7 @@
 - Completion is delivered asynchronously as a ZCL1 frame with `op = EV_DONE` and `rid` equal to the original request `rid`.
 - The `file/aio` handle is pollable for readability via `sys/loop`.
 
-Sandboxing is identical to `file/fs@v1`:
+Sandboxing:
 
 - If `ZI_FS_ROOT` is set, guest paths must be absolute and are resolved under that root.
 - `..` traversal is rejected.
@@ -130,6 +130,121 @@ OK payload:
 - `u16 reserved = 0`
 - `u32 result = nbytes_written`
 
+### MKDIR (op=5)
+
+Request payload (20 bytes):
+
+- `u64 path_ptr`
+- `u32 path_len`
+- `u32 mode` (POSIX mode bits; if 0, runtime may choose a default such as `0755`)
+- `u32 flags` (must be 0)
+
+Immediate response:
+
+- OK with empty payload, or ERROR.
+
+Completion (`EV_DONE`):
+
+OK payload:
+
+- `u16 orig_op = 5`
+- `u16 reserved = 0`
+- `u32 result = 0`
+
+### RMDIR (op=6)
+
+Request payload (16 bytes):
+
+- `u64 path_ptr`
+- `u32 path_len`
+- `u32 flags` (must be 0)
+
+Immediate response:
+
+- OK with empty payload, or ERROR.
+
+Completion (`EV_DONE`):
+
+OK payload:
+
+- `u16 orig_op = 6`
+- `u16 reserved = 0`
+- `u32 result = 0`
+
+### UNLINK (op=7)
+
+Request payload (16 bytes):
+
+- `u64 path_ptr`
+- `u32 path_len`
+- `u32 flags` (must be 0)
+
+Immediate response:
+
+- OK with empty payload, or ERROR.
+
+Completion (`EV_DONE`):
+
+OK payload:
+
+- `u16 orig_op = 7`
+- `u16 reserved = 0`
+- `u32 result = 0`
+
+### STAT (op=8)
+
+Request payload (16 bytes):
+
+- `u64 path_ptr`
+- `u32 path_len`
+- `u32 flags` (must be 0)
+
+Immediate response:
+
+- OK with empty payload, or ERROR.
+
+Completion (`EV_DONE`):
+
+OK payload:
+
+- `u16 orig_op = 8`
+- `u16 reserved = 0`
+- `u32 result = 0`
+- extra (32 bytes):
+	- `u64 size`
+	- `u64 mtime_ns`
+	- `u32 mode`
+	- `u32 uid`
+	- `u32 gid`
+	- `u32 reserved = 0`
+
+### READDIR (op=9)
+
+Request payload (20 bytes):
+
+- `u64 path_ptr`
+- `u32 path_len`
+- `u32 max_bytes` (maximum extra bytes in completion; runtime clamps)
+- `u32 flags` (must be 0)
+
+Immediate response:
+
+- OK with empty payload, or ERROR.
+
+Completion (`EV_DONE`):
+
+OK payload:
+
+- `u16 orig_op = 9`
+- `u16 reserved = 0`
+- `u32 result = entry_count`
+- extra:
+	- `u32 flags` (`bit0 = truncated`)
+	- repeated `entry_count` times:
+		- `u32 dtype` (`0=unknown, 1=file, 2=dir, 3=symlink, 4=other`)
+		- `u32 name_len`
+		- `bytes[name_len]` (UTF-8 bytes, not NUL-terminated)
+
 ## Error handling
 
 - Submission errors (bad payload, out-of-bounds pointers, queue full) are returned as an immediate ERROR response.
@@ -139,3 +254,126 @@ OK payload:
 
 - This version returns READ data inline in completion frames. Large reads may be truncated by the runtime.
 - Guests should WATCH the queue handle for readability and use `sys/loop.POLL` to await completions without busy-waiting.
+
+## Guest-side parsing recipes
+
+This section is non-normative, but intended to be copy/paste friendly.
+
+### Waiting for completions via sys/loop (no busy-wait)
+
+The `file/aio` queue handle is watchable for **readable** readiness. The intended blocking pattern is:
+
+1. Open `sys/loop@v1`.
+2. `WATCH` the `file/aio` handle for `readable`.
+3. Whenever `zi_read(file_aio, ...)` returns `ZI_E_AGAIN`, call `sys/loop.POLL` and retry.
+
+Notes:
+
+- A READY event can be **spurious** (race); always retry the read after waking.
+- The watch is level-triggered; if completions are already buffered, POLL may return immediately.
+
+Pseudocode (C-ish):
+
+```c
+// Open sys/loop (params empty)
+zi_handle_t loop = cap_open("sys", "loop", NULL, 0);
+
+// WATCH file/aio for readable
+uint64_t watch_id = 1;
+sys_loop_watch(loop, /*handle=*/aio, /*events=*/0x1 /* readable */, watch_id);
+
+int read_frame_wait(uint8_t *out, uint32_t cap) {
+	uint32_t off = 0;
+	for (;;) {
+		int32_t n = zi_read(aio, out + off, cap - off);
+		if (n == ZI_E_AGAIN) {
+			// Block until the queue becomes readable (or timeout).
+			// timeout_ms = 0xFFFFFFFF means wait forever.
+			sys_loop_poll(loop, /*max_events=*/16, /*timeout_ms=*/0xFFFFFFFF);
+			continue;
+		}
+		if (n <= 0) return 0;
+		off += (uint32_t)n;
+
+		// ZCL1 frame is complete once we have header (24) + payload_len.
+		if (off >= 24) {
+			uint32_t payload_len = read_u32le(out + 20);
+			if (off >= 24u + payload_len) return (int)(24u + payload_len);
+		}
+	}
+}
+```
+
+### READDIR completion parsing
+
+On success, the completion is an OK frame with:
+
+- `op = EV_DONE (100)`
+- `rid = original job id`
+- payload starts with `orig_op/reserved/result` (8 bytes)
+
+For `orig_op = READDIR (9)`:
+
+- `result = entry_count`
+- extra begins with `u32 flags` then `entry_count` packed entries.
+
+Each packed entry is:
+
+- `u32 dtype`
+- `u32 name_len`
+- `bytes[name_len]`
+
+Pseudocode (C-ish, assumes `pl` points at the EV_DONE payload, and `pl_len` is its length):
+
+```c
+uint16_t orig_op = read_u16le(pl + 0);
+uint32_t result  = read_u32le(pl + 4);
+
+if (orig_op == 9 /* READDIR */) {
+	uint32_t entry_count = result;
+	if (pl_len < 8 + 4) fail();
+
+	const uint8_t *p = pl + 8;
+	uint32_t left = pl_len - 8;
+
+	uint32_t flags = read_u32le(p);
+	p += 4; left -= 4;
+
+	for (uint32_t i = 0; i < entry_count; i++) {
+		if (left < 8) fail();
+		uint32_t dtype = read_u32le(p + 0);
+		uint32_t nlen  = read_u32le(p + 4);
+		p += 8; left -= 8;
+		if (left < nlen) fail();
+
+		// name bytes are not NUL-terminated
+		const uint8_t *name = p;
+		// ... consume ...
+		p += nlen; left -= nlen;
+	}
+
+	if (flags & 1u) {
+		// truncated: retry with a larger max_bytes if you need more entries
+	}
+}
+```
+
+### STAT completion parsing
+
+For `orig_op = STAT (8)`, the OK payload is:
+
+- header (8 bytes): `orig_op/reserved/result`
+- extra (32 bytes): `size, mtime_ns, mode, uid, gid, reserved`
+
+Pseudocode:
+
+```c
+if (orig_op == 8 /* STAT */) {
+	if (pl_len != 8 + 32) fail();
+	uint64_t size     = read_u64le(pl + 8);
+	uint64_t mtime_ns = read_u64le(pl + 16);
+	uint32_t mode     = read_u32le(pl + 24);
+	uint32_t uid      = read_u32le(pl + 28);
+	uint32_t gid      = read_u32le(pl + 32);
+}
+```
