@@ -108,8 +108,14 @@ If an environment variable is unset or invalid, implementations SHOULD fall back
 ### Default transfer semantics (v1)
 
 Implementations SHOULD default to conservative semantics:
-- Reject `Transfer-Encoding: chunked` requests (treat as `ZI_E_INVALID`) unless explicitly supported.
+- If `Transfer-Encoding: chunked` is not supported, reject such requests (treat as `ZI_E_INVALID`).
+- If `Transfer-Encoding: chunked` is supported, the runtime MUST decode the chunked framing and expose the decoded bytes as a request body `STREAM` (i.e., `body_kind=2`).
 - Close the connection after completing a response, unless keep-alive is explicitly supported.
+
+Notes (reference runtime behavior):
+- Server-side incoming requests with `Transfer-Encoding: chunked` are supported and are exposed as `body_kind=STREAM`.
+- Multipart (Option A) advertisement is conservative; runtimes MAY choose not to advertise `MULTIPART` for chunked bodies.
+- Client-side `FETCH` supports `Transfer-Encoding: chunked` responses by decoding and exposing the decoded bytes as `body_kind=STREAM`.
 
 ## ZCL1 Operations
 

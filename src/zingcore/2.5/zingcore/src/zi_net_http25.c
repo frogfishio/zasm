@@ -266,6 +266,237 @@ typedef struct {
   int close_on_end;
 } zi_http_body_stream;
 
+static uint8_t *find_crlf(uint8_t *p, uint8_t *end);
+
+// Chunked-transfer decoding stream (server-side request bodies).
+// This decodes Transfer-Encoding: chunked into a flat byte stream.
+typedef struct {
+  int fd;
+  uint8_t *buf;
+  uint32_t buf_off;
+  uint32_t buf_len;
+  uint32_t buf_cap;
+
+  uint64_t chunk_rem;
+  uint32_t trailer_bytes;
+  uint32_t trailer_limit;
+
+  int state;  // 0=size line, 1=data, 2=data_crlf, 3=trailers, 4=done
+  int close_on_end;
+} zi_http_chunked_stream;
+
+static int chunked_poll_get_fd(void *ctx, int *out_fd) {
+  zi_http_chunked_stream *s = (zi_http_chunked_stream *)ctx;
+  if (!s) return 0;
+  if (s->fd < 0) return 0;
+  if (out_fd) *out_fd = s->fd;
+  return 1;
+}
+
+static const zi_handle_poll_ops_v1 CHUNKED_BODY_POLL_OPS = {
+    .get_fd = chunked_poll_get_fd,
+};
+
+static void chunked_buf_compact(zi_http_chunked_stream *s) {
+  if (!s || !s->buf) return;
+  if (s->buf_off == 0) return;
+  if (s->buf_off >= s->buf_len) {
+    s->buf_off = 0;
+    s->buf_len = 0;
+    return;
+  }
+  uint32_t avail = s->buf_len - s->buf_off;
+  memmove(s->buf, s->buf + s->buf_off, avail);
+  s->buf_off = 0;
+  s->buf_len = avail;
+}
+
+static int32_t chunked_fill(zi_http_chunked_stream *s, uint32_t min_avail) {
+  if (!s) return ZI_E_INTERNAL;
+  if (min_avail == 0) min_avail = 1;
+  while (s->buf_len - s->buf_off < min_avail) {
+    if (s->buf_cap - s->buf_len < 1024u) {
+      chunked_buf_compact(s);
+    }
+    if (s->buf_cap - s->buf_len < 1024u) {
+      uint32_t ncap = s->buf_cap ? (s->buf_cap * 2u) : 4096u;
+      if (ncap < s->buf_cap) return ZI_E_OOM;
+      if (ncap > (1024u * 1024u)) ncap = 1024u * 1024u;
+      uint8_t *nb = (uint8_t *)realloc(s->buf, (size_t)ncap);
+      if (!nb) return ZI_E_OOM;
+      s->buf = nb;
+      s->buf_cap = ncap;
+    }
+
+    ssize_t n = recv(s->fd, s->buf + s->buf_len, (size_t)(s->buf_cap - s->buf_len), 0);
+    if (n < 0) return map_errno_to_zi(errno);
+    if (n == 0) return ZI_E_IO;
+    s->buf_len += (uint32_t)n;
+  }
+  return 0;
+}
+
+static int parse_chunk_size_line(const uint8_t *p, uint32_t n, uint64_t *out_size) {
+  if (!p || !out_size) return 0;
+  uint64_t v = 0;
+  int any = 0;
+  for (uint32_t i = 0; i < n; i++) {
+    uint8_t ch = p[i];
+    if (ch == ';' || ch == ' ' || ch == '\t') break;
+    uint8_t c = (uint8_t)tolower((unsigned char)ch);
+    uint8_t d;
+    if (c >= '0' && c <= '9') d = (uint8_t)(c - '0');
+    else if (c >= 'a' && c <= 'f') d = (uint8_t)(10u + (c - 'a'));
+    else return 0;
+    any = 1;
+    if (v > (UINT64_MAX >> 4)) return 0;
+    v = (v << 4) | (uint64_t)d;
+  }
+  if (!any) return 0;
+  *out_size = v;
+  return 1;
+}
+
+static int32_t chunked_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
+  zi_http_chunked_stream *s = (zi_http_chunked_stream *)ctx;
+  if (!s) return ZI_E_INTERNAL;
+  if (cap == 0) return 0;
+  if (s->state == 4) return 0;
+
+  const zi_mem_v1 *mem = zi_runtime25_mem();
+  if (!mem || !mem->map_rw) return ZI_E_NOSYS;
+  if (dst_ptr == 0) return ZI_E_BOUNDS;
+
+  uint8_t *dst = NULL;
+  if (!mem->map_rw(mem->ctx, dst_ptr, cap, &dst) || !dst) return ZI_E_BOUNDS;
+
+  for (;;) {
+    if (s->state == 0) {
+      // Need a full chunk-size line ending in CRLF.
+      uint8_t *start = s->buf ? (s->buf + s->buf_off) : NULL;
+      uint8_t *end = s->buf ? (s->buf + s->buf_len) : NULL;
+      uint8_t *eol = (start && end) ? find_crlf(start, end) : NULL;
+      if (!eol) {
+        if (s->buf && (s->buf_len - s->buf_off) > 1024u) return ZI_E_INVALID;
+        int32_t fr = chunked_fill(s, 1u);
+        if (fr != 0) return fr;
+        continue;
+      }
+      uint32_t line_len = (uint32_t)(eol - start);
+      uint64_t sz = 0;
+      if (!parse_chunk_size_line(start, line_len, &sz)) return ZI_E_INVALID;
+      s->buf_off += line_len + 2u;
+      s->chunk_rem = sz;
+      if (sz == 0) {
+        s->state = 3;
+      } else {
+        s->state = 1;
+      }
+      continue;
+    }
+
+    if (s->state == 1) {
+      if (s->chunk_rem == 0) {
+        s->state = 2;
+        continue;
+      }
+      uint32_t avail = s->buf_len - s->buf_off;
+      if (avail == 0) {
+        int32_t fr = chunked_fill(s, 1u);
+        if (fr != 0) return fr;
+        continue;
+      }
+      uint32_t take = cap;
+      if ((uint64_t)take > s->chunk_rem) take = (uint32_t)s->chunk_rem;
+      if (take > avail) take = avail;
+      memcpy(dst, s->buf + s->buf_off, take);
+      s->buf_off += take;
+      s->chunk_rem -= (uint64_t)take;
+      return (int32_t)take;
+    }
+
+    if (s->state == 2) {
+      int32_t fr = chunked_fill(s, 2u);
+      if (fr != 0) return fr;
+      if (!(s->buf[s->buf_off] == '\r' && s->buf[s->buf_off + 1u] == '\n')) return ZI_E_INVALID;
+      s->buf_off += 2u;
+      s->state = 0;
+      continue;
+    }
+
+    if (s->state == 3) {
+      // Trailers: read lines until an empty line.
+      uint8_t *start = s->buf ? (s->buf + s->buf_off) : NULL;
+      uint8_t *end = s->buf ? (s->buf + s->buf_len) : NULL;
+      uint8_t *eol = (start && end) ? find_crlf(start, end) : NULL;
+      if (!eol) {
+        if (s->trailer_bytes > s->trailer_limit) return ZI_E_INVALID;
+        int32_t fr = chunked_fill(s, 1u);
+        if (fr != 0) return fr;
+        continue;
+      }
+      uint32_t line_len = (uint32_t)(eol - start);
+      s->buf_off += line_len + 2u;
+      s->trailer_bytes += line_len + 2u;
+      if (line_len == 0) {
+        s->state = 4;
+        return 0;
+      }
+      continue;
+    }
+
+    return 0;
+  }
+}
+
+static int32_t chunked_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
+  (void)ctx;
+  (void)src_ptr;
+  (void)len;
+  return ZI_E_DENIED;
+}
+
+static int32_t chunked_end(void *ctx) {
+  zi_http_chunked_stream *s = (zi_http_chunked_stream *)ctx;
+  if (!s) return ZI_E_INTERNAL;
+  if (s->close_on_end && s->fd >= 0) {
+    (void)close(s->fd);
+    s->fd = -1;
+  }
+  free(s->buf);
+  s->buf = NULL;
+  free(s);
+  return 0;
+}
+
+static const zi_handle_ops_v1 CHUNKED_BODY_OPS = {
+    .read = chunked_read,
+    .write = chunked_write,
+    .end = chunked_end,
+};
+
+static zi_http_chunked_stream *chunked_stream_new(int fd, const uint8_t *pre, uint32_t pre_len, uint32_t trailer_limit,
+                                                  int close_on_end) {
+  zi_http_chunked_stream *s = (zi_http_chunked_stream *)calloc(1u, sizeof(*s));
+  if (!s) return NULL;
+  s->fd = fd;
+  s->state = 0;
+  s->close_on_end = close_on_end ? 1 : 0;
+  s->trailer_limit = trailer_limit;
+  if (pre_len) {
+    s->buf = (uint8_t *)malloc((size_t)pre_len);
+    if (!s->buf) {
+      free(s);
+      return NULL;
+    }
+    memcpy(s->buf, pre, pre_len);
+    s->buf_off = 0;
+    s->buf_len = pre_len;
+    s->buf_cap = pre_len;
+  }
+  return s;
+}
+
 static int body_poll_get_fd(void *ctx, int *out_fd) {
   zi_http_body_stream *s = (zi_http_body_stream *)ctx;
   if (!s) return 0;
@@ -1366,16 +1597,28 @@ static int eq_nocase_bytes(const uint8_t *p, uint32_t n, const char *lit) {
 static int contains_nocase_token(const uint8_t *p, uint32_t n, const char *lit) {
   if (!p || !lit) return 0;
   size_t ln = strlen(lit);
-  if (ln == 0 || (size_t)n < ln) return 0;
-  for (uint32_t i = 0; i + (uint32_t)ln <= n; i++) {
-    int ok = 1;
-    for (size_t j = 0; j < ln; j++) {
-      if (tolower((unsigned char)p[i + (uint32_t)j]) != tolower((unsigned char)lit[j])) {
-        ok = 0;
-        break;
+  if (ln == 0) return 0;
+
+  // Parse a comma-separated list of tokens. Tokens end at comma, whitespace, or ';'.
+  // This avoids false positives like "unchunked" matching "chunked".
+  uint32_t i = 0;
+  while (i < n) {
+    while (i < n && (p[i] == ',' || p[i] == ' ' || p[i] == '\t' || p[i] == '\r' || p[i] == '\n')) i++;
+    if (i >= n) break;
+    uint32_t start = i;
+    while (i < n && p[i] != ',' && p[i] != ' ' && p[i] != '\t' && p[i] != '\r' && p[i] != '\n' && p[i] != ';') i++;
+    uint32_t tok_len = i - start;
+    if (tok_len == (uint32_t)ln) {
+      int ok = 1;
+      for (size_t j = 0; j < ln; j++) {
+        if (tolower((unsigned char)p[start + (uint32_t)j]) != tolower((unsigned char)lit[j])) {
+          ok = 0;
+          break;
+        }
       }
+      if (ok) return 1;
     }
-    if (ok) return 1;
+    while (i < n && p[i] != ',') i++;
   }
   return 0;
 }
@@ -1571,14 +1814,7 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
       }
     }
     if (name_len == 17 && memcmp(name, "transfer-encoding", 17) == 0) {
-      if (val_len >= 7) {
-        for (uint32_t i = 0; i + 7 <= val_len; i++) {
-          if (memcmp(val + i, "chunked", 7) == 0) {
-            has_chunked = 1;
-            break;
-          }
-        }
-      }
+      if (contains_nocase_token(val, val_len, "chunked")) has_chunked = 1;
     }
 
     if (name_len == 12 && memcmp(name, "content-type", 12) == 0) {
@@ -1589,25 +1825,46 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
     p = eol + 2;
   }
 
-  if (has_chunked) {
-    free(headers);
-    free(buf);
-    return 0;
-  }
-
   uint32_t body_kind = ZI_HTTP_BODY_NONE;
   uint8_t *body_inline = NULL;
   uint32_t body_inline_len = 0;
   zi_handle_t body_handle = 0;
   zi_http_body_stream *bs = NULL;
+  zi_http_chunked_stream *cbs = NULL;
   uint64_t body_rem = 0;
 
   size_t already = len - header_bytes;
-  if (!has_content_len) content_len = 0;
-  body_rem = content_len;
-  if (content_len == 0) {
-    body_kind = ZI_HTTP_BODY_NONE;
-  } else if (content_len <= (uint64_t)c->lim.max_inline_body_bytes) {
+
+  // Body handling:
+  // - If Transfer-Encoding: chunked is present, ignore Content-Length and expose a decoded STREAM body.
+  // - Otherwise, use Content-Length to decide NONE vs INLINE vs STREAM.
+  if (has_chunked) {
+    body_kind = ZI_HTTP_BODY_STREAM;
+    uint32_t pre_len = 0;
+    if (already > 0) {
+      if (already > (size_t)UINT32_MAX) pre_len = UINT32_MAX;
+      else pre_len = (uint32_t)already;
+    }
+    cbs = chunked_stream_new(conn_fd, buf + header_bytes, pre_len, c->lim.max_header_bytes, 0);
+    if (!cbs) {
+      free(headers);
+      free(buf);
+      return 0;
+    }
+    body_handle = zi_handle25_alloc_with_poll(&CHUNKED_BODY_OPS, &CHUNKED_BODY_POLL_OPS, cbs, ZI_H_READABLE | ZI_H_ENDABLE);
+    if (body_handle < 3) {
+      chunked_end(cbs);
+      free(headers);
+      free(buf);
+      return 0;
+    }
+    body_rem = 0;
+  } else {
+    if (!has_content_len) content_len = 0;
+    body_rem = content_len;
+    if (content_len == 0) {
+      body_kind = ZI_HTTP_BODY_NONE;
+    } else if (content_len <= (uint64_t)c->lim.max_inline_body_bytes) {
     body_kind = ZI_HTTP_BODY_INLINE;
     body_inline_len = (uint32_t)content_len;
     body_inline = (uint8_t *)malloc((size_t)body_inline_len);
@@ -1638,7 +1895,7 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
       off += (size_t)rn;
     }
     body_rem = 0;
-  } else {
+    } else {
     body_kind = ZI_HTTP_BODY_STREAM;
     uint32_t pre_len = 0;
     if (already > 0) {
@@ -1655,6 +1912,7 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
       return 0;
     }
     body_rem = rem;
+    }
   }
 
   zi_http_req *r = alloc_req_slot(c);
@@ -1680,10 +1938,11 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
   r->mp_boundary_len = 0;
   r->mp = NULL;
 
-  if (body_kind == ZI_HTTP_BODY_STREAM) r->body_stream = bs;
+  if (!has_chunked && body_kind == ZI_HTTP_BODY_STREAM) r->body_stream = bs;
 
   // If this is multipart/form-data, advertise MULTIPART and store boundary.
-  if ((body_kind == ZI_HTTP_BODY_STREAM || body_kind == ZI_HTTP_BODY_INLINE) && content_type && content_type_len > 0) {
+  // NOTE: For chunked bodies we do not advertise MULTIPART.
+  if (!has_chunked && (body_kind == ZI_HTTP_BODY_STREAM || body_kind == ZI_HTTP_BODY_INLINE) && content_type && content_type_len > 0) {
     // conservative: require prefix "multipart/form-data" and a boundary parameter
     if (starts_with_nocase_bytes(content_type, content_type_len, "multipart/form-data")) {
       uint32_t boff = 0;
@@ -1737,20 +1996,25 @@ static int build_ev_request(zi_http_cap_ctx *c, uint32_t listener_id, int conn_f
   // If this is a normal streamed body, expose it as a readable handle.
   // For MULTIPART we intentionally do not expose a raw body handle (guests must use MULTIPART_*).
   if (body_kind == ZI_HTTP_BODY_STREAM) {
-    if (!r->body_stream) {
-      free(headers);
-      free(buf);
-      close_req(r);
-      return 0;
+    if (body_handle >= 3) {
+      // Chunked: body handle already allocated.
+      r->body_handle = body_handle;
+    } else {
+      if (!r->body_stream) {
+        free(headers);
+        free(buf);
+        close_req(r);
+        return 0;
+      }
+      body_handle = zi_handle25_alloc_with_poll(&BODY_OPS, &BODY_POLL_OPS, r->body_stream, ZI_H_READABLE | ZI_H_ENDABLE);
+      if (body_handle < 3) {
+        free(headers);
+        free(buf);
+        close_req(r);
+        return 0;
+      }
+      r->body_handle = body_handle;
     }
-    body_handle = zi_handle25_alloc_with_poll(&BODY_OPS, &BODY_POLL_OPS, r->body_stream, ZI_H_READABLE | ZI_H_ENDABLE);
-    if (body_handle < 3) {
-      free(headers);
-      free(buf);
-      close_req(r);
-      return 0;
-    }
-    r->body_handle = body_handle;
   } else if (body_kind == ZI_HTTP_BODY_MULTIPART) {
     // No raw body handle.
     body_handle = 0;
@@ -3397,22 +3661,9 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
       }
     }
     if (name_len == 17 && memcmp(name, "transfer-encoding", 17) == 0) {
-      if (val_len >= 7) {
-        for (uint32_t i = 0; i + 7 <= val_len; i++) {
-          if (memcmp(val + i, "chunked", 7) == 0) {
-            has_chunked = 1;
-            break;
-          }
-        }
-      }
+      if (contains_nocase_token(val, val_len, "chunked")) has_chunked = 1;
     }
     hp = eol + 2;
-  }
-  if (has_chunked) {
-    free(headers);
-    free(rbuf);
-    (void)close(fd);
-    return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_invalid", "chunked not supported");
   }
 
   uint32_t resp_body_kind = ZI_HTTP_BODY_NONE;
@@ -3421,12 +3672,39 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
   zi_handle_t resp_body_handle = 0;
 
   size_t already = rlen - header_bytes;
-  if (!has_content_len) content_len = 0;
-  if (content_len == 0) {
-    resp_body_kind = ZI_HTTP_BODY_NONE;
-    (void)close(fd);
-    fd = -1;
-  } else if (content_len <= (uint64_t)c->lim.max_inline_body_bytes) {
+  if (has_chunked) {
+    resp_body_kind = ZI_HTTP_BODY_STREAM;
+    uint32_t pre_len = 0;
+    if (already > 0) {
+      if (already > (size_t)UINT32_MAX) pre_len = UINT32_MAX;
+      else pre_len = (uint32_t)already;
+    }
+    // Header parsing above uses blocking recv; once the response is framed, make
+    // the socket nonblocking for streamed body reads.
+    set_nonblocking_best_effort(fd);
+    zi_http_chunked_stream *cbs = chunked_stream_new(fd, rbuf + header_bytes, pre_len, c->lim.max_header_bytes, 1);
+    if (!cbs) {
+      free(headers);
+      free(rbuf);
+      (void)close(fd);
+      return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_oom", "oom stream");
+    }
+    resp_body_handle = zi_handle25_alloc_with_poll(&CHUNKED_BODY_OPS, &CHUNKED_BODY_POLL_OPS, cbs, ZI_H_READABLE | ZI_H_ENDABLE);
+    if (resp_body_handle < 3) {
+      chunked_end(cbs);
+      free(headers);
+      free(rbuf);
+      (void)close(fd);
+      return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_internal", "failed alloc body handle");
+    }
+    fd = -1; // owned by handle
+  } else {
+    if (!has_content_len) content_len = 0;
+    if (content_len == 0) {
+      resp_body_kind = ZI_HTTP_BODY_NONE;
+      (void)close(fd);
+      fd = -1;
+    } else if (content_len <= (uint64_t)c->lim.max_inline_body_bytes) {
     resp_body_kind = ZI_HTTP_BODY_INLINE;
     resp_inline_len = (uint32_t)content_len;
     resp_inline = (uint8_t *)malloc((size_t)resp_inline_len);
@@ -3461,7 +3739,7 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
     }
     (void)close(fd);
     fd = -1;
-  } else {
+    } else {
     resp_body_kind = ZI_HTTP_BODY_STREAM;
     uint32_t pre_len = 0;
     if (already > 0) {
@@ -3490,6 +3768,7 @@ static int dispatch_fetch(zi_http_cap_ctx *c, uint32_t rid, const uint8_t *p, ui
       return set_out_frame_err(c, ZI_HTTP_OP_FETCH, rid, "t_http_internal", "failed alloc body handle");
     }
     fd = -1; // owned by handle
+    }
   }
 
   // Build response payload

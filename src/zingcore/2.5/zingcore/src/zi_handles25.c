@@ -119,3 +119,15 @@ int zi_handle25_poll_fd(zi_handle_t h, int *out_fd) {
   if (out_fd) *out_fd = fd;
   return 1;
 }
+
+int zi_handle25_poll_ops(zi_handle_t h, const zi_handle_poll_ops_v1 **out_poll_ops, void **out_ctx) {
+  if (!g_h.initialized) return 0;
+  uint32_t idx = idx_from_handle(h);
+  if (idx >= ZI_HANDLES25_MAX) return 0;
+  const zi_handle_entry *e = &g_h.entries[idx];
+  if (!e->in_use) return 0;
+  if (!e->poll_ops) return 0;
+  if (out_poll_ops) *out_poll_ops = e->poll_ops;
+  if (out_ctx) *out_ctx = e->ctx;
+  return 1;
+}

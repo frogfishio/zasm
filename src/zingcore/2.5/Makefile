@@ -3,6 +3,9 @@ CFLAGS  ?= -std=c11 -O2 -Wall -Wextra -Wpedantic
 AR      ?= ar
 ARFLAGS ?= rcs
 
+# Auto header dependencies (prevents stale objects when headers change).
+DEPFLAGS ?= -MMD -MP
+
 BUILD       ?= build
 DIST        ?= dist
 DIST_DEBUG  ?= $(DIST)/debug
@@ -69,6 +72,8 @@ OBJ := \
 	$(BUILD)/zi_hopabi25.o \
 	$(BUILD)/zi_telemetry.o
 
+TESTOBJ = $(addprefix $(BUILD)/,$(addsuffix .o,$(TESTS)))
+
 TESTS := test_caps test_async_registry test_zingcore25_api test_problem test_telemetry_jsonl test_sysabi25_min_core test_sysabi25_ctl_caps_list test_sysabi25_file_aio_cap test_sysabi25_tcp_cap test_sysabi25_tcp_loop_connect_cap test_sysabi25_http_cap test_sysabi25_http_loop_cap test_sysabi25_argv_cap test_sysabi25_env_cap test_sysabi25_hopper_cap test_sysabi25_event_bus_cap test_sysabi25_sys_info_cap test_sysabi25_sys_loop_cap test_bus_rpc_v1 test_hopabi25_basic
 
 EXAMPLES := stdio_caps_demo all_caps_demo hopabi_guest_demo
@@ -87,22 +92,24 @@ dist-dirs:
 
 $(BUILD)/%.o: $(SRCDIR)/%.c | dirs
 	mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(INCDIR) -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 $(BUILD)/test_%.o: $(TESTDIR)/test_%.c | dirs
 	mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -I$(INCDIR) -c $< -o $@
+	$(CC) $(CFLAGS) $(DEPFLAGS) -I$(INCDIR) -MF $(@:.o=.d) -MT $@ -c $< -o $@
 
 $(LIB): $(OBJ)
 	$(AR) $(ARFLAGS) $@ $^
 
-test: $(LIB) $(addprefix $(BUILD)/,$(addsuffix .o,$(TESTS)))
+test: $(LIB) $(TESTOBJ)
 	@set -e; \
 	for t in $(TESTS); do \
 	  bin="$(BUILD)/$$t"; \
 	  $(CC) $(CFLAGS) "$(BUILD)/$$t.o" $(LIB) -o "$$bin"; \
 	  "$$bin"; \
 	done
+
+-include $(OBJ:.o=.d) $(TESTOBJ:.o=.d)
 
 examples: $(LIB)
 	@set -e; \

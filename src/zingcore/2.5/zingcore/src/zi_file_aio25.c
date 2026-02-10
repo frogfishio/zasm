@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 #ifndef ZI_FILE_AIO_MAX_JOBS
@@ -30,6 +31,10 @@
 
 #ifndef ZI_FILE_AIO_MAX_WRITE
 #define ZI_FILE_AIO_MAX_WRITE (1024u * 1024u)
+#endif
+
+#ifndef ZI_FILE_AIO_MAX_OUT
+#define ZI_FILE_AIO_MAX_OUT (1024u * 1024u)
 #endif
 
 typedef struct {
@@ -104,7 +109,8 @@ typedef struct {
   uint8_t inbuf[65536];
   uint32_t in_len;
 
-  uint8_t outbuf[65536];
+  uint8_t *outbuf;
+  uint32_t out_cap;
   uint32_t out_len;
   uint32_t out_off;
 
@@ -113,6 +119,8 @@ typedef struct {
   int notify_r;
   int notify_w;
   int notify_signaled;
+
+  int submit_full;
 
   int root_enabled;
   int rootfd;
@@ -132,6 +140,22 @@ typedef struct {
   zi_aio_file files[ZI_FILE_AIO_MAX_FILES];
   uint64_t next_file_id;
 } zi_file_aio_ctx;
+
+static int handle_req_locked(zi_file_aio_ctx *c, const zi_zcl1_frame *z);
+
+static void compact_out_locked(zi_file_aio_ctx *c) {
+  if (!c || !c->outbuf) return;
+  if (c->out_off == 0) return;
+  if (c->out_off >= c->out_len) {
+    c->out_off = 0;
+    c->out_len = 0;
+    return;
+  }
+  uint32_t remain = c->out_len - c->out_off;
+  memmove(c->outbuf, c->outbuf + c->out_off, remain);
+  c->out_off = 0;
+  c->out_len = remain;
+}
 
 static int32_t map_errno_to_zi(int e) {
   switch (e) {
@@ -335,25 +359,72 @@ done:
 static int append_out_locked(zi_file_aio_ctx *c, const uint8_t *data, uint32_t n) {
   if (!c) return 0;
   if (n == 0) return 1;
-  if (c->out_len + n > (uint32_t)sizeof(c->outbuf)) return 0;
+
+  if (!c->outbuf || c->out_cap == 0) return 0;
+
+  // Reclaim space from the front if we've already read some bytes.
+  compact_out_locked(c);
+
+  if (c->out_len + n > c->out_cap) {
+    uint32_t need = c->out_len + n;
+    if (need > (uint32_t)ZI_FILE_AIO_MAX_OUT) return 0;
+    uint32_t new_cap = c->out_cap;
+    while (new_cap < need && new_cap < (uint32_t)ZI_FILE_AIO_MAX_OUT) {
+      uint32_t next = new_cap * 2u;
+      if (next <= new_cap) {
+        new_cap = (uint32_t)ZI_FILE_AIO_MAX_OUT;
+        break;
+      }
+      new_cap = next;
+    }
+    if (new_cap < need) new_cap = need;
+    if (new_cap > (uint32_t)ZI_FILE_AIO_MAX_OUT) new_cap = (uint32_t)ZI_FILE_AIO_MAX_OUT;
+    if (new_cap < need) return 0;
+
+    uint8_t *nb = (uint8_t *)realloc(c->outbuf, (size_t)new_cap);
+    if (!nb) return 0;
+    c->outbuf = nb;
+    c->out_cap = new_cap;
+  }
+
   memcpy(c->outbuf + c->out_len, data, n);
   c->out_len += n;
   return 1;
 }
 
-static void signal_readable_locked(zi_file_aio_ctx *c) {
+static int append_out_or_wait_locked(zi_file_aio_ctx *c, const uint8_t *data, uint32_t n) {
+  if (!c) return 0;
+  if (n > (uint32_t)ZI_FILE_AIO_MAX_OUT) return 0;
+
+  for (;;) {
+    if (append_out_locked(c, data, n)) return 1;
+    if (c->closed) return 0;
+
+    // If we can still grow and failed, treat as fatal (likely OOM).
+    if (c->out_cap < (uint32_t)ZI_FILE_AIO_MAX_OUT) return 0;
+
+    // At max buffer cap: wait for the guest to drain output.
+    pthread_cond_wait(&c->cv, &c->mu);
+  }
+}
+
+static void signal_wakeup_locked(zi_file_aio_ctx *c) {
   if (!c) return;
   if (c->notify_signaled) return;
-  if (c->out_len == 0) return;
   if (c->notify_w < 0) return;
   uint8_t b = 1;
   ssize_t n = write(c->notify_w, &b, 1);
   if (n == 1) c->notify_signaled = 1;
 }
 
-static void drain_notify_if_empty(zi_file_aio_ctx *c) {
+static void signal_readable_locked(zi_file_aio_ctx *c) {
   if (!c) return;
-  if (c->out_len != 0) return;
+  if (c->out_len == 0) return;
+  signal_wakeup_locked(c);
+}
+
+static void drain_wakeup_locked(zi_file_aio_ctx *c) {
+  if (!c) return;
   uint8_t tmp[64];
   for (;;) {
     ssize_t n = read(c->notify_r, tmp, sizeof(tmp));
@@ -361,6 +432,40 @@ static void drain_notify_if_empty(zi_file_aio_ctx *c) {
     break;
   }
   c->notify_signaled = 0;
+}
+
+static void drain_notify_if_empty(zi_file_aio_ctx *c) {
+  if (!c) return;
+  if (c->out_len != 0) return;
+  drain_wakeup_locked(c);
+}
+
+static int ensure_out_headroom_locked(zi_file_aio_ctx *c, uint32_t need_free) {
+  if (!c) return 0;
+  if (!c->outbuf || c->out_cap == 0) return 0;
+  compact_out_locked(c);
+  if (c->out_cap - c->out_len >= need_free) return 1;
+
+  uint32_t need = c->out_len + need_free;
+  if (need > (uint32_t)ZI_FILE_AIO_MAX_OUT) return 0;
+  uint32_t new_cap = c->out_cap;
+  while (new_cap < need && new_cap < (uint32_t)ZI_FILE_AIO_MAX_OUT) {
+    uint32_t next = new_cap * 2u;
+    if (next <= new_cap) {
+      new_cap = (uint32_t)ZI_FILE_AIO_MAX_OUT;
+      break;
+    }
+    new_cap = next;
+  }
+  if (new_cap < need) new_cap = need;
+  if (new_cap > (uint32_t)ZI_FILE_AIO_MAX_OUT) new_cap = (uint32_t)ZI_FILE_AIO_MAX_OUT;
+  if (new_cap < need) return 0;
+
+  uint8_t *nb = (uint8_t *)realloc(c->outbuf, (size_t)new_cap);
+  if (!nb) return 0;
+  c->outbuf = nb;
+  c->out_cap = new_cap;
+  return (c->out_cap - c->out_len >= need_free) ? 1 : 0;
 }
 
 static void job_free_payload(zi_aio_job *j) {
@@ -402,6 +507,7 @@ static int enqueue_job_locked(zi_file_aio_ctx *c, const zi_aio_job *src) {
   c->jobs[c->job_tail] = *src;
   c->job_tail = (c->job_tail + 1) % ZI_FILE_AIO_MAX_JOBS;
   c->job_count++;
+  if (c->job_count >= ZI_FILE_AIO_MAX_JOBS) c->submit_full = 1;
   pthread_cond_signal(&c->cv);
   return 1;
 }
@@ -412,6 +518,11 @@ static int dequeue_job_locked(zi_file_aio_ctx *c, zi_aio_job *out) {
   *out = c->jobs[c->job_head];
   c->job_head = (c->job_head + 1) % ZI_FILE_AIO_MAX_JOBS;
   c->job_count--;
+  if (c->submit_full && c->job_count == (ZI_FILE_AIO_MAX_JOBS - 1u)) {
+    c->submit_full = 0;
+    // Transition from full -> has space: wake sys/loop waiters.
+    signal_wakeup_locked(c);
+  }
   return 1;
 }
 
@@ -442,7 +553,7 @@ static int file_alloc_locked(zi_file_aio_ctx *c, int fd, uint64_t *out_id) {
 static int emit_done_ok_locked(zi_file_aio_ctx *c, uint32_t rid, uint16_t orig_op, uint32_t result, const uint8_t *extra, uint32_t extra_len) {
   if (!c) return 0;
   uint32_t payload_len = 8u + extra_len;
-  if (payload_len > (uint32_t)sizeof(c->outbuf)) return 0;
+  if (payload_len > (uint32_t)ZI_FILE_AIO_MAX_OUT) return 0;
 
   uint8_t *pl = (uint8_t *)malloc(payload_len);
   if (!pl) return 0;
@@ -457,7 +568,7 @@ static int emit_done_ok_locked(zi_file_aio_ctx *c, uint32_t rid, uint16_t orig_o
   if (n < 0) return 0;
 
   int was_empty = (c->out_len == 0);
-  if (!append_out_locked(c, fr, (uint32_t)n)) return 0;
+  if (!append_out_or_wait_locked(c, fr, (uint32_t)n)) return 0;
   if (was_empty) signal_readable_locked(c);
   return 1;
 }
@@ -468,9 +579,37 @@ static int emit_done_err_locked(zi_file_aio_ctx *c, uint32_t rid, const char *tr
   int n = zi_zcl1_write_error(fr, (uint32_t)sizeof(fr), (uint16_t)ZI_FILE_AIO_EV_DONE, rid, trace, msg);
   if (n < 0) return 0;
   int was_empty = (c->out_len == 0);
-  if (!append_out_locked(c, fr, (uint32_t)n)) return 0;
+  if (!append_out_or_wait_locked(c, fr, (uint32_t)n)) return 0;
   if (was_empty) signal_readable_locked(c);
   return 1;
+}
+
+static void process_pending_requests_locked(zi_file_aio_ctx *c) {
+  if (!c) return;
+  uint32_t off = 0;
+  while (c->in_len - off >= 24u) {
+    // Reserve headroom so we can always emit an immediate response frame.
+    if (!ensure_out_headroom_locked(c, 4096u)) break;
+
+    uint32_t payload_len = zi_zcl1_read_u32(c->inbuf + off + 20);
+    uint32_t frame_len = 24u + payload_len;
+    if (c->in_len - off < frame_len) break;
+
+    zi_zcl1_frame z;
+    if (!zi_zcl1_parse(c->inbuf + off, frame_len, &z)) {
+      off += 1;
+      continue;
+    }
+
+    (void)handle_req_locked(c, &z);
+    off += frame_len;
+  }
+
+  if (off > 0) {
+    uint32_t remain = c->in_len - off;
+    if (remain) memmove(c->inbuf, c->inbuf + off, remain);
+    c->in_len = remain;
+  }
 }
 
 static void *worker_main(void *arg) {
@@ -971,8 +1110,29 @@ static int get_fd(void *ctx, int *out_fd) {
   return 1;
 }
 
+static uint32_t get_ready(void *ctx) {
+  zi_file_aio_ctx *c = (zi_file_aio_ctx *)ctx;
+  if (!c) return 0;
+  uint32_t ev = 0;
+  pthread_mutex_lock(&c->mu);
+  if (c->out_len != 0) ev |= ZI_H_READABLE;
+  if (!c->closed && c->job_count < ZI_FILE_AIO_MAX_JOBS) ev |= ZI_H_WRITABLE;
+  pthread_mutex_unlock(&c->mu);
+  return ev;
+}
+
+static void drain_wakeup(void *ctx) {
+  zi_file_aio_ctx *c = (zi_file_aio_ctx *)ctx;
+  if (!c) return;
+  pthread_mutex_lock(&c->mu);
+  drain_wakeup_locked(c);
+  pthread_mutex_unlock(&c->mu);
+}
+
 static const zi_handle_poll_ops_v1 POLL_OPS = {
     .get_fd = get_fd,
+    .get_ready = get_ready,
+    .drain_wakeup = drain_wakeup,
 };
 
 static int32_t aio_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
@@ -998,11 +1158,20 @@ static int32_t aio_read(void *ctx, zi_ptr_t dst_ptr, zi_size32_t cap) {
   uint32_t n = (avail < (uint32_t)cap) ? avail : (uint32_t)cap;
   memcpy(dst, c->outbuf + c->out_off, n);
   c->out_off += n;
+
+  // Any progress draining output may free space for the worker to emit completions.
+  pthread_cond_broadcast(&c->cv);
+
   if (c->out_off == c->out_len) {
     c->out_off = 0;
     c->out_len = 0;
     drain_notify_if_empty(c);
   }
+
+  // If there are pending requests buffered from prior writes, process them now
+  // (this makes forward progress even when the guest stops writing and waits on acks).
+  process_pending_requests_locked(c);
+
   pthread_mutex_unlock(&c->mu);
   return (int32_t)n;
 }
@@ -1324,27 +1493,7 @@ static int32_t aio_write(void *ctx, zi_ptr_t src_ptr, zi_size32_t len) {
   memcpy(c->inbuf + c->in_len, src, (size_t)len);
   c->in_len += (uint32_t)len;
 
-  uint32_t off = 0;
-  while (c->in_len - off >= 24u) {
-    uint32_t payload_len = zi_zcl1_read_u32(c->inbuf + off + 20);
-    uint32_t frame_len = 24u + payload_len;
-    if (c->in_len - off < frame_len) break;
-
-    zi_zcl1_frame z;
-    if (!zi_zcl1_parse(c->inbuf + off, frame_len, &z)) {
-      off += 1;
-      continue;
-    }
-
-    (void)handle_req_locked(c, &z);
-    off += frame_len;
-  }
-
-  if (off > 0) {
-    uint32_t remain = c->in_len - off;
-    if (remain) memmove(c->inbuf, c->inbuf + off, remain);
-    c->in_len = remain;
-  }
+  process_pending_requests_locked(c);
 
   pthread_mutex_unlock(&c->mu);
   return (int32_t)len;
@@ -1378,6 +1527,10 @@ static int32_t aio_end(void *ctx) {
 
   if (c->rootfd >= 0) (void)close(c->rootfd);
   c->rootfd = -1;
+
+  free(c->outbuf);
+  c->outbuf = NULL;
+  c->out_cap = 0;
 
   // Free any queued jobs payloads.
   for (uint32_t k = 0; k < c->job_count; k++) {
@@ -1428,6 +1581,15 @@ zi_handle_t zi_file_aio25_open_from_params(zi_ptr_t params_ptr, zi_size32_t para
   c->notify_r = -1;
   c->notify_w = -1;
   c->next_file_id = 1;
+  c->submit_full = 0;
+
+  c->out_cap = 65536u;
+  if (c->out_cap > (uint32_t)ZI_FILE_AIO_MAX_OUT) c->out_cap = (uint32_t)ZI_FILE_AIO_MAX_OUT;
+  c->outbuf = (uint8_t *)malloc((size_t)c->out_cap);
+  if (!c->outbuf) {
+    free(c);
+    return (zi_handle_t)ZI_E_OOM;
+  }
 
   c->root_enabled = 0;
   c->rootfd = -1;
@@ -1441,19 +1603,24 @@ zi_handle_t zi_file_aio25_open_from_params(zi_ptr_t params_ptr, zi_size32_t para
   }
 
   if (pthread_mutex_init(&c->mu, NULL) != 0) {
+    free(c->outbuf);
     free(c);
     return (zi_handle_t)ZI_E_INTERNAL;
   }
   if (pthread_cond_init(&c->cv, NULL) != 0) {
     pthread_mutex_destroy(&c->mu);
+    free(c->outbuf);
     free(c);
     return (zi_handle_t)ZI_E_INTERNAL;
   }
 
+  // Use a pipe as a wakeup notifier for sys/loop.
+  // Readiness itself is provided via get_ready() (level-triggered).
   int fds[2];
   if (pipe(fds) != 0) {
     pthread_cond_destroy(&c->cv);
     pthread_mutex_destroy(&c->mu);
+    free(c->outbuf);
     free(c);
     return (zi_handle_t)ZI_E_IO;
   }
@@ -1467,6 +1634,7 @@ zi_handle_t zi_file_aio25_open_from_params(zi_ptr_t params_ptr, zi_size32_t para
     (void)close(c->notify_w);
     pthread_cond_destroy(&c->cv);
     pthread_mutex_destroy(&c->mu);
+    free(c->outbuf);
     free(c);
     return (zi_handle_t)ZI_E_INTERNAL;
   }

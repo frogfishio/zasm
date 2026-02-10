@@ -125,7 +125,12 @@ static int register_all_caps(void) {
   if (!zi_event_bus25_register()) return 0;
   if (!zi_file_aio25_register()) return 0;
   if (!zi_net_tcp25_register()) return 0;
-  if (!zi_net_http25_register()) return 0;
+  // net/http is intentionally opt-in (experimental / convenience only).
+  // Enable explicitly via environment for dev/testing.
+  const char *http_enable = getenv("ZI_ENABLE_HTTP_CAP");
+  if (http_enable && http_enable[0] && http_enable[0] != '0') {
+    if (!zi_net_http25_register()) return 0;
+  }
   if (!zi_proc_argv25_register()) return 0;
   if (!zi_proc_env25_register()) return 0;
   if (!zi_proc_hopper25_register()) return 0;

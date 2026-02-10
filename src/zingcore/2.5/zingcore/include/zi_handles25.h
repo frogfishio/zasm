@@ -22,6 +22,16 @@ typedef struct zi_handle_poll_ops_v1 {
   // Returns 1 and writes a non-negative fd to out_fd if the handle is pollable.
   // Returns 0 if the handle is not pollable or has no associated fd.
   int (*get_fd)(void *ctx, int *out_fd);
+
+  // Optional: returns current level-triggered readiness bits for the handle.
+  // Bits use the guest-visible sys/loop readiness mask (READABLE/WRITABLE/etc).
+  // sys/loop may use this to report readiness independent of OS POLLOUT/POLLIN.
+  uint32_t (*get_ready)(void *ctx);
+
+  // Optional: drains/acknowledges the wakeup fd returned by get_fd().
+  // This is used when the returned fd is a pure wakeup notifier rather than a
+  // data stream that sys/loop should not consume.
+  void (*drain_wakeup)(void *ctx);
 } zi_handle_poll_ops_v1;
 
 // Initializes the handle table (safe to call multiple times).
@@ -42,6 +52,10 @@ int zi_handle25_lookup(zi_handle_t h, const zi_handle_ops_v1 **out_ops, void **o
 // If the handle is pollable, returns 1 and stores its fd in out_fd.
 // Otherwise returns 0.
 int zi_handle25_poll_fd(zi_handle_t h, int *out_fd);
+
+// If the handle has poll ops, returns 1 and stores poll_ops/ctx.
+// Otherwise returns 0.
+int zi_handle25_poll_ops(zi_handle_t h, const zi_handle_poll_ops_v1 **out_poll_ops, void **out_ctx);
 
 // Releases (invalidates) an existing handle.
 // Returns 1 if the handle existed and was released.

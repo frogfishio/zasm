@@ -250,6 +250,74 @@ OK payload:
 - Submission errors (bad payload, out-of-bounds pointers, queue full) are returned as an immediate ERROR response.
 - Execution errors (open/read/write failures, unknown `file_id`, sandbox denial) are returned as an `EV_DONE` ERROR frame.
 
+## Backpressure (guest-level contract)
+
+`file/aio` has a bounded internal submission queue. When the queue is full, the host MUST reject additional job submissions.
+
+### What the guest observes
+
+- The job submission itself is still a normal ZCL1 request written to the `file/aio` handle.
+- If the queue is full, the host MUST return an **immediate** ZCL1 ERROR response for that `(op, rid)`.
+
+In the zingcore 2.5 reference implementation, this error uses:
+
+- `trace_len/trace` = `"file.aio"`
+- `msg_len/msg` = `"queue full"`
+
+These strings are not a general ZCL1 standard, but they are the stable shape used by zingcore 2.5 today.
+Guests SHOULD treat this condition as a retryable backpressure signal.
+
+### How to wait (no “queue has space” readiness)
+
+The intended guest strategy is:
+
+- Guests SHOULD keep a bounded number of in-flight jobs.
+- On a `queue full` submission error, guests SHOULD stop submitting new jobs for that queue.
+- Guests SHOULD drain completions/events from the same `file/aio` handle.
+- Guests SHOULD use `sys/loop` to block until the queue becomes **readable** (meaning: there are frames to read), then read and process them.
+- After observing progress (typically one or more `EV_DONE` frames), guests SHOULD retry the submission.
+
+This avoids busy-looping while still fitting the single-wait model.
+
+### Submission writable readiness (queue has space)
+
+Guests MAY also watch the `file/aio` handle for `writable` readiness to wait for submission space.
+
+Contract:
+
+- When the submission queue is full, the host SHOULD report the handle as not-writable.
+- When the queue transitions from full to having at least one free slot, the host SHOULD report the handle as writable.
+
+This is a readiness hint and is still subject to races:
+
+- A guest might observe `writable` and still lose a race and get `queue full`.
+- Guests MUST handle `queue full` as the authoritative signal.
+
+Intended guest pattern:
+
+- On `queue full`, WATCH `writable` and `POLL`.
+- Retry submission on READY(writable).
+
+Pseudocode sketch:
+
+```c
+for (;;) {
+	submit_job(aio, rid, ...);
+	frame ack = read_frame_wait(loop, aio, watch_id);
+
+	if (ack.status == ERROR && ack.trace == "file.aio" && ack.msg == "queue full") {
+		// Backpressure: wait for progress (completions) before retrying.
+		do {
+			frame f = read_frame_wait(loop, aio, watch_id);
+			// process f (ACK/EV_DONE/ERROR)
+		} while (!saw_ev_done_for_any_job());
+		continue; // retry submit
+	}
+
+	break;
+}
+```
+
 ## Notes
 
 - This version returns READ data inline in completion frames. Large reads may be truncated by the runtime.

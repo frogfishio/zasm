@@ -427,6 +427,234 @@ int main(void) {
   }
   close(s);
 
+  {
+    // Client sends a chunked request body; server should expose a decoded STREAM body handle.
+    s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) {
+      perror("socket");
+      return 1;
+    }
+    memset(&sa, 0, sizeof(sa));
+    sa.sin_family = AF_INET;
+    sa.sin_port = htons((uint16_t)bound_port);
+    sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(s, (struct sockaddr *)&sa, (socklen_t)sizeof(sa)) != 0) {
+      perror("connect");
+      close(s);
+      return 1;
+    }
+  const char creq1[] = "POST /chunk HTTP/1.1\r\n"
+                       "Host: localhost\r\n"
+                       "Transfer-Encoding: chunked\r\n"
+                       "Content-Type: text/plain\r\n"
+                       "\r\n";
+  const char cbody[] = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+  if (send(s, creq1, sizeof(creq1) - 1, 0) != (ssize_t)(sizeof(creq1) - 1)) {
+    perror("send");
+    close(s);
+    return 1;
+  }
+  if (send(s, cbody, sizeof(cbody) - 1, 0) != (ssize_t)(sizeof(cbody) - 1)) {
+    perror("send");
+    close(s);
+    return 1;
+  }
+
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
+  if (rn < 0) {
+    fprintf(stderr, "EV_REQUEST(chunked) read failed: %d\n", rn);
+    close(s);
+    return 1;
+  }
+  if (!zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 100) {
+    fprintf(stderr, "unexpected event for chunked\n");
+    close(s);
+    return 1;
+  }
+
+  // Parse body_kind + body handle from EV_REQUEST payload.
+  uint32_t poff = 0;
+  if (z.payload_len < 8) {
+    fprintf(stderr, "bad EV_REQUEST payload (chunked)\n");
+    close(s);
+    return 1;
+  }
+  poff += 8; // listener_id + flags
+  for (int i = 0; i < 4; i++) {
+    if (poff + 4u > z.payload_len) {
+      fprintf(stderr, "bad EV_REQUEST payload (chunked strings)\n");
+      close(s);
+      return 1;
+    }
+    uint32_t ln = zi_zcl1_read_u32(z.payload + poff);
+    poff += 4;
+    if (poff + ln > z.payload_len) {
+      fprintf(stderr, "bad EV_REQUEST payload (chunked string len)\n");
+      close(s);
+      return 1;
+    }
+    poff += ln;
+  }
+  if (poff + 16u + 4u + 4u > z.payload_len) {
+    fprintf(stderr, "bad EV_REQUEST payload (chunked peer)\n");
+    close(s);
+    return 1;
+  }
+  poff += 16;
+  poff += 4;
+  uint32_t hc = zi_zcl1_read_u32(z.payload + poff);
+  poff += 4;
+  for (uint32_t i = 0; i < hc; i++) {
+    if (poff + 4u > z.payload_len) {
+      fprintf(stderr, "bad EV_REQUEST payload (chunked hdr name len)\n");
+      close(s);
+      return 1;
+    }
+    uint32_t nlen = zi_zcl1_read_u32(z.payload + poff);
+    poff += 4;
+    if (poff + nlen + 4u > z.payload_len) {
+      fprintf(stderr, "bad EV_REQUEST payload (chunked hdr name)\n");
+      close(s);
+      return 1;
+    }
+    poff += nlen;
+    uint32_t vlen = zi_zcl1_read_u32(z.payload + poff);
+    poff += 4;
+    if (poff + vlen > z.payload_len) {
+      fprintf(stderr, "bad EV_REQUEST payload (chunked hdr val)\n");
+      close(s);
+      return 1;
+    }
+    poff += vlen;
+  }
+  if (poff + 4u > z.payload_len) {
+    fprintf(stderr, "bad EV_REQUEST payload (chunked body_kind)\n");
+    close(s);
+    return 1;
+  }
+  uint32_t body_kind = zi_zcl1_read_u32(z.payload + poff);
+  poff += 4;
+  if (body_kind != 2) {
+    fprintf(stderr, "expected chunked body_kind=2, got %u\n", body_kind);
+    close(s);
+    return 1;
+  }
+  if (poff + 4u > z.payload_len) {
+    fprintf(stderr, "bad EV_REQUEST payload (chunked body_handle)\n");
+    close(s);
+    return 1;
+  }
+  zi_handle_t body_h = (zi_handle_t)(int32_t)zi_zcl1_read_u32(z.payload + poff);
+  if (body_h < 3) {
+    fprintf(stderr, "expected chunked body handle, got %d\n", body_h);
+    close(s);
+    return 1;
+  }
+
+  // WATCH body handle for readability so sys_loop_poll_once can block.
+  {
+    uint8_t wpl[20];
+    write_u32le(wpl + 0, (uint32_t)body_h);
+    write_u32le(wpl + 4, 0x1u); // readable
+    write_u64le(wpl + 8, 2u);
+    write_u32le(wpl + 16, 0u);
+
+    uint8_t wfr[128];
+    int wfn = zi_zcl1_write_ok(wfr, (uint32_t)sizeof(wfr), (uint16_t)ZI_SYS_LOOP_OP_WATCH, 2, wpl, (uint32_t)sizeof(wpl));
+    if (wfn <= 0 || zi_write(loop_h, (zi_ptr_t)(uintptr_t)wfr, (zi_size32_t)wfn) != wfn) {
+      fprintf(stderr, "WATCH(body) write failed\n");
+      close(s);
+      return 1;
+    }
+    uint8_t wbuf[256];
+    int wrn = read_full_frame(loop_h, 0, wbuf, (uint32_t)sizeof(wbuf));
+    if (wrn < 0) {
+      fprintf(stderr, "WATCH(body) read failed: %d\n", wrn);
+      close(s);
+      return 1;
+    }
+    zi_zcl1_frame wz;
+    uint32_t wst = zi_zcl1_read_u32(wbuf + 12);
+    if (!zi_zcl1_parse(wbuf, (uint32_t)wrn, &wz) || wz.op != (uint16_t)ZI_SYS_LOOP_OP_WATCH || wst != 1) {
+      fprintf(stderr, "unexpected WATCH(body) response\n");
+      close(s);
+      return 1;
+    }
+  }
+
+  char got_body[64];
+  memset(got_body, 0, sizeof(got_body));
+  uint32_t got_n = 0;
+  for (;;) {
+    int32_t n = zi_read(body_h, (zi_ptr_t)(uintptr_t)(got_body + got_n), (zi_size32_t)(sizeof(got_body) - 1 - got_n));
+    if (n == ZI_E_AGAIN) {
+      int pr = sys_loop_poll_once(loop_h, 1000u);
+      if (pr < 0) {
+        fprintf(stderr, "POLL(body) failed: %d\n", pr);
+        close(s);
+        return 1;
+      }
+      continue;
+    }
+    if (n < 0) {
+      fprintf(stderr, "body read failed: %d\n", n);
+      close(s);
+      return 1;
+    }
+    if (n == 0) break;
+    got_n += (uint32_t)n;
+    if (got_n >= sizeof(got_body) - 1) break;
+  }
+  if (strcmp(got_body, "hello world") != 0) {
+    fprintf(stderr, "unexpected decoded chunked body: '%s'\n", got_body);
+    close(s);
+    return 1;
+  }
+  (void)zi_end(body_h);
+
+  // RESPOND_INLINE
+  uint8_t rfr2[256];
+  uint8_t rpl2[64];
+  uint32_t roff2 = 0;
+  write_u32le(rpl2 + roff2, 200);
+  roff2 += 4;
+  write_u32le(rpl2 + roff2, 0);
+  roff2 += 4;
+  write_u32le(rpl2 + roff2, 0); // header_count
+  roff2 += 4;
+  const char okb[] = "ok";
+  write_u32le(rpl2 + roff2, (uint32_t)strlen(okb));
+  roff2 += 4;
+  memcpy(rpl2 + roff2, okb, strlen(okb));
+  roff2 += (uint32_t)strlen(okb);
+  fn = zi_zcl1_write_ok(rfr2, (uint32_t)sizeof(rfr2), 11, z.rid, rpl2, roff2);
+  if (fn <= 0 || zi_write(h, (zi_ptr_t)(uintptr_t)rfr2, (zi_size32_t)fn) != fn) {
+    fprintf(stderr, "RESPOND_INLINE(chunked) write failed\n");
+    close(s);
+    return 1;
+  }
+  rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
+  if (rn < 0 || !zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 11) {
+    fprintf(stderr, "RESPOND_INLINE(chunked) ack read failed\n");
+    close(s);
+    return 1;
+  }
+
+  memset(respbuf, 0, sizeof(respbuf));
+  nrcv = recv(s, respbuf, sizeof(respbuf) - 1, 0);
+  if (nrcv <= 0) {
+    fprintf(stderr, "client recv(chunked) failed\n");
+    close(s);
+    return 1;
+  }
+  if (strstr(respbuf, "HTTP/1.1 200") == NULL || strstr(respbuf, "ok") == NULL) {
+    fprintf(stderr, "unexpected http response (chunked): %s\n", respbuf);
+    close(s);
+    return 1;
+  }
+    close(s);
+  }
+
   // FETCH: spin up a tiny local HTTP server in a child.
   int srv = socket(AF_INET, SOCK_STREAM, 0);
   if (srv < 0) {
@@ -572,6 +800,206 @@ int main(void) {
   int wstatus = 0;
   (void)waitpid(pid, &wstatus, 0);
   close(srv);
+
+  // FETCH: chunked response body should be exposed as a STREAM (decoded).
+  {
+    int srv3 = socket(AF_INET, SOCK_STREAM, 0);
+    if (srv3 < 0) {
+      perror("socket");
+      return 1;
+    }
+    struct sockaddr_in faddr3;
+    memset(&faddr3, 0, sizeof(faddr3));
+    faddr3.sin_family = AF_INET;
+    faddr3.sin_port = htons(0);
+    faddr3.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (bind(srv3, (struct sockaddr *)&faddr3, (socklen_t)sizeof(faddr3)) != 0) {
+      perror("bind");
+      close(srv3);
+      return 1;
+    }
+    if (listen(srv3, 1) != 0) {
+      perror("listen");
+      close(srv3);
+      return 1;
+    }
+    struct sockaddr_in fbound3;
+    socklen_t fblen3 = (socklen_t)sizeof(fbound3);
+    if (getsockname(srv3, (struct sockaddr *)&fbound3, &fblen3) != 0) {
+      perror("getsockname");
+      close(srv3);
+      return 1;
+    }
+    uint32_t fport3 = (uint32_t)ntohs(fbound3.sin_port);
+
+    pid_t pid3 = fork();
+    if (pid3 < 0) {
+      perror("fork");
+      close(srv3);
+      return 1;
+    }
+    if (pid3 == 0) {
+      int c = accept(srv3, NULL, NULL);
+      if (c < 0) _exit(2);
+      char rb[1024];
+      (void)recv(c, rb, sizeof(rb), 0);
+      const char hdr[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n";
+      const char body[] = "7\r\nchunked\r\n0\r\n\r\n";
+      (void)send(c, hdr, (size_t)(sizeof(hdr) - 1), 0);
+      (void)send(c, body, (size_t)(sizeof(body) - 1), 0);
+      close(c);
+      close(srv3);
+      _exit(0);
+    }
+
+    char url3[128];
+    snprintf(url3, sizeof(url3), "http://127.0.0.1:%u/x", fport3);
+    uint8_t fpl3[512];
+    off = 0;
+    const char mget3[] = "GET";
+    write_u32le(fpl3 + off, (uint32_t)strlen(mget3));
+    off += 4;
+    memcpy(fpl3 + off, mget3, strlen(mget3));
+    off += (uint32_t)strlen(mget3);
+    write_u32le(fpl3 + off, (uint32_t)strlen(url3));
+    off += 4;
+    memcpy(fpl3 + off, url3, strlen(url3));
+    off += (uint32_t)strlen(url3);
+    write_u32le(fpl3 + off, 0); // header_count
+    off += 4;
+    write_u32le(fpl3 + off, 0); // body_kind none
+    off += 4;
+
+    fn = zi_zcl1_write_ok(rfr, (uint32_t)sizeof(rfr), 3, 124, fpl3, off);
+    if (fn <= 0) {
+      fprintf(stderr, "failed to build FETCH(chunked) frame\n");
+      close(srv3);
+      return 1;
+    }
+    if (zi_write(h, (zi_ptr_t)(uintptr_t)rfr, (zi_size32_t)fn) != fn) {
+      fprintf(stderr, "FETCH(chunked) write failed\n");
+      close(srv3);
+      return 1;
+    }
+
+    rn = read_full_frame(h, loop_h, buf, (uint32_t)sizeof(buf));
+    if (rn < 0) {
+      fprintf(stderr, "FETCH(chunked) read failed: %d\n", rn);
+      close(srv3);
+      return 1;
+    }
+    if (!zi_zcl1_parse(buf, (uint32_t)rn, &z) || z.op != 3) {
+      fprintf(stderr, "unexpected FETCH(chunked) response\n");
+      close(srv3);
+      return 1;
+    }
+    uint32_t st3 = zi_zcl1_read_u32(z.payload + 0);
+    if (st3 != 200) {
+      fprintf(stderr, "unexpected fetch(chunked) status: %u\n", st3);
+      close(srv3);
+      return 1;
+    }
+    uint32_t hoff3 = 8;
+    uint32_t hcnt3 = zi_zcl1_read_u32(z.payload + 4);
+    for (uint32_t i = 0; i < hcnt3; i++) {
+      uint32_t nl = zi_zcl1_read_u32(z.payload + hoff3);
+      hoff3 += 4 + nl;
+      uint32_t vl = zi_zcl1_read_u32(z.payload + hoff3);
+      hoff3 += 4 + vl;
+      if (hoff3 > z.payload_len) {
+        fprintf(stderr, "bad fetch(chunked) headers\n");
+        close(srv3);
+        return 1;
+      }
+    }
+    if (hoff3 + 4 > z.payload_len) {
+      fprintf(stderr, "missing fetch(chunked) body_kind\n");
+      close(srv3);
+      return 1;
+    }
+    uint32_t bk3 = zi_zcl1_read_u32(z.payload + hoff3);
+    hoff3 += 4;
+    if (bk3 != 2) {
+      fprintf(stderr, "expected stream fetch(chunked) body\n");
+      close(srv3);
+      return 1;
+    }
+    if (hoff3 + 4 > z.payload_len) {
+      fprintf(stderr, "missing fetch(chunked) body_handle\n");
+      close(srv3);
+      return 1;
+    }
+    zi_handle_t fb = (zi_handle_t)(int32_t)zi_zcl1_read_u32(z.payload + hoff3);
+    if (fb < 3) {
+      fprintf(stderr, "bad fetch(chunked) body_handle\n");
+      close(srv3);
+      return 1;
+    }
+
+    // Watch body handle so sys_loop_poll_once can block.
+    {
+      uint8_t wpl[20];
+      write_u32le(wpl + 0, (uint32_t)fb);
+      write_u32le(wpl + 4, 0x1u); // readable
+      write_u64le(wpl + 8, 100u);
+      write_u32le(wpl + 16, 0u);
+      uint8_t wfr[128];
+      int wfn = zi_zcl1_write_ok(wfr, (uint32_t)sizeof(wfr), (uint16_t)ZI_SYS_LOOP_OP_WATCH, 100, wpl, (uint32_t)sizeof(wpl));
+      if (wfn <= 0 || zi_write(loop_h, (zi_ptr_t)(uintptr_t)wfr, (zi_size32_t)wfn) != wfn) {
+        fprintf(stderr, "WATCH(fetch body) write failed\n");
+        close(srv3);
+        return 1;
+      }
+      uint8_t wbuf[256];
+      int wrn = read_full_frame(loop_h, 0, wbuf, (uint32_t)sizeof(wbuf));
+      if (wrn < 0) {
+        fprintf(stderr, "WATCH(fetch body) read failed: %d\n", wrn);
+        close(srv3);
+        return 1;
+      }
+      zi_zcl1_frame wz;
+      uint32_t wst = zi_zcl1_read_u32(wbuf + 12);
+      if (!zi_zcl1_parse(wbuf, (uint32_t)wrn, &wz) || wz.op != (uint16_t)ZI_SYS_LOOP_OP_WATCH || wst != 1) {
+        fprintf(stderr, "unexpected WATCH(fetch body) response\n");
+        close(srv3);
+        return 1;
+      }
+    }
+
+    char fbtxt[64];
+    memset(fbtxt, 0, sizeof(fbtxt));
+    uint32_t fbo = 0;
+    for (;;) {
+      int32_t nread = zi_read(fb, (zi_ptr_t)(uintptr_t)(fbtxt + fbo), (zi_size32_t)(sizeof(fbtxt) - 1 - fbo));
+      if (nread == ZI_E_AGAIN) {
+        int pr = sys_loop_poll_once(loop_h, 1000u);
+        if (pr < 0) {
+          fprintf(stderr, "POLL(fetch body) failed: %d\n", pr);
+          close(srv3);
+          return 1;
+        }
+        continue;
+      }
+      if (nread < 0) {
+        fprintf(stderr, "fetch body read failed: %d\n", nread);
+        close(srv3);
+        return 1;
+      }
+      if (nread == 0) break;
+      fbo += (uint32_t)nread;
+      if (fbo >= sizeof(fbtxt) - 1) break;
+    }
+    if (strcmp(fbtxt, "chunked") != 0) {
+      fprintf(stderr, "unexpected fetch(chunked) body: '%s'\n", fbtxt);
+      close(srv3);
+      return 1;
+    }
+    (void)zi_end(fb);
+
+    int wstatus3 = 0;
+    (void)waitpid(pid3, &wstatus3, 0);
+    close(srv3);
+  }
 
   // FETCH with streaming request body (body_kind=2).
   int srv2 = socket(AF_INET, SOCK_STREAM, 0);

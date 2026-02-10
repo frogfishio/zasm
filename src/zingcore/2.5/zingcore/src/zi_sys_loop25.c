@@ -323,13 +323,19 @@ static int handle_poll(zi_sys_loop_handle_ctx *h, const zi_zcl1_frame *z) {
 
   struct pollfd *pfds = NULL;
   zi_sys_loop_watch **watch_ptrs = NULL;
+  const zi_handle_poll_ops_v1 **poll_ops = NULL;
+  void **poll_ctx = NULL;
 
   if (watch_count) {
     pfds = (struct pollfd *)calloc((size_t)watch_count, sizeof(struct pollfd));
     watch_ptrs = (zi_sys_loop_watch **)calloc((size_t)watch_count, sizeof(zi_sys_loop_watch *));
-    if (!pfds || !watch_ptrs) {
+    poll_ops = (const zi_handle_poll_ops_v1 **)calloc((size_t)watch_count, sizeof(const zi_handle_poll_ops_v1 *));
+    poll_ctx = (void **)calloc((size_t)watch_count, sizeof(void *));
+    if (!pfds || !watch_ptrs || !poll_ops || !poll_ctx) {
       free(pfds);
       free(watch_ptrs);
+      free(poll_ops);
+      free(poll_ctx);
       return emit_error(h, z, "sys.loop", "oom");
     }
 
@@ -337,28 +343,57 @@ static int handle_poll(zi_sys_loop_handle_ctx *h, const zi_zcl1_frame *z) {
     for (int i = 0; i < (int)ZI_SYS_LOOP_MAX_WATCH; i++) {
       if (!h->watches[i].in_use) continue;
       int fd = -1;
+      const zi_handle_poll_ops_v1 *pops = NULL;
+      void *pctx = NULL;
       if (!zi_handle25_poll_fd(h->watches[i].h, &fd)) continue;
+      (void)zi_handle25_poll_ops(h->watches[i].h, &pops, &pctx);
+
+      // For handles with custom readiness, treat the fd as a wakeup notifier and
+      // only poll for readability to wake the loop.
       short events = 0;
-      if (h->watches[i].events & ZI_SYS_LOOP_E_READABLE) events |= POLLIN;
-      if (h->watches[i].events & ZI_SYS_LOOP_E_WRITABLE) events |= POLLOUT;
+      if (pops && pops->get_ready) {
+        events |= POLLIN;
+      } else {
+        if (h->watches[i].events & ZI_SYS_LOOP_E_READABLE) events |= POLLIN;
+        if (h->watches[i].events & ZI_SYS_LOOP_E_WRITABLE) events |= POLLOUT;
+      }
       // hup/error are reported via revents.
       pfds[j].fd = fd;
       pfds[j].events = events;
       pfds[j].revents = 0;
       watch_ptrs[j] = &h->watches[i];
+      poll_ops[j] = pops;
+      poll_ctx[j] = pctx;
       j++;
     }
     watch_count = j;
   }
 
+  // If any custom-ready watch is already ready, force an immediate poll(0) so
+  // level-triggered readiness is reported without blocking.
+  int timeout_poll_ms = timeout_eff_ms;
+  if (watch_count && timeout_poll_ms != 0) {
+    for (uint32_t i = 0; i < watch_count; i++) {
+      if (!watch_ptrs[i]) continue;
+      if (!poll_ops[i] || !poll_ops[i]->get_ready) continue;
+      uint32_t ready = poll_ops[i]->get_ready(poll_ctx[i]);
+      if (ready & watch_ptrs[i]->events) {
+        timeout_poll_ms = 0;
+        break;
+      }
+    }
+  }
+
   int poll_rc = 0;
   if (watch_count) {
-    poll_rc = poll(pfds, (nfds_t)watch_count, timeout_eff_ms);
+    poll_rc = poll(pfds, (nfds_t)watch_count, timeout_poll_ms);
     if (poll_rc < 0) {
       if (errno == EINTR) poll_rc = 0;
       else {
         free(pfds);
         free(watch_ptrs);
+        free(poll_ops);
+        free(poll_ctx);
         return emit_error(h, z, "sys.loop", "poll failed");
       }
     }
@@ -395,7 +430,19 @@ static int handle_poll(zi_sys_loop_handle_ctx *h, const zi_zcl1_frame *z) {
   // Emit READY events.
   for (uint32_t i = 0; i < watch_count && emitted < max_events; i++) {
     if (!watch_ptrs[i]) continue;
-    uint32_t ev = map_poll_revents(pfds[i].revents, watch_ptrs[i]->events);
+    uint32_t ev = 0;
+    if (poll_ops[i] && poll_ops[i]->get_ready) {
+      // Drain wakeups so future polls can block.
+      if ((pfds[i].revents & POLLIN) && poll_ops[i]->drain_wakeup) {
+        poll_ops[i]->drain_wakeup(poll_ctx[i]);
+      }
+      ev = poll_ops[i]->get_ready(poll_ctx[i]);
+      ev &= watch_ptrs[i]->events;
+      // Preserve error/hup reporting from the underlying fd.
+      ev |= (map_poll_revents(pfds[i].revents, ZI_SYS_LOOP_E_ERROR | ZI_SYS_LOOP_E_HUP) & (ZI_SYS_LOOP_E_ERROR | ZI_SYS_LOOP_E_HUP));
+    } else {
+      ev = map_poll_revents(pfds[i].revents, watch_ptrs[i]->events);
+    }
     if (ev == 0) continue;
 
     // event entry
@@ -462,6 +509,8 @@ static int handle_poll(zi_sys_loop_handle_ctx *h, const zi_zcl1_frame *z) {
   int n = zi_zcl1_write_ok(fr, (uint32_t)sizeof(fr), (uint16_t)z->op, z->rid, payload, off);
   free(pfds);
   free(watch_ptrs);
+  free(poll_ops);
+  free(poll_ctx);
   if (n < 0) return emit_error(h, z, "sys.loop", "response too large");
   return append_out(h, fr, (uint32_t)n);
 #else

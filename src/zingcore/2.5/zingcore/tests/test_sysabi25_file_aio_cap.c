@@ -6,6 +6,8 @@
 #include "zi_sysabi25.h"
 #include "zi_zcl1.h"
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +98,28 @@ static int loop_watch(zi_handle_t loop_h, zi_handle_t target_h, uint32_t events,
   return expect_ok_frame(fr, have, (uint16_t)ZI_SYS_LOOP_OP_WATCH, 1u);
 }
 
+static int loop_unwatch(zi_handle_t loop_h, uint64_t watch_id) {
+  uint8_t unwatch_pl[8];
+  write_u64le(unwatch_pl + 0, watch_id);
+
+  uint8_t req[24 + sizeof(unwatch_pl)];
+  build_zcl1_req(req, (uint16_t)ZI_SYS_LOOP_OP_UNWATCH, 3u, unwatch_pl, (uint32_t)sizeof(unwatch_pl));
+  if (write_all_handle(loop_h, req, (uint32_t)sizeof(req)) != 0) return 0;
+
+  uint8_t fr[256];
+  uint32_t have = 0;
+  for (;;) {
+    int r = read_some(loop_h, fr, (uint32_t)sizeof(fr), &have);
+    if (r == ZI_E_AGAIN) continue;
+    if (r <= 0) return 0;
+    if (have >= 24) {
+      uint32_t pl = zi_zcl1_read_u32(fr + 20);
+      if (have >= 24u + pl) break;
+    }
+  }
+  return expect_ok_frame(fr, have, (uint16_t)ZI_SYS_LOOP_OP_UNWATCH, 3u);
+}
+
 static int loop_wait_readable(zi_handle_t loop_h, zi_handle_t target_h, uint64_t watch_id, uint32_t timeout_ms) {
   uint8_t poll_pl[8];
   zi_zcl1_write_u32(poll_pl + 0, 8u); // max_events
@@ -148,10 +172,61 @@ static int loop_wait_readable(zi_handle_t loop_h, zi_handle_t target_h, uint64_t
   return 0;
 }
 
+static int loop_wait_writable(zi_handle_t loop_h, zi_handle_t target_h, uint64_t watch_id, uint32_t timeout_ms) {
+  uint8_t poll_pl[8];
+  zi_zcl1_write_u32(poll_pl + 0, 8u); // max_events
+  zi_zcl1_write_u32(poll_pl + 4, timeout_ms);
+
+  uint8_t req[24 + sizeof(poll_pl)];
+  build_zcl1_req(req, (uint16_t)ZI_SYS_LOOP_OP_POLL, 2u, poll_pl, (uint32_t)sizeof(poll_pl));
+  if (write_all_handle(loop_h, req, (uint32_t)sizeof(req)) != 0) return 0;
+
+  uint8_t fr[65536];
+  uint32_t have = 0;
+  for (;;) {
+    int r = read_some(loop_h, fr, (uint32_t)sizeof(fr), &have);
+    if (r == ZI_E_AGAIN) continue;
+    if (r <= 0) return 0;
+    if (have >= 24) {
+      uint32_t pl = zi_zcl1_read_u32(fr + 20);
+      if (have >= 24u + pl) break;
+    }
+  }
+
+  zi_zcl1_frame z;
+  if (!zi_zcl1_parse(fr, have, &z)) return 0;
+  if (z.op != (uint16_t)ZI_SYS_LOOP_OP_POLL || z.rid != 2u) return 0;
+  if (zi_zcl1_read_u32(fr + 12) != 1u) return 0;
+  if (z.payload_len < 16u) return 0;
+
+  const uint8_t *pl = z.payload;
+  uint32_t ver = zi_zcl1_read_u32(pl + 0);
+  uint32_t n = zi_zcl1_read_u32(pl + 8);
+  if (ver != 1u) return 0;
+
+  const uint8_t *ev = pl + 16;
+  uint32_t left = z.payload_len - 16u;
+  for (uint32_t i = 0; i < n; i++) {
+    if (left < 32u) break;
+    uint32_t kind = zi_zcl1_read_u32(ev + 0);
+    uint32_t events = zi_zcl1_read_u32(ev + 4);
+    uint32_t handle = zi_zcl1_read_u32(ev + 8);
+    uint64_t id = read_u64le(ev + 16);
+    if (kind == 1u && handle == (uint32_t)target_h && id == watch_id && (events & 0x2u)) {
+      return 1;
+    }
+    ev += 32u;
+    left -= 32u;
+  }
+  return 0;
+}
+
 static int read_full_frame_wait(zi_handle_t loop_h, zi_handle_t h, uint64_t watch_id, uint8_t *out, uint32_t cap, uint32_t timeout_ms) {
   uint32_t have = 0;
   while (have < 24) {
-    int32_t r = zi_read(h, (zi_ptr_t)(uintptr_t)(out + have), (zi_size32_t)(cap - have));
+    uint32_t want = 24u - have;
+    if (want > (cap - have)) want = cap - have;
+    int32_t r = zi_read(h, (zi_ptr_t)(uintptr_t)(out + have), (zi_size32_t)want);
     if (r == ZI_E_AGAIN) {
       if (!loop_wait_readable(loop_h, h, watch_id, timeout_ms)) return 0;
       continue;
@@ -211,6 +286,12 @@ int main(void) {
     perror("setenv");
     return 1;
   }
+
+  // Used by the backpressure readiness smoke test (kept open until after zi_end(aio_h)
+  // so the file/aio worker can't re-block on FIFO opens during shutdown).
+  int fifo_wfd = -1;
+  char fifo_host_keep[512];
+  int have_fifo_keep = 0;
 
   // Open file/aio
   uint8_t open_req[40];
@@ -658,8 +739,167 @@ int main(void) {
     return 1;
   }
 
+  // ---- backpressure readiness smoke: writable means queue has space ----
+  {
+    const uint64_t WATCH_AIO_W = 0xA10A10A2ull;
+    if (!loop_watch(loop_h, aio_h, 0x2u, WATCH_AIO_W)) {
+      fprintf(stderr, "loop WATCH aio(writable) failed\n");
+      return 1;
+    }
+
+    char fifo_host[512];
+    snprintf(fifo_host, sizeof(fifo_host), "%s/fifo", root);
+    (void)unlink(fifo_host);
+    if (mkfifo(fifo_host, 0600) != 0) {
+      perror("mkfifo");
+      return 1;
+    }
+
+    if (!have_fifo_keep) {
+      strncpy(fifo_host_keep, fifo_host, sizeof(fifo_host_keep));
+      fifo_host_keep[sizeof(fifo_host_keep) - 1] = '\0';
+      have_fifo_keep = 1;
+    }
+
+    const char *fifo_guest = "/fifo";
+    uint8_t fifo_open_pl[20];
+    write_u64le(fifo_open_pl + 0, (uint64_t)(uintptr_t)fifo_guest);
+    write_u32le(fifo_open_pl + 8, (uint32_t)strlen(fifo_guest));
+    write_u32le(fifo_open_pl + 12, ZI_FILE_O_READ);
+    write_u32le(fifo_open_pl + 16, 0);
+
+    uint32_t rid = 1000u;
+
+    // Prime the worker: enqueue one FIFO OPEN, then give the worker a moment to
+    // dequeue it and block on opening the FIFO (no writer yet). This makes the
+    // subsequent queue-full + not-writable state stable instead of racy.
+    build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_OPEN, rid, fifo_open_pl, (uint32_t)sizeof(fifo_open_pl));
+    if (write_all_handle(aio_h, req, 24u + (uint32_t)sizeof(fifo_open_pl)) != 0) {
+      fprintf(stderr, "aio FIFO OPEN write failed\n");
+      return 1;
+    }
+
+    n = read_full_frame_wait(loop_h, aio_h, WATCH_AIO, fr, (uint32_t)sizeof(fr), 1000u);
+    if (n <= 0) {
+      fprintf(stderr, "aio FIFO OPEN ack missing\n");
+      return 1;
+    }
+    if (!zi_zcl1_parse(fr, (uint32_t)n, &z) || z.op != (uint16_t)ZI_FILE_AIO_OP_OPEN || z.rid != rid) {
+      fprintf(stderr, "aio FIFO OPEN ack bad frame\n");
+      return 1;
+    }
+    if (zi_zcl1_read_u32(fr + 12) == 0u) {
+      fprintf(stderr, "aio FIFO OPEN unexpected error\n");
+      return 1;
+    }
+    rid++;
+    usleep(50 * 1000);
+
+    int saw_full = 0;
+    for (int i = 0; i < 5000; i++) {
+      build_zcl1_req(req, (uint16_t)ZI_FILE_AIO_OP_OPEN, rid, fifo_open_pl, (uint32_t)sizeof(fifo_open_pl));
+      if (write_all_handle(aio_h, req, 24u + (uint32_t)sizeof(fifo_open_pl)) != 0) {
+        fprintf(stderr, "aio FIFO OPEN write failed\n");
+        return 1;
+      }
+
+      // Ack should be immediately available after zi_write.
+      n = read_full_frame_wait(loop_h, aio_h, WATCH_AIO, fr, (uint32_t)sizeof(fr), 1000u);
+      if (n <= 0) {
+        fprintf(stderr, "aio FIFO OPEN ack missing\n");
+        return 1;
+      }
+
+      if (!zi_zcl1_parse(fr, (uint32_t)n, &z) || z.op != (uint16_t)ZI_FILE_AIO_OP_OPEN || z.rid != rid) {
+        fprintf(stderr, "aio FIFO OPEN ack bad frame\n");
+        return 1;
+      }
+
+      if (zi_zcl1_read_u32(fr + 12) == 0u) {
+        // ERROR: parse trace/msg
+        const uint8_t *ep = z.payload;
+        if (z.payload_len < 12u) {
+          fprintf(stderr, "aio FIFO OPEN error short\n");
+          return 1;
+        }
+        uint32_t tlen = zi_zcl1_read_u32(ep + 0);
+        if (4u + tlen + 4u > z.payload_len) {
+          fprintf(stderr, "aio FIFO OPEN error bad trace\n");
+          return 1;
+        }
+        const char *trace = (const char *)(ep + 4);
+        uint32_t mlen = zi_zcl1_read_u32(ep + 4u + tlen);
+        if (4u + tlen + 4u + mlen + 4u > z.payload_len) {
+          fprintf(stderr, "aio FIFO OPEN error bad msg\n");
+          return 1;
+        }
+        const char *msgp = (const char *)(ep + 4u + tlen + 4u);
+
+        if (tlen == (uint32_t)strlen("file.aio") && mlen == (uint32_t)strlen("queue full") &&
+            memcmp(trace, "file.aio", tlen) == 0 && memcmp(msgp, "queue full", mlen) == 0) {
+          saw_full = 1;
+          break;
+        }
+
+        fprintf(stderr, "aio FIFO OPEN unexpected error\n");
+        return 1;
+      }
+
+      rid++;
+    }
+
+    if (!saw_full) {
+      fprintf(stderr, "aio did not reach queue full\n");
+      return 1;
+    }
+
+    // When full, writable readiness should not be reported.
+    if (loop_wait_writable(loop_h, aio_h, WATCH_AIO_W, 50u)) {
+      fprintf(stderr, "aio reported writable while full\n");
+      return 1;
+    }
+
+    // Unblock worker by opening the FIFO for write on the host side.
+    // Keep this writer open until after zi_end(aio_h) so the worker can't re-block
+    // processing queued FIFO OPEN jobs during shutdown.
+    if (fifo_wfd < 0) {
+      for (int attempt = 0; attempt < 200; attempt++) {
+        fifo_wfd = open(fifo_host, O_WRONLY | O_NONBLOCK);
+        if (fifo_wfd >= 0) break;
+        if (errno != ENXIO) break;
+        usleep(5 * 1000);
+      }
+    }
+    if (fifo_wfd < 0) {
+      perror("open fifo writer");
+      return 1;
+    }
+
+    // Drain some frames to let the worker dequeue and make progress.
+    for (int k = 0; k < 32; k++) {
+      n = read_full_frame_wait(loop_h, aio_h, WATCH_AIO, fr, (uint32_t)sizeof(fr), 1000u);
+      if (n <= 0) break;
+    }
+
+    // After progress, aio should become writable again.
+    if (!loop_wait_writable(loop_h, aio_h, WATCH_AIO_W, 1000u)) {
+      fprintf(stderr, "aio did not become writable after progress\n");
+      return 1;
+    }
+
+    // Note: do not close/unlink the FIFO here; keep it until after zi_end(aio_h).
+
+    if (!loop_unwatch(loop_h, WATCH_AIO_W)) {
+      fprintf(stderr, "loop UNWATCH aio(writable) failed\n");
+      return 1;
+    }
+  }
+
   (void)zi_end(loop_h);
   (void)zi_end(aio_h);
+
+  if (fifo_wfd >= 0) (void)close(fifo_wfd);
+  if (have_fifo_keep) (void)unlink(fifo_host_keep);
 
   printf("ok\n");
   return 0;

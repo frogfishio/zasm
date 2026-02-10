@@ -184,7 +184,11 @@ int got = read_frame_wait(loop, aio, watch_id, ack, sizeof(ack));
 uint8_t done[65536];
 got = read_frame_wait(loop, aio, watch_id, done, sizeof(done));
 
-// See abi/FILE_AIO_PROTOCOL.md for normative framing and parsing recipes.
+// Backpressure note:
+// - file/aio has a bounded submission queue.
+// - If you receive an immediate ERROR with msg "queue full", stop submitting new jobs,
+//   drain completions/events, and retry after observing progress.
+// See abi/FILE_AIO_PROTOCOL.md for normative framing, parsing recipes, and the backpressure contract.
 ```
 
 Sandboxing is still via env vars (`ZI_FS_ROOT`, `ZI_NET_ALLOW`), but the path is in params.
