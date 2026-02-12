@@ -52,6 +52,7 @@ mkdir -p \
   "$platform_out/docs/spec" \
   "$platform_out/docs/tools" \
   "$platform_out/docs/zingcore25" \
+  "$platform_out/docs/zingcore25/abi" \
   "$platform_out/schema/ir" \
   "$platform_out/conformance" \
   "$platform_out/examples"
@@ -115,6 +116,29 @@ done
 for f in README.md STABILITY.md MIGRATION.md; do
   if [ -f "$zing_root/$f" ]; then
     rsync -a "$zing_root/$f" "$platform_out/docs/zingcore25/$f"
+  fi
+done
+
+# Practical guest-side guide for sys/loop readiness usage.
+if [ -f "$zing_root/CAP_READINESS_MATRIX.md" ]; then
+  rsync -a "$zing_root/CAP_READINESS_MATRIX.md" "$platform_out/docs/zingcore25/CAP_READINESS_MATRIX.md"
+fi
+
+# Core protocol specs needed by host integrators and guest authors.
+for f in \
+  ABI_V2_5.md \
+  ZCL1_PROTOCOL.md \
+  ZI_CTL_PROTOCOL.md \
+  SYS_LOOP_PROTOCOL.md \
+  SYS_INFO_PROTOCOL.md \
+  TCP_PROTOCOL.md \
+  FILE_AIO_PROTOCOL.md \
+  ASYNC_DEFAULT_PROTOCOL.md \
+  EVENT_BUS_PROTOCOL.md \
+  EVENT_BUS_RPC_V1.md \
+  HOPPER_PROTOCOL.md; do
+  if [ -f "$zing_root/abi/$f" ]; then
+    rsync -a "$zing_root/abi/$f" "$platform_out/docs/zingcore25/abi/$f"
   fi
 done
 
