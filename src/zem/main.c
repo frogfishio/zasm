@@ -48,7 +48,7 @@ int zduel_main(int argc, char **argv);
 
 #include "zi_async_default25.h"
 #include "zi_event_bus25.h"
-#include "zi_file_fs25.h"
+#include "zi_file_aio25.h"
 #include "zi_net_tcp25.h"
 #include "zi_proc_argv25.h"
 #include "zi_proc_env25.h"
@@ -77,7 +77,7 @@ static void print_caps(FILE *out) {
   (void)zi_async_default25_register();
   (void)zi_async_default25_register_selectors();
   (void)zi_event_bus25_register();
-  (void)zi_file_fs25_register();
+  (void)zi_file_aio25_register();
   (void)zi_net_tcp25_register();
   (void)zi_proc_argv25_register();
   (void)zi_proc_env25_register();
